@@ -27,8 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Create data directory
-        run: mkdir -p data
+      - name: Pre-create artifact files
+        run: |
+          mkdir -p data
+          touch data/riskbot.db
+          touch data/runs.jsonl
+          ls -lah data
 
       - name: Run RiskBot
         id: riskbot
