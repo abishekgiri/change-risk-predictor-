@@ -43,25 +43,26 @@ jobs:
             --pr "$PR_NUMBER" \
             --repo "$REPO" \
             --post-comment
-      
+
       - name: Debug data files
         if: always()
-        run: ls -R data || true
-
-      - name: Upload RiskBot DB
+        run: |
+          pwd
+          ls -lah
+          ls -lah data || true
+      
+      - name: Upload RiskBot Data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: riskbot-data-pr-${{ github.event.pull_request.number }}-run-${{ github.run_id }}
-          path: data/riskbot.db
+          name: riskbot-data-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: |
+            data/riskbot.db
+            data/runs.jsonl
+          if-no-files-found: warn
 
-      - name: Upload RiskBot JSONL
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: riskbot-runs-pr-${{ github.event.pull_request.number }}-run-${{ github.run_id }}
-          path: data/runs.jsonl
-
-      - name: Fail job if HIGH risk
+      - name: Fail job if RiskBot failed
         if: steps.riskbot.outcome == 'failure'
-        run: exit 1
+        run: |
+          echo "RiskBot failed — blocking PR"
+          exit 1
