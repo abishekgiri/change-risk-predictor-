@@ -44,6 +44,10 @@ jobs:
             --repo "$REPO" \
             --post-comment
       
+      - name: Debug data files
+        if: always()
+        run: ls -R data || true
+
       - name: Upload RiskBot DB
         if: always()
         uses: actions/upload-artifact@v4
