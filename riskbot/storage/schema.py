@@ -1,17 +1,13 @@
 import sqlite3
-from riskbot.config import RISK_DB_PATH
 import os
+from riskbot.config import RISK_DB_PATH
 
 def init_db():
-    """Initialize the SQLite database and create tables if they don't exist."""
-    
-    # Ensure directory exists
     os.makedirs(os.path.dirname(RISK_DB_PATH), exist_ok=True)
-    
     conn = sqlite3.connect(RISK_DB_PATH)
     cursor = conn.cursor()
     
-    # Validation Run Table
+    # Runs Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pr_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

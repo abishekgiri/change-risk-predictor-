@@ -1,29 +1,16 @@
 import sqlite3
 import json
 import os
-from datetime import datetime
 from riskbot.config import RISK_DB_PATH, RISK_JSONL_PATH
 from riskbot.storage.schema import init_db
 
-def save_run(
-    repo: str,
-    pr_number: int,
-    base_sha: str,
-    head_sha: str,
-    score_data: dict,
-    features: dict
-):
-    """Save the run data to SQLite and JSONL."""
-    
-    # 1. Ensure DB exists
+def save_run(repo, pr_number, base_sha, head_sha, score_data, features):
     init_db()
     
-    # Prepare data
     risk_score = score_data["score"]
     risk_level = score_data["risk_level"]
     reasons_json = json.dumps(score_data["reasons"])
     features_json = json.dumps(features)
-    
     
     # 2. Writes to SQLite
     try:
@@ -46,20 +33,26 @@ def save_run(
     except Exception as e:
         print(f"Error saving to SQLite: {e}")
 
-    # 3. Write to JSONL (Redundancy / Training Set)
+    # 3. Write to JSONL
     try:
-        os.makedirs(os.path.dirname(RISK_JSONL_PATH), exist_ok=True)
-        record = {
-            "timestamp": datetime.now().isoformat(),
+        run_data = {
             "repo": repo,
-            "pr_number": pr_number,
-            "base_sha": base_sha,
-            "head_sha": head_sha,
-            "score_data": score_data,
-            "features": features
+            "pr": pr_number,
+            "base": base_sha,
+            "head": head_sha,
+            "score": risk_score,
+            "level": risk_level,
+            "reasons": score_data["reasons"],
+            "features": features,
+            "run_id": os.getenv("GITHUB_RUN_ID"),
+            "attempt": os.getenv("GITHUB_RUN_ATTEMPT")
         }
+        
         with open(RISK_JSONL_PATH, "a") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(run_data) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+            
         print(f"Appended run to JSONL: {RISK_JSONL_PATH}")
     except Exception as e:
         print(f"Error saving to JSONL: {e}")
