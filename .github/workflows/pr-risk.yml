@@ -27,6 +27,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Create data directory
+        run: mkdir -p data
+
       - name: Run RiskBot
         id: riskbot
         continue-on-error: true
@@ -36,6 +39,8 @@ jobs:
           REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RISK_DB_PATH: data/riskbot.db
+          RISK_JSONL_PATH: data/runs.jsonl
         run: |
           python -m riskbot.main \
             --base "$BASE_SHA" \
