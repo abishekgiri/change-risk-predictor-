@@ -24,16 +24,21 @@ def save_run(
     reasons_json = json.dumps(score_data["reasons"])
     features_json = json.dumps(features)
     
+    
     # 2. Writes to SQLite
     try:
         conn = sqlite3.connect(RISK_DB_PATH)
         cursor = conn.cursor()
         
+        # Metadata from Environment
+        github_run_id = os.getenv("GITHUB_RUN_ID")
+        github_run_attempt = os.getenv("GITHUB_RUN_ATTEMPT")
+        
         cursor.execute("""
-            INSERT INTO pr_runs 
-            (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json))
+            INSERT OR IGNORE INTO pr_runs 
+            (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt, schema_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """, (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt))
         
         conn.commit()
         conn.close()

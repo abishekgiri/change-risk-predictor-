@@ -15,15 +15,19 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pr_runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        repo TEXT,
-        pr_number INTEGER,
-        base_sha TEXT,
-        head_sha TEXT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        base_sha TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         risk_score INTEGER,
         risk_level TEXT,
         reasons_json TEXT,
-        features_json TEXT
+        features_json TEXT,
+        github_run_id TEXT,
+        github_run_attempt INTEGER,
+        schema_version INTEGER DEFAULT 1,
+        UNIQUE(repo, pr_number, head_sha)
     )
     """)
     
