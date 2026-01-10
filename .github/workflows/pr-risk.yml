@@ -42,11 +42,16 @@ jobs:
             --repo "$REPO" \
             --post-comment
       
-      - name: Upload RiskDB
-        uses: actions/upload-artifact@v4
+      - name: Upload RiskBot DB
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: riskbot-data-${{ github.run_id }}
-          path: |
-            data/riskbot.db
-            data/runs.jsonl
+          name: riskbot-data-pr-${{ github.event.pull_request.number }}-run-${{ github.run_id }}
+          path: data/riskbot.db
+
+      - name: Upload RiskBot JSONL
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riskbot-runs-pr-${{ github.event.pull_request.number }}-run-${{ github.run_id }}
+          path: data/runs.jsonl
