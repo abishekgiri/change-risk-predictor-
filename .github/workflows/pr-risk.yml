@@ -27,7 +27,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run risk scorer
+      - name: Run RiskBot
+        id: riskbot
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -55,3 +57,7 @@ jobs:
         with:
           name: riskbot-runs-pr-${{ github.event.pull_request.number }}-run-${{ github.run_id }}
           path: data/runs.jsonl
+
+      - name: Fail job if HIGH risk
+        if: steps.riskbot.outcome == 'failure'
+        run: exit 1
