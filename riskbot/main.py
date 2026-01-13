@@ -9,6 +9,7 @@ from riskbot.scoring.rules_v1 import calculate_score
 from riskbot.scoring.explain import generate_markdown_report
 from riskbot.storage.sqlite import save_run
 
+
 def main():
     parser = argparse.ArgumentParser(description="Calculate PR risk score")
     # ... (args stay same)
@@ -66,10 +67,17 @@ def main():
     print("\n--------------\n")
     
     # 5. Integration
+    # 5. Integration
     if args.post_comment:
         if args.pr and args.repo:
             print(f"Posting comment to {args.repo} PR #{args.pr}...")
-            post_comment(args.repo, args.pr, report)
+            try:
+                # Local import to avoid NameError if top-level import fails or is cyclic
+                from riskbot.integrations.github import post_comment
+                post_comment(args.repo, args.pr, report)
+            except Exception as e:
+                print(f"Error posting comment: {e}")
+                # Do NOT exit 1 here, we don't want to fail the build just because commenting failed
         else:
             print("Error: --pr and --repo are required for --post-comment")
             sys.exit(1)
