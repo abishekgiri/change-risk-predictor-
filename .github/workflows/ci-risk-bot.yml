@@ -1,4 +1,4 @@
-name: Risk Score Check
+name: RiskBot CI
 
 on:
   pull_request:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  risk_score_check:
-    name: risk_score_check
+  riskbot_ci:
+    name: RiskBot CI
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR
