@@ -1,4 +1,4 @@
-name: PR Risk Score V2
+name: Risk Score Check
 
 on:
   pull_request:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  risk_v2:
-    name: risk_v2
+  risk_score_check:
+    name: risk_score_check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR
