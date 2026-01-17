@@ -1,6 +1,7 @@
 from riskbot.config import (
     WEIGHT_CRITICAL_PATH, WEIGHT_HIGH_CHURN, 
-    WEIGHT_LARGE_CHANGE, WEIGHT_NO_TESTS
+    WEIGHT_LARGE_CHANGE, WEIGHT_NO_TESTS,
+    RISK_THRESHOLD_HIGH, RISK_THRESHOLD_MEDIUM
 )
 from typing import Dict, List, Any
 import pickle
@@ -103,5 +104,5 @@ def calculate_score(features: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "score": final_score,
         "reasons": reasons,
-        "risk_level": "HIGH" if final_score >= 70 else "MEDIUM" if final_score >= 40 else "LOW"
+        "risk_level": "HIGH" if final_score >= RISK_THRESHOLD_HIGH else "MEDIUM" if final_score >= RISK_THRESHOLD_MEDIUM else "LOW"
     }
