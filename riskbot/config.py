@@ -6,7 +6,7 @@ RISK_DB_PATH = os.getenv("RISK_DB_PATH", "data/riskbot.db")
 RISK_JSONL_PATH = os.getenv("RISK_JSONL_PATH", "data/runs.jsonl")
 
 # Risk thresholds
-RISK_THRESHOLD_HIGH = 70
+RISK_THRESHOLD_HIGH = 75
 RISK_THRESHOLD_MEDIUM = 40
 
 # Scoring weights
