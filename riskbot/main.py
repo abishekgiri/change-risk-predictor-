@@ -8,6 +8,7 @@ from riskbot.features.paths import get_critical_path_touches
 from riskbot.scoring.rules_v1 import calculate_score
 from riskbot.scoring.explain import generate_markdown_report
 from riskbot.storage.sqlite import save_run
+from riskbot.storage.sqlite import save_run
 
 
 def main():
