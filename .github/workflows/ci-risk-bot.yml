@@ -1,4 +1,4 @@
-name: PR Risk Score
+name: RiskBot CI
 
 on:
   pull_request:
@@ -9,7 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  risk:
+  riskbot_ci:
+    name: RiskBot CI
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR
@@ -27,13 +28,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run risk scorer
+      - name: Pre-create artifact files
+        run: |
+          mkdir -p data
+          touch data/riskbot.db
+          touch data/runs.jsonl
+          ls -lah data
+
+      - name: Run RiskBot
+        id: riskbot
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RISK_DB_PATH: data/riskbot.db
+          RISK_JSONL_PATH: data/runs.jsonl
         run: |
           python -m riskbot.main \
             --base "$BASE_SHA" \
@@ -41,3 +53,26 @@ jobs:
             --pr "$PR_NUMBER" \
             --repo "$REPO" \
             --post-comment
+
+      - name: Debug data files
+        if: always()
+        run: |
+          pwd
+          ls -lah
+          ls -lah data || true
+      
+      - name: Upload RiskBot Data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riskbot-data-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          path: |
+            data/riskbot.db
+            data/runs.jsonl
+          if-no-files-found: warn
+
+      - name: Fail job if RiskBot failed
+        if: steps.riskbot.outcome == 'failure'
+        run: |
+          echo "RiskBot failed — blocking PR"
+          exit 1
