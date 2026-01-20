@@ -22,23 +22,44 @@ jobs:
             exit 2
           fi
 
-          # Construct CI Endpoint URL (replace /webhooks/github with /ci/score)
-          # We do this to ensure we hit the correct endpoint even if secret has old path
-          BASE_URL=${WEBHOOK_URL%/webhooks/github}
+          # Robust URL construction
+          # Remove trailing slash if present
+          CLEAN_URL=${WEBHOOK_URL%/}
+          # Remove /webhooks/github suffix if present
+          BASE_URL=${CLEAN_URL%/webhooks/github}
+          # Ensure no trailing slash on base
+          BASE_URL=${BASE_URL%/}
+          
           CI_URL="${BASE_URL}/ci/score"
           
-          echo "Calling RiskBot at $CI_URL"
+          echo "Debug: Constructed URL: $CI_URL"
           
-          # Send JSON payload
-          resp=$(curl -sS -X POST "$CI_URL" \
+          # Send JSON payload and capture HTTP code
+          # -s: silent, -w: write-out http_code
+          response=$(curl -s -w "\n%{http_code}" -X POST "$CI_URL" \
             -H "Content-Type: application/json" \
             -d "{\"repo\": \"$REPO\", \"pr\": $PR}")
+            
+          # Split body and status (last line is status)
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
 
-          echo "Raw response:"
-          echo "$resp"
+          echo "HTTP Status: $http_code"
+          echo "Raw response: $body"
 
-          # Parse level using python one-liner to avoid YAML syntax issues with heredocs
-          level=$(echo "$resp" | python3 -c "import sys, json; data=json.load(sys.stdin); print((data.get('level') or data.get('risk_level') or '').upper())")
+          if [ "$http_code" != "200" ]; then
+             echo "❌ API Call Failed. Check your URL."
+             if [[ "$body" == *"DOCTYPE html"* ]]; then
+                 echo "⚠️ Response looks like HTML (likely ngrok error page). Check if Uvicorn is running."
+             fi
+             exit 1
+          fi
+
+          # Parse level using jq (Standard, robust)
+          # We try 'level' first, then 'risk_level'
+          level=$(echo "$body" | jq -r '.level // .risk_level // empty')
+          # Normalize to uppercase
+          level=$(echo "$level" | tr '[:lower:]' '[:upper:]')
 
           echo "Parsed level: $level"
 
@@ -50,6 +71,11 @@ jobs:
           if [ "$level" = "BYPASSED" ]; then
              echo "⚠️ HIGH risk but BYPASSED — passing"
              exit 0
+          fi
+          
+          if [ -z "$level" ]; then
+             echo "❌ Could not parse risk level from response."
+             exit 1
           fi
 
           echo "✅ $level risk — passing"
