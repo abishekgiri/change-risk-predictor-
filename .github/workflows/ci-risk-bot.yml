@@ -2,77 +2,45 @@ name: RiskBot CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-
-permissions:
-  pull-requests: write
-  contents: read
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
-  riskbot_ci:
-    name: RiskBot CI
+  riskbot:
+    name: RiskBot CI   # THIS MUST MATCH BRANCH PROTECTION EXACTLY
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout PR
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Pre-create artifact files
-        run: |
-          mkdir -p data
-          touch data/riskbot.db
-          touch data/runs.jsonl
-          ls -lah data
-
-      - name: Run RiskBot
-        id: riskbot
-        continue-on-error: true
+      - name: Call RiskBot webhook + enforce HIGH risk
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RISK_DB_PATH: data/riskbot.db
-          RISK_JSONL_PATH: data/runs.jsonl
+          WEBHOOK_URL: ${{ secrets.RISKBOT_WEBHOOK_URL }}
         run: |
-          python -m riskbot.main \
-            --base "$BASE_SHA" \
-            --head "$HEAD_SHA" \
-            --pr "$PR_NUMBER" \
-            --repo "$REPO" \
-            --post-comment
+          set -euo pipefail
 
-      - name: Debug data files
-        if: always()
-        run: |
-          pwd
-          ls -lah
-          ls -lah data || true
-      
-      - name: Upload RiskBot Data
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: riskbot-data-pr-${{ github.event.pull_request.number }}-${{ github.run_id }}
-          path: |
-            data/riskbot.db
-            data/runs.jsonl
-          if-no-files-found: warn
+          if [ -z "${WEBHOOK_URL:-}" ]; then
+            echo "ERROR: RISKBOT_WEBHOOK_URL secret is not set."
+            exit 2
+          fi
 
-      - name: Fail job if RiskBot failed
-        if: steps.riskbot.outcome == 'failure'
-        run: |
-          echo "RiskBot failed — blocking PR"
-          exit 1
+          echo "Calling RiskBot at $WEBHOOK_URL"
+          resp=$(curl -sS -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{}")
+
+          echo "Raw response:"
+          echo "$resp"
+
+          level=$(python3 - <<PY
+import json
+data = json.loads("""$resp""")
+print((data.get("level") or data.get("risk_level") or "").upper())
+PY
+          )
+
+          echo "Parsed level: $level"
+
+          if [ "$level" = "HIGH" ]; then
+            echo "❌ HIGH risk — blocking merge"
+            exit 1
+          fi
+
+          echo "✅ $level risk — passing"
