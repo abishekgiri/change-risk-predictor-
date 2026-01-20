@@ -24,6 +24,9 @@ jobs:
             exit 3
           fi
 
+          # Sanitize WEBHOOK_BASE: remove newlines/returns and leading/trailing whitespace
+          WEBHOOK_BASE=$(echo "$WEBHOOK_BASE" | tr -d '\n' | tr -d '\r' | xargs)
+
           # Ensure we hit the correct endpoint
           URL="${WEBHOOK_BASE%/}/ci/score"
           echo "Debug: Constructed URL: $URL"
