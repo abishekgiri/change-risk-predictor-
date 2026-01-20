@@ -2,80 +2,55 @@ name: RiskBot CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 jobs:
   riskbot:
     name: RiskBot CI
     runs-on: ubuntu-latest
+
     steps:
       - name: Call RiskBot CI Score
         env:
-          WEBHOOK_URL: ${{ secrets.RISKBOT_WEBHOOK_URL }}
+          WEBHOOK_BASE: ${{ secrets.RISKBOT_WEBHOOK_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
-          if [ -z "${WEBHOOK_URL:-}" ]; then
+          if [ -z "${WEBHOOK_BASE:-}" ]; then
             echo "ERROR: RISKBOT_WEBHOOK_URL secret is not set."
-            exit 2
+            exit 3
           fi
 
-          # Robust URL construction
-          # Remove trailing slash if present
-          CLEAN_URL=${WEBHOOK_URL%/}
-          # Remove /webhooks/github suffix if present
-          BASE_URL=${CLEAN_URL%/webhooks/github}
-          # Ensure no trailing slash on base
-          BASE_URL=${BASE_URL%/}
-          
-          CI_URL="${BASE_URL}/ci/score"
-          
-          echo "Debug: Constructed URL: $CI_URL"
-          
-          # Send JSON payload and capture HTTP code
-          # -s: silent, -w: write-out http_code
-          response=$(curl -s -w "\n%{http_code}" -X POST "$CI_URL" \
+          # Ensure we hit the correct endpoint
+          URL="${WEBHOOK_BASE%/}/ci/score"
+          echo "Debug: Constructed URL: $URL"
+
+          # Call RiskBot (ngrok header avoids ngrok HTML warning page)
+          resp="$(curl -sS -X POST "$URL" \
             -H "Content-Type: application/json" \
-            -d "{\"repo\": \"$REPO\", \"pr\": $PR}")
-            
-          # Split body and status (last line is status)
-          http_code=$(echo "$response" | tail -n1)
-          body=$(echo "$response" | sed '$d')
+            -H "ngrok-skip-browser-warning: true" \
+            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER,\"sha\":\"$SHA\"}")"
 
-          echo "HTTP Status: $http_code"
-          echo "Raw response: $body"
+          echo "Raw response:"
+          echo "$resp"
 
-          if [ "$http_code" != "200" ]; then
-             echo "❌ API Call Failed. Check your URL."
-             if [[ "$body" == *"DOCTYPE html"* ]]; then
-                 echo "⚠️ Response looks like HTML (likely ngrok error page). Check if Uvicorn is running."
-             fi
-             exit 1
+          # Parse level from common keys (supports level or risk_level)
+          level="$(echo "$resp" | jq -r '.level // .risk_level // .riskLevel // empty')"
+
+          if [ -z "$level" ]; then
+            echo "ERROR: Could not find risk level in response JSON."
+            echo "Expected keys: level or risk_level"
+            exit 4
           fi
 
-          # Parse level using jq (Standard, robust)
-          # We try 'level' first, then 'risk_level'
-          level=$(echo "$body" | jq -r '.level // .risk_level // empty')
-          # Normalize to uppercase
-          level=$(echo "$level" | tr '[:lower:]' '[:upper:]')
-
-          echo "Parsed level: $level"
+          echo "Parsed risk level: $level"
 
           if [ "$level" = "HIGH" ]; then
-            echo "❌ HIGH risk — blocking merge"
+            echo "HIGH risk => failing check"
             exit 1
           fi
 
-          if [ "$level" = "BYPASSED" ]; then
-             echo "⚠️ HIGH risk but BYPASSED — passing"
-             exit 0
-          fi
-          
-          if [ -z "$level" ]; then
-             echo "❌ Could not parse risk level from response."
-             exit 1
-          fi
-
-          echo "✅ $level risk — passing"
+          echo "Not HIGH => passing check"
