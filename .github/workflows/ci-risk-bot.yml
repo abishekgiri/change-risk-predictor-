@@ -2,17 +2,18 @@ name: RiskBot CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened]
 
 jobs:
   riskbot:
-    name: RiskBot CI   # THIS MUST MATCH BRANCH PROTECTION EXACTLY
+    name: RiskBot CI
     runs-on: ubuntu-latest
-
     steps:
-      - name: Call RiskBot webhook + enforce HIGH risk
+      - name: Call RiskBot CI Score
         env:
           WEBHOOK_URL: ${{ secrets.RISKBOT_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
@@ -21,26 +22,34 @@ jobs:
             exit 2
           fi
 
-          echo "Calling RiskBot at $WEBHOOK_URL"
-          resp=$(curl -sS -X POST "$WEBHOOK_URL" \
+          # Construct CI Endpoint URL (replace /webhooks/github with /ci/score)
+          # We do this to ensure we hit the correct endpoint even if secret has old path
+          BASE_URL=${WEBHOOK_URL%/webhooks/github}
+          CI_URL="${BASE_URL}/ci/score"
+          
+          echo "Calling RiskBot at $CI_URL"
+          
+          # Send JSON payload
+          resp=$(curl -sS -X POST "$CI_URL" \
             -H "Content-Type: application/json" \
-            -d "{}")
+            -d "{\"repo\": \"$REPO\", \"pr\": $PR}")
 
           echo "Raw response:"
           echo "$resp"
 
-          level=$(python3 - <<PY
-import json
-data = json.loads("""$resp""")
-print((data.get("level") or data.get("risk_level") or "").upper())
-PY
-          )
+          # Parse level using python one-liner to avoid YAML syntax issues with heredocs
+          level=$(echo "$resp" | python3 -c "import sys, json; data=json.load(sys.stdin); print((data.get('level') or data.get('risk_level') or '').upper())")
 
           echo "Parsed level: $level"
 
           if [ "$level" = "HIGH" ]; then
             echo "❌ HIGH risk — blocking merge"
             exit 1
+          fi
+
+          if [ "$level" = "BYPASSED" ]; then
+             echo "⚠️ HIGH risk but BYPASSED — passing"
+             exit 0
           fi
 
           echo "✅ $level risk — passing"
