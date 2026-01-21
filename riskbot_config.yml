@@ -1,0 +1,19 @@
+# RiskBot Configuration
+# Place this file in the root of your repository (default branch)
+
+# 1. High Risk Threshold (0-100)
+# PRs with a score >= this value will be marked as HIGH risk
+high_threshold: 80  # Bumped up for testing (default is 75)
+
+# 2. Bypass Users
+# List of GitHub usernames who are trusted to merge high-risk changes
+bypass_users:
+  - "abishekgiri"
+  - "riskbot-admin"
+
+# 3. Bypass Labels
+# PRs with these labels will pass even if risk is high
+bypass_labels:
+  - "incident-response"
+  - "hotfix"
+  - "safe-change"

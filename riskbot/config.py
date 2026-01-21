@@ -1,9 +1,16 @@
 from pathlib import Path
 import os
+from dotenv import load_dotenv
+
+# Load params from .env file
+load_dotenv()
 
 # Data storage
 RISK_DB_PATH = os.getenv("RISK_DB_PATH", "data/riskbot.db")
 RISK_JSONL_PATH = os.getenv("RISK_JSONL_PATH", "data/runs.jsonl")
+
+# Webhook URL (for details_url in Check Runs)
+RISK_WEBHOOK_URL = os.getenv("RISKBOT_WEBHOOK_URL", "")
 
 # Risk thresholds
 RISK_THRESHOLD_HIGH = 75

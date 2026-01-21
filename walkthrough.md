@@ -26,6 +26,14 @@ Saved run to DB: data/riskbot.db
 Success: Webhook processed and Run saved to DB!
 ```
 
+### 3. Live Webhook Check (ngrok)
+Pushed a commit to `riskbot-test` branch and verified database ingestion:
+```
+sqlite3 data/riskbot.db "SELECT ... FROM pr_runs ..."
+# Output:
+abishekgiri/change-risk-predictor-|4|2026-01-19 06:24:02|25  <-- CONFIRMED REAL DATA
+```
+
 ### 2. Live Inference Check
 Ran `python3 riskbot/main.py --base HEAD~1 --head HEAD` on the codebase itself:
 ```
