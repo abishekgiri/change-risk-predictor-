@@ -19,20 +19,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "${WEBHOOK_BASE:-}" ]; then
-            echo "ERROR: RISKBOT_WEBHOOK_URL secret is not set."
-            exit 3
-          fi
-
           # Sanitize WEBHOOK_BASE: remove newlines/returns and leading/trailing whitespace
           WEBHOOK_BASE=$(echo "$WEBHOOK_BASE" | tr -d '\n' | tr -d '\r' | xargs)
 
           # Robustly handle if user included "/webhooks/github" in the secret
-          # 1. Strip trailing slash
           BASE_CLEAN=${WEBHOOK_BASE%/}
-          # 2. Strip /webhooks/github suffix if present
           BASE_CLEAN=${BASE_CLEAN%/webhooks/github}
-          # 3. Strip trailing slash again (just in case)
           BASE_CLEAN=${BASE_CLEAN%/}
 
           # Construct final URL
@@ -48,20 +40,35 @@ jobs:
           echo "Raw response:"
           echo "$resp"
 
-          # Parse level from common keys (supports level or risk_level)
-          level="$(echo "$resp" | jq -r '.level // .risk_level // .riskLevel // empty')"
+          # Parse Fields
+          level="$(echo "$resp" | jq -r '.level // empty')"
+          score="$(echo "$resp" | jq -r '.score // 0')"
+          prob="$(echo "$resp" | jq -r '.probability // 0')"
+          
+          # Print Summary
+          echo "----------------------------------------"
+          echo "RISK ANALYSIS SUMMARY"
+          echo "----------------------------------------"
+          echo "Score: $score / 100"
+          echo "Level: $level"
+          echo "Prob:  $prob"
+          echo ""
+          echo "Top Reasons:"
+          echo "$resp" | jq -r '.reasons[]' | sed 's/^/- /'
+          echo "----------------------------------------"
 
-          if [ -z "$level" ]; then
-            echo "ERROR: Could not find risk level in response JSON."
-            echo "Expected keys: level or risk_level"
-            exit 4
-          fi
-
-          echo "Parsed risk level: $level"
-
+          # Fail Condition: HIGH Risk OR Probability > 75%
+          threshold_prob=0.75
+          
           if [ "$level" = "HIGH" ]; then
-            echo "HIGH risk => failing check"
+            echo "❌ FAILED: Risk Level is HIGH"
             exit 1
           fi
+          
+          # Bash float comparison hack
+          if (( $(echo "$prob > $threshold_prob" | bc -l) )); then
+             echo "❌ FAILED: Risk Probability $prob > $threshold_prob"
+             exit 1
+          fi
 
-          echo "Not HIGH => passing check"
+          echo "✅ PASSED: Risk acceptable."

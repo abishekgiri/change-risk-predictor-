@@ -1,6 +1,10 @@
-import argparse
 import sys
 import json
+from dotenv import load_dotenv
+
+# Load env vars
+load_dotenv()
+
 from riskbot.features.git_diff import get_diff_stats, get_changed_files, get_file_stats
 from riskbot.features.churn import get_churn_stats
 from riskbot.features.tests import has_test_changes

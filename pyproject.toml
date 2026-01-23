@@ -1,8 +1,11 @@
 [project]
 name = "riskbot"
 version = "0.1.0"
-description = "Change risk predictor for PRs"
-requires-python = ">=3.11"
+description = "AI-powered PR risk assessment"
+requires-python = ">=3.9"
 
 [tool.setuptools]
 packages = ["riskbot"]
+
+[project.scripts]
+riskbot = "riskbot.cli:main"

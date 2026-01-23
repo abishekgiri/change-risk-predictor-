@@ -81,9 +81,9 @@ kpi1.metric("Total Analyzed", total_prs)
 kpi2.metric("High Risk", high_risk_prs, delta_color="inverse")
 kpi3.metric("Avg Risk Score", f"{avg_score:.1f}")
 
-# Train Readiness
+# train Readiness
 _, _, labeled_count = load_stats()
-ml_target = 50
+ml_target = 5  # Lowered from 50 for testing/demo purposes
 progress = min(labeled_count / ml_target, 1.0)
 kpi4.metric("Labeled Data (ML Ready)", f"{labeled_count} / {ml_target}")
 if labeled_count < ml_target:

@@ -1,0 +1,61 @@
+name: RiskBot Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  risk-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write  # Critical for publishing Check Run
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # Need history for features
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install pyyaml requests gitpython scikit-learn numpy pandas
+          # In real usage, pip install riskbot or local reference
+          # For demo, assuming source is in repo or installable
+          # pip install .
+
+      - name: Run RiskBot Analysis
+        id: riskbot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass specific vars or config overrides
+          RISKBOT_ENFORCEMENT: "report_only" # Start safe
+        run: |
+          # Use local script or installed CLI
+          # export PYTHONPATH=$PYTHONPATH:.
+          python3 -m riskbot.cli analyze-pr \
+            --repo ${{ github.repository }} \
+            --pr ${{ github.event.pull_request.number }} \
+            --output risk_result.json
+
+      - name: Publish Check Run
+        if: always() # Run even if riskbot failed logic (exit 1)
+        run: |
+          python3 scripts/publish_github_check.py \
+            --result risk_result.json \
+            --repo ${{ github.repository }} \
+            --sha ${{ github.event.pull_request.head.sha }} \
+            --token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: risk-result
+          path: risk_result.json

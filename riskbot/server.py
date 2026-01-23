@@ -5,13 +5,24 @@ import os
 import requests
 import yaml
 import base64
+import git
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-from riskbot.scoring.rules_v1 import calculate_score
-from riskbot.scoring.rules_v1 import calculate_score
+from dotenv import load_dotenv
+
+# Load env vars
+load_dotenv()
+
+from riskbot.config import (
+    GITHUB_TOKEN, RISK_WEBHOOK_URL,
+    RISK_THRESHOLD_HIGH
+)
+from riskbot.ingestion.pr_parser import PRParser
+from riskbot.scoring.risk_score import RiskScorer
+from riskbot.scoring.calibration import RiskCalibrator
 from riskbot.storage.sqlite import save_run
-from riskbot.config import RISK_WEBHOOK_URL
+from riskbot.features.feature_store import FeatureStore
 
 # Initialize App
 app = FastAPI(title="RiskBot Webhook Listener")
@@ -29,7 +40,7 @@ def get_pr_files(repo_full_name: str, pr_number: int):
     """Fetch files changed in PR using GitHub API."""
     if not GITHUB_TOKEN:
         print("Warning: No GITHUB_TOKEN, cannot fetch file details.")
-        return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0}
+        return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
 
     url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/files"
     headers = {
@@ -49,15 +60,22 @@ def get_pr_files(repo_full_name: str, pr_number: int):
         # Calculate diff stats from file list
         added = sum(f.get('additions', 0) for f in files_data)
         deleted = sum(f.get('deletions', 0) for f in files_data)
+        total_churn = added + deleted
+        
+        per_file = {
+            f['filename']: f.get('additions', 0) + f.get('deletions', 0)
+            for f in files_data
+        }
         
         return filenames, {
             "files_changed": len(files_data),
             "loc_added": added,
-            "loc_deleted": deleted
-        }
+            "loc_deleted": deleted,
+            "total_churn": total_churn
+        }, per_file
     except Exception as e:
         print(f"Error fetching files: {e}")
-        return [], {}
+        return [], {}, {}
 
 def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
     """Fetch PR details (title, author, labels) using GitHub API."""
@@ -96,7 +114,7 @@ def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
     except Exception as e:
         print(f"Failed to post comment: {e}")
 
-def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level: str, reasons: list):
+def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level: str, reasons: list, evidence: list = None):
     """Create a GitHub Check Run."""
     if not GITHUB_TOKEN:
         print("Warning: No GITHUB_TOKEN, skipping check run creation.")
@@ -111,7 +129,11 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
     
     conclusion = "failure" if risk_level == "HIGH" else "success"
     title = f"RiskBot CI: {risk_level} risk (Score: {score})"
+    
     summary = "Risk analysis completed.\n\n### Reasons\n" + "\n".join(f"- {r}" for r in reasons)
+    
+    if evidence:
+        summary += "\n\n### 🔎 Evidence\n" + "\n".join(f"- {e}" for e in evidence)
     
     payload = {
         "name": "RiskBot CI",
@@ -173,57 +195,55 @@ def ci_score(payload: CIScoreRequest):
     
     # 1. Fetch Data
     pr_data = get_pr_details(repo_full_name, pr_number)
-    filenames, diff_stats = get_pr_files(repo_full_name, pr_number)
+    filenames, diff_stats, per_file_churn = get_pr_files(repo_full_name, pr_number)
     
     if not pr_data:
          # Fallback if API fails
          print("Warning: Could not fetch PR details")
          
-    # 2. Construct Features
-    features = {
-        "diff": diff_stats,
-        "files": filenames,
-        "churn": {"hotspots": []},
-        "paths": [f for f in filenames if "config" in f or "auth" in f],
-        "tests": any("test" in f for f in filenames),
-        "metadata": {
-            "title": pr_data.get("title", ""),
-            "author": pr_data.get("user", {}).get("login", "unknown"),
-            "state": pr_data.get("state", "open"),
-            "merged": pr_data.get("merged", False)
-        }
+    # 2. Extract Features (Phase 6 refined)
+    raw_signals = {
+        "repo_slug": repo_full_name,
+        "entity_type": "pr",
+        "entity_id": str(pr_number),
+        "timestamp": pr_data.get("created_at", "unknown"),
+        "files_changed": filenames,
+        "lines_added": diff_stats.get("loc_added", 0),
+        "lines_deleted": diff_stats.get("loc_deleted", 0),
+        "total_churn": diff_stats.get("total_churn", 0),
+        "per_file_churn": per_file_churn,
+        "touched_services": [], # Placeholder
+        "linked_issue_ids": [], # CI endpoint might skip issue parsing or add it if needed
+        "author": pr_data.get("user", {}).get("login"),
+        "branch": pr_data.get("head", {}).get("ref")
     }
     
-    # 3. Calculate Score
-    score_data = calculate_score(features)
-    
-    # 4. Config & Thresholds (Reuse logic)
+    # 3. Feature Engineering
+    # Get Config used for RiskScorer/FeatureStore
     config = get_repo_config(repo_full_name, pr_data.get("base", {}).get("ref", "main"))
-    high_threshold = config.get("high_threshold", 75)
     
-    bypass_users = config.get("bypass_users", [])
-    bypass_labels = config.get("bypass_labels", [])
-    pr_labels = [l["name"] for l in pr_data.get("labels", [])]
-    author = features["metadata"]["author"]
+    feature_store = FeatureStore(config)
+    features, feature_explanations = feature_store.build_features(raw_signals)
     
-    is_bypassed = False
+    # 4. Calculate Score (V2 Engine)
+    scorer = RiskScorer(config)
+    calibrator = RiskCalibrator() # Uses default curve if no DB
     
-    if author in bypass_users:
-        is_bypassed = True
-    if any(l in bypass_labels for l in pr_labels):
-        is_bypassed = True
-        
-    risk_level = "HIGH" if score_data["score"] >= high_threshold else "LOW"
+    score_result = scorer.calculate_score(features, evidence=feature_explanations)
+    risk_score = score_result["risk_score"]
+    risk_level = score_result["risk_level"]
+    risk_prob = score_result["risk_prob"]
+    reasons = score_result["reasons"]
+    decision = score_result["decision"]
     
-    # JSON Response for CI
-    # If bypassed, we report LOW risk or specific status to let CI pass
-    if is_bypassed and risk_level == "HIGH":
-        risk_level = "BYPASSED" # CI script should treat this as passing
-        
     return {
-        "score": score_data["score"],
+        "score": risk_score,
         "level": risk_level,
-        "reasons": score_data["reasons"]
+        "probability": risk_prob,
+        "decision": decision,
+        "reasons": reasons,
+        "model_version": score_result.get("model_version"),
+        "feature_version": score_result.get("feature_version")
     }
 
 @app.post("/webhooks/github")
@@ -275,7 +295,7 @@ async def github_webhook(
     print(f"Processing PR #{pr_number} for {repo_full_name} ({action})")
     
     # Fetch Extra Features (Diff Stats)
-    filenames, diff_stats = get_pr_files(repo_full_name, pr_number)
+    filenames, diff_stats, per_file_churn = get_pr_files(repo_full_name, pr_number)
     
     # Basic Metadata
     base_sha = pr.get("base", {}).get("sha", "unknown")
@@ -306,35 +326,76 @@ async def github_webhook(
         is_bypassed = True
         bypass_reason = f"PR has bypass label."
     
-    # Construct Features for Scoring
-    features = {
-        "diff": diff_stats,
-        "files": filenames,
-        "churn": {"hotspots": []},
-        "paths": [f for f in filenames if "config" in f or "auth" in f],
-        "tests": any("test" in f for f in filenames),
-        "metadata": {
-            "title": title,
-            "author": author,
-            "state": pr.get("state"),
-            "merged": pr.get("merged", False)
-        }
+    # Construct Raw Signals for FeatureStore
+    raw_signals = {
+        "repo_slug": repo_full_name,
+        "entity_type": "pr",
+        "entity_id": str(pr_number),
+        "timestamp": pr.get("created_at"),
+        "files_changed": filenames,
+        "lines_added": diff_stats.get("loc_added", 0),
+        "lines_deleted": diff_stats.get("loc_deleted", 0),
+        "total_churn": diff_stats.get("total_churn", 0),
+        "per_file_churn": per_file_churn,
+        "touched_services": [],
+        "linked_issue_ids": [], # Populated below
+        "author": author,
+        "branch": pr.get("head", {}).get("ref")
     }
     
-    # Calculate Score
-    score_data = calculate_score(features)
+    # --- 5. Evidence Collection (Phase 4) ---
+    evidence = []
     
-    # Apply Configurable Thresholds
-    score = score_data["score"]
-    risk_level = "HIGH" if score >= high_threshold else "LOW" # Simplifying for now
+    # Instantiate Provider
+    from riskbot.ingestion.providers.github_provider import GitHubProvider
+    # Minimal config for provider
+    provider_config = {"github": {"repo": repo_full_name, "cache_ttl": 3600}}
+    provider = GitHubProvider(provider_config)
     
-    if is_bypassed and risk_level == "HIGH":
-        risk_level = "BYPASSED"
-        score_data["reasons"].append(f"**BYPASSED**: {bypass_reason}")
-    else:
-        # Override the calculated level if needed based on new threshold
-        score_data["risk_level"] = risk_level
+    # Parse Links
+    import re
+    pr_body = pr.get("body") or ""
+    # Matches #123, owner/repo#123
+    # Use simple #123 for MVP within same repo
+    linked_issues = re.findall(r"#(\d+)", pr_body)
+    
+    # Fetch Labels for Linked Issues
+    if linked_issues:
+        print(f"Checking linked issues: {linked_issues}")
+        for issue_num in linked_issues:
+            labels = provider.fetch_issue_labels(issue_num)
+            risky_labels = config.get("labels", {}).get("risky_any_of", ["bug", "incident", "sev1"])
+            
+            found_risky = [l for l in labels if l in risky_labels]
+            if found_risky:
+                evidence.append(f"🔗 Linked Issue #{issue_num} labeled **{' '.join(found_risky)}** (High Confidence)")
+                # Boost core features? Or just rely on evidence display?
+                # Ideally, this should impact the score. For V1, we just display it.
+                
+    # Check for Revert
+    if "revert" in title.lower():
+         evidence.append("↩️ PR Title indicates a **Revert** operation.")
 
+    # Update Raw Signals with linked issues
+    raw_signals["linked_issue_ids"] = linked_issues
+    
+    # Calculate Score
+    feature_store = FeatureStore(config)
+    features, feature_explanations = feature_store.build_features(raw_signals)
+    
+    # Combine feature explanations with existing evidence
+    evidence.extend(feature_explanations)
+    
+    scorer = RiskScorer(config) # Pass config for custom weights
+    score_data = scorer.calculate_score(features, evidence=evidence)
+    
+    # Apply Bypasses on top of Decision
+    if is_bypassed:
+         # Force Pass
+         score_data["decision"] = "PASS"
+         score_data["risk_level"] = "BYPASSED"
+         score_data["reasons"].append(f"**BYPASSED**: {bypass_reason}")
+    
     # Save to DB
     # Use clean repo name for storage/analytics as requested
     repo_clean = repo_full_name.strip("-") if repo_full_name else repo_full_name
@@ -350,7 +411,8 @@ async def github_webhook(
     # Post Comment (Feedback Loop)
     comment_body = (
         f"## 🛡️ RiskBot Analysis\n\n"
-        f"**Risk Score**: {score_data.get('score')} / 100 ({score_data.get('risk_level')})\n\n"
+        f"**Risk Score**: {score_data['risk_score']} / 100 ({score_data['risk_level']})\n"
+        f"**Decision**: {score_data['decision']}\n\n"
         f"### Reasons\n"
         + "\n".join(f"- {r}" for r in score_data.get("reasons", []))
     )
@@ -358,11 +420,18 @@ async def github_webhook(
     post_pr_comment(repo_full_name, pr_number, comment_body)
     
     # Create Check Run (Enforcement)
-    create_check_run(repo_full_name, head_sha, score_data["score"], score_data["risk_level"], score_data["reasons"])
+    create_check_run(
+        repo_full_name, 
+        head_sha, 
+        score_data["risk_score"], 
+        score_data["risk_level"], 
+        score_data["reasons"],
+        evidence=score_data.get("evidence")
+    )
     
     return {
         "status": "processed",
-        "risk_score": score_data.get("score"),
+        "risk_score": score_data.get("risk_score"),
         "risk_level": score_data.get("risk_level")
     }
 

@@ -11,6 +11,7 @@ RISK_JSONL_PATH = os.getenv("RISK_JSONL_PATH", "data/runs.jsonl")
 
 # Webhook URL (for details_url in Check Runs)
 RISK_WEBHOOK_URL = os.getenv("RISKBOT_WEBHOOK_URL", "")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 # Risk thresholds
 RISK_THRESHOLD_HIGH = 75
