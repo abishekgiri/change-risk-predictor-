@@ -1,0 +1,40 @@
+{
+    "raw_signals": {
+        "repo_slug": "test/repo",
+        "entity_type": "pr",
+        "entity_id": "902",
+        "timestamp": "2024-01-02T12:00:00Z",
+        "files_changed": [
+            "auth/login_handler.py"
+        ],
+        "lines_added": 5,
+        "lines_deleted": 2,
+        "total_churn": 7,
+        "per_file_churn": {
+            "auth/login_handler.py": 7
+        },
+        "touched_services": [
+            "auth"
+        ],
+        "linked_issue_ids": [],
+        "author": "senior_dev",
+        "branch": "fix/login-bug"
+    },
+    "expectations": {
+        "risk_score_min": 15,
+        "feature_checks": {
+            "churn_score": {
+                "max": 0.3
+            },
+            "critical_path_score": {
+                "gt": 0.0
+            },
+            "dependency_risk_score": {
+                "max": 0.5
+            }
+        },
+        "explanations_contain": [
+            "Critical Path"
+        ]
+    }
+}

@@ -1,0 +1,41 @@
+{
+    "raw_signals": {
+        "repo_slug": "test/repo",
+        "entity_type": "pr",
+        "entity_id": "901",
+        "timestamp": "2024-01-01T12:00:00Z",
+        "files_changed": [
+            "README.md",
+            "docs/api.md"
+        ],
+        "lines_added": 8,
+        "lines_deleted": 2,
+        "total_churn": 10,
+        "per_file_churn": {
+            "README.md": 2,
+            "docs/api.md": 8
+        },
+        "touched_services": [],
+        "linked_issue_ids": [],
+        "author": "techwriter",
+        "branch": "docs/update"
+    },
+    "expectations": {
+        "risk_score_max": 20,
+        "feature_checks": {
+            "churn_score": {
+                "max": 0.1
+            },
+            "critical_path_score": {
+                "eq": 0.0
+            },
+            "dependency_risk_score": {
+                "max": 0.1
+            }
+        },
+        "explanations_must_not_contain": [
+            "Critical Path",
+            "High Blast Radius"
+        ]
+    }
+}

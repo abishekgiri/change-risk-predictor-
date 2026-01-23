@@ -1,0 +1,17 @@
+auth:
+  tier: 0
+  depends_on: []
+payments:
+  tier: 0
+  depends_on:
+    - "auth"
+checkout:
+  tier: 1
+  depends_on:
+    - "payments"
+    - "auth"
+frontend:
+  tier: 2
+  depends_on:
+    - "checkout"
+    - "auth"

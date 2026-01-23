@@ -1,0 +1,137 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://riskbot.dev/schemas/explanation_report.schema.json",
+    "title": "ExplanationReport",
+    "description": "Complete explanation for a risk assessment with deterministic contributors",
+    "type": "object",
+    "required": [
+        "risk_score",
+        "risk_prob",
+        "decision",
+        "risk_level",
+        "top_contributors",
+        "explain_version",
+        "feature_version"
+    ],
+    "properties": {
+        "risk_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Risk score (0-100)"
+        },
+        "risk_prob": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Calibrated probability of incident (0.0-1.0)"
+        },
+        "decision": {
+            "type": "string",
+            "enum": [
+                "PASS",
+                "WARN",
+                "FAIL"
+            ],
+            "description": "CI gate decision"
+        },
+        "risk_level": {
+            "type": "string",
+            "enum": [
+                "LOW",
+                "MEDIUM",
+                "HIGH"
+            ],
+            "description": "Risk level category"
+        },
+        "top_contributors": {
+            "type": "array",
+            "description": "Top 3-5 risk contributors for display",
+            "items": {
+                "$ref": "#/definitions/Contributor"
+            }
+        },
+        "all_contributors": {
+            "type": "array",
+            "description": "All computed contributors (optional, for debugging)",
+            "items": {
+                "$ref": "#/definitions/Contributor"
+            }
+        },
+        "explain_version": {
+            "type": "string",
+            "description": "Explainability version (e.g., 'v1')"
+        },
+        "feature_version": {
+            "type": "string",
+            "description": "Feature vector version (e.g., 'v6')"
+        },
+        "model_version": {
+            "type": "string",
+            "description": "Model version (e.g., 'baseline-v1', 'logistic-v1')"
+        }
+    },
+    "definitions": {
+        "Contributor": {
+            "type": "object",
+            "required": [
+                "id",
+                "title",
+                "impact",
+                "severity",
+                "summary",
+                "details",
+                "evidence",
+                "metrics"
+            ],
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Stable identifier (e.g., 'churn', 'critical_path')"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short label for display"
+                },
+                "impact": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "Normalized contribution (0-1, sum to 1 across all)"
+                },
+                "severity": {
+                    "type": "string",
+                    "enum": [
+                        "LOW",
+                        "MEDIUM",
+                        "HIGH"
+                    ],
+                    "description": "Severity level"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One-line summary suitable for check title"
+                },
+                "details": {
+                    "type": "array",
+                    "description": "2-5 deterministic bullet points",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "evidence": {
+                    "type": "array",
+                    "description": "Auditable artifacts (issue links, commit SHAs, etc.)",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "metrics": {
+                    "type": "object",
+                    "description": "Raw numbers used in text generation (for auditability)",
+                    "additionalProperties": true
+                }
+            }
+        }
+    }
+}
