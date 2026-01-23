@@ -22,7 +22,14 @@ class CriticalityEngine:
     def _build_historical_risk_map(self) -> Dict[str, float]:
         """
         Scan DB to build {filename: incident_rate} map.
+        Gracefully handles missing DB (e.g. in CI or fresh install).
         """
+        import os
+        if not os.path.exists(RISK_DB_PATH):
+            # In CI or fresh install, DB might not exist. 
+            # This is expected; just return empty history.
+            return {}
+
         conn = sqlite3.connect(RISK_DB_PATH)
         try:
             query = """
@@ -60,7 +67,8 @@ class CriticalityEngine:
             
             return risk_map
         except Exception as e:
-            print(f"Error building historical risk map: {e}")
+            # If table doesn't exist or other DB error
+            print(f"Warning: Error building historical risk map: {e}")
             return {}
         finally:
             conn.close()
