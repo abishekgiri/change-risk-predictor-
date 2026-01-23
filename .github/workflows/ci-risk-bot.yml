@@ -6,69 +6,43 @@ on:
 
 jobs:
   riskbot:
-    name: RiskBot CI
+    name: RiskBot CI   # THIS MUST MATCH BRANCH PROTECTION EXACTLY
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
 
     steps:
-      - name: Call RiskBot CI Score
-        env:
-          WEBHOOK_BASE: ${{ secrets.RISKBOT_WEBHOOK_URL }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # we need history for churn analysis
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install RiskBot
         run: |
-          set -euo pipefail
+          pip install --upgrade pip
+          pip install -e .
 
-          # Sanitize WEBHOOK_BASE: remove newlines/returns and leading/trailing whitespace
-          WEBHOOK_BASE=$(echo "$WEBHOOK_BASE" | tr -d '\n' | tr -d '\r' | xargs)
-
-          # Robustly handle if user included "/webhooks/github" in the secret
-          BASE_CLEAN=${WEBHOOK_BASE%/}
-          BASE_CLEAN=${BASE_CLEAN%/webhooks/github}
-          BASE_CLEAN=${BASE_CLEAN%/}
-
-          # Construct final URL
-          URL="${BASE_CLEAN}/ci/score"
-          echo "Debug: Constructed URL: $URL"
-
-          # Call RiskBot (ngrok header avoids ngrok HTML warning page)
-          resp="$(curl -sS -X POST "$URL" \
-            -H "Content-Type: application/json" \
-            -H "ngrok-skip-browser-warning: true" \
-            -d "{\"repo\":\"$REPO\",\"pr\":$PR_NUMBER,\"sha\":\"$SHA\"}")"
-
-          echo "Raw response:"
-          echo "$resp"
-
-          # Parse Fields
-          level="$(echo "$resp" | jq -r '.level // empty')"
-          score="$(echo "$resp" | jq -r '.score // 0')"
-          prob="$(echo "$resp" | jq -r '.probability // 0')"
+      - name: Run RiskBot Analysis
+        env:
+          # Use the built-in GITHUB_TOKEN for API access logic in cli.py
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Force blocking mode (EXIT 1 on FAIL)
+          RISKBOT_ENFORCEMENT: blocking
+        run: |
+          echo "Running RiskBot analysis for PR #${{ github.event.pull_request.number }}"
           
-          # Print Summary
-          echo "----------------------------------------"
-          echo "RISK ANALYSIS SUMMARY"
-          echo "----------------------------------------"
-          echo "Score: $score / 100"
-          echo "Level: $level"
-          echo "Prob:  $prob"
-          echo ""
-          echo "Top Reasons:"
-          echo "$resp" | jq -r '.reasons[]' | sed 's/^/- /'
-          echo "----------------------------------------"
-
-          # Fail Condition: HIGH Risk OR Probability > 75%
-          threshold_prob=0.75
+          # The CLI will exit 0 (PASS), 1 (FAIL), or 2 (WARN)
+          # We capture the exit code to allow for "soft" failures if needed, 
+          # but here we just let it fail the step naturally if exit code != 0.
           
-          if [ "$level" = "HIGH" ]; then
-            echo "❌ FAILED: Risk Level is HIGH"
-            exit 1
-          fi
-          
-          # Bash float comparison hack
-          if (( $(echo "$prob > $threshold_prob" | bc -l) )); then
-             echo "❌ FAILED: Risk Probability $prob > $threshold_prob"
-             exit 1
-          fi
-
-          echo "✅ PASSED: Risk acceptable."
+          riskbot analyze-pr \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --output "risk_report.json"
