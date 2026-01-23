@@ -87,7 +87,10 @@ def calculate_score(features: Dict[str, Any]) -> Dict[str, Any]:
             prob_risky = model.predict_proba(flat_features)[0][1]
             model_score = int(prob_risky * 100)
             
-            reasons.append(f"ML Model Risk Prediction: {model_score}%")
+            if model_score > 0:
+                reasons.append(f"ML Model Risk Prediction: {model_score}%")
+            else:
+                reasons.append(f"ML Model Risk Prediction: {model_score}% (Hybrid scoring ready; ML activates once enough labeled data exists)")
         except Exception as e:
             print(f"ML Inference Error: {e}")
             

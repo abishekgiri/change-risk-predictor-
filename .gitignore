@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 data/
 outputs/
+uvicorn.log
+riskbot.db
+*.egg-info/

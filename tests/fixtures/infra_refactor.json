@@ -1,0 +1,51 @@
+{
+    "raw_signals": {
+        "repo_slug": "test/repo",
+        "entity_type": "pr",
+        "entity_id": "903",
+        "timestamp": "2024-01-03T12:00:00Z",
+        "files_changed": [
+            "config/settings.py",
+            "infra/terraform/main.tf",
+            "src/legacy_core.py",
+            "api/routes.py"
+        ],
+        "lines_added": 1200,
+        "lines_deleted": 800,
+        "total_churn": 2000,
+        "per_file_churn": {
+            "config/settings.py": 100,
+            "infra/terraform/main.tf": 200,
+            "src/legacy_core.py": 1650,
+            "api/routes.py": 50
+        },
+        "touched_services": [
+            "auth",
+            "payments",
+            "core",
+            "api",
+            "db"
+        ],
+        "linked_issue_ids": [],
+        "author": "intern",
+        "branch": "refactor/global"
+    },
+    "expectations": {
+        "risk_score_min": 60,
+        "feature_checks": {
+            "churn_score": {
+                "min": 0.5
+            },
+            "dependency_risk_score": {
+                "min": 0.4
+            },
+            "critical_path_score": {
+                "gt": 0.0
+            }
+        },
+        "explanations_contain": [
+            "Abnormal Churn",
+            "High Blast Radius"
+        ]
+    }
+}
