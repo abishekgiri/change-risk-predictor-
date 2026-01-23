@@ -33,8 +33,8 @@ jobs:
         env:
           # Use the built-in GITHUB_TOKEN for API access logic in cli.py
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Force blocking mode (EXIT 1 on FAIL)
-          RISKBOT_ENFORCEMENT: blocking
+          # Report-only mode (EXIT 0 even on FAIL) for initial rollout/release PRs
+          RISKBOT_ENFORCEMENT: report_only
         run: |
           echo "Running RiskBot analysis for PR #${{ github.event.pull_request.number }}"
           
