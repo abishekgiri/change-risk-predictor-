@@ -1,0 +1,44 @@
+name: Compliance Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  compliance:
+    name: Compliance Check   # THIS MUST MATCH BRANCH PROTECTION EXACTLY
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # we need history for churn analysis
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install ComplianceBot
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+
+      - name: Run Policy Analysis
+        env:
+          # Use the built-in GITHUB_TOKEN for API access logic in cli.py
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Report-only mode for now
+          COMPLIANCEBOT_ENFORCEMENT: report_only
+        run: |
+          echo "Running ComplianceBot analysis for PR #${{ github.event.pull_request.number }}"
+          
+          compliancebot analyze-pr \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --output "compliance_report.json"

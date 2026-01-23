@@ -1,10 +1,10 @@
 import unittest
-from riskbot.features import normalize
-from riskbot.features.churn import ChurnEngine
-from riskbot.features.criticality import CriticalityEngine
-from riskbot.features.dependency import DependencyEngine
-from riskbot.features.history import HistoryEngine
-from riskbot.features.types import RawSignals
+from compliancebot.features import normalize
+from compliancebot.features.churn import ChurnEngine
+from compliancebot.features.criticality import CriticalityEngine
+from compliancebot.features.dependency import DependencyEngine
+from compliancebot.features.history import HistoryEngine
+from compliancebot.features.types import RawSignals
 
 class TestFeatures(unittest.TestCase):
     

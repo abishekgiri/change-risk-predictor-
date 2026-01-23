@@ -1,4 +1,4 @@
-# RiskBot - Change Risk Predictor
+# ComplianceBot (formerly RiskBot) - Engineering Policy Enforcement
 
 RiskBot is a deterministic, explainable change-risk analysis system for GitHub repositories. It analyzes pull requests and repository history to estimate the risk that a change will introduce bugs, regressions, or instability, and it explains *why* a change is risky in terms engineers actually understand.
 
