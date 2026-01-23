@@ -1,7 +1,7 @@
 import pytest
-from riskbot.review import engine
-from riskbot.scoring.types import RiskResult
-from riskbot.explain.types import ExplanationReport
+from compliancebot.review import engine
+from compliancebot.scoring.types import RiskResult
+from compliancebot.explain.types import ExplanationReport
 
 def test_rationale_cleans_bad_heuristics():
     """

@@ -1,7 +1,7 @@
 import unittest.mock
 from fastapi.testclient import TestClient
-from riskbot.server import app
-from riskbot.config import RISK_DB_PATH
+from compliancebot.server import app
+from compliancebot.config import DB_PATH
 import sqlite3
 import os
 import json
@@ -34,7 +34,7 @@ def test_webhook_pr_opened():
     # Mock external requests (GitHub API) so we don't hit real limits or need tokens
     with unittest.mock.patch("requests.post") as mock_post, \
          unittest.mock.patch("requests.get") as mock_get, \
-         unittest.mock.patch("riskbot.server.GITHUB_TOKEN", "mock_token"):
+         unittest.mock.patch("compliancebot.server.GITHUB_TOKEN", "mock_token"):
         
         # Mock file fetch (files changed)
         # We need check which URL it was called with to return different things
@@ -78,13 +78,13 @@ def test_webhook_pr_opened():
                 assert json_body['name'] == "RiskBot CI"
                 assert json_body['head_sha'] == "head123"
                 # Check if details_url is passed (we enabled it)
-                # Note: config.RISK_WEBHOOK_URL is loaded from env, which might be empty in test.
+                # Note: config.WEBHOOK_URL is loaded from env, which might be empty in test.
                 # Ideally we should mock env, but this basic assertion is enough for now.
         
         assert check_run_called, "create_check_run was not called"
     
     # 3. Verify DB
-    conn = sqlite3.connect(RISK_DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT * FROM pr_runs WHERE repo=? AND pr_number=?", 
         ("test/webhook-repo", 999)
