@@ -8,13 +8,12 @@ RiskBot is designed to run natively in your CI pipelines (GitHub Actions, GitLab
 
 **GitHub Check name**: `RiskBot / Risk Score` (stable name for branch protection rules).
 
-
 Add `.github/workflows/riskbot_pr.yml` to your repository:
 
 ```yaml
 uses: your-org/riskbot/.github/workflows/riskbot_pr.yml@main
 with:
-  enforcement: report_only # Change to 'enforce' to block merges
+ enforcement: report_only # Change to 'enforce' to block merges
 ```
 
 Or copy the full workflow from `workflows/riskbot_pr.yml`.
@@ -34,15 +33,15 @@ The behavior of the CI check is controlled by your repo configuration.
 
 ```yaml
 scoring:
-  enforcement: report_only # 'report_only' (always pass) vs 'enforce' (fail job on high risk)
+ enforcement: report_only # 'report_only' (always pass) vs 'enforce' (fail job on high risk)
 
 thresholds:
-  fail_score: 75
-  fail_prob: 0.75
-  
-  overrides:
-    prod:
-      fail_score: 60 # Stricter for production branches
+ fail_score: 75
+ fail_prob: 0.75
+ 
+ overrides:
+ prod:
+ fail_score: 60 # Stricter for production branches
 ```
 
 ### Environment Variables
@@ -56,15 +55,15 @@ To gate deployments, run RiskBot on the commit *before* deploying.
 ```bash
 # Example Shell Script
 python3 -m riskbot.cli analyze-pr \
-  --repo owner/repo \
-  --pr 123 \
-  --output result.json
+ --repo owner/repo \
+ --pr 123 \
+ --output result.json
 
 # Check decision
 DECISION=$(jq -r .decision result.json)
 if [ "$DECISION" == "FAIL" ]; then
-  echo "RiskBot prevented deploy."
-  exit 1
+ echo "RiskBot prevented deploy."
+ exit 1
 fi
 ```
 

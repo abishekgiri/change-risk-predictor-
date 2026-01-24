@@ -30,20 +30,20 @@ REVIEWERS_HIGH_RISK = 2
 
 # Path patterns
 CRITICAL_PATHS = [
-    "auth/",
-    "db/",
-    "payments/",
-    "security/",
-    "api/v1/",
+ "auth/",
+ "db/",
+ "payments/",
+ "security/",
+ "api/v1/",
 ]
 
 # File types to track
 SRC_EXTENSIONS = {
-    ".py", ".js", ".ts", ".go", ".rs", ".java", ".cpp", ".c", ".h"
+ ".py", ".js", ".ts", ".go", ".rs", ".java", ".cpp", ".c", ".h"
 }
 
 TEST_PATHS = [
-    "tests/",
-    "test/",
-    "__tests__/",
+ "tests/",
+ "test/",
+ "__tests__/",
 ]

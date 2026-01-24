@@ -44,8 +44,8 @@
             }
         },
         "explanations_contain": [
-            "Abnormal Churn",
-            "High Blast Radius"
+            "Extreme Churn",
+            "Large blast radius"
         ]
     }
 }

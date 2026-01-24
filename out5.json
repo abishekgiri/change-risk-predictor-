@@ -1,0 +1,18 @@
+{
+  "control_result": "COMPLIANT",
+  "severity": "LOW",
+  "violations": [],
+  "evidence": {
+    "files_changed": 0,
+    "churn": 0
+  },
+  "policies": [
+    {
+      "policy_id": "SEC-PR-001",
+      "status": "COMPLIANT",
+      "triggered": false
+    }
+  ],
+  "timestamp": "now",
+  "actor": "unknown"
+}
