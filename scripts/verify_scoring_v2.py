@@ -5,47 +5,47 @@ scorer = RiskScorer({"critical_paths": {"multiplier": 2.0}}) # Lower multiplier 
 
 # Case 1: Small but Tier-0 (Auth)
 small_tier0: FeatureVector = {
-    "feature_version": "v6",
-    "churn_score": 0.05, 
-    "total_churn": 10,
-    "files_changed": ["auth/login.go"],
-    "is_tier_0": True,
-    "critical_subsystems": ["auth/"],
-    "critical_path_score": 1.0
+ "feature_version": "v6",
+ "churn_score": 0.05, 
+ "total_churn": 10,
+ "files_changed": ["auth/login.go"],
+ "is_tier_0": True,
+ "critical_subsystems": ["auth/"],
+ "critical_path_score": 1.0
 }
 
 # Case 2: Small but Critical (Multiplier test)
 small_critical: FeatureVector = {
-     "feature_version": "v6",
-    "churn_score": 0.05,
-    "total_churn": 15,
-    "files_changed": ["api/v1/router.go"],
-    "is_tier_0": False,
-    "critical_path_score": 1.0, 
-    "dependency_risk_score": 0.2
+ "feature_version": "v6",
+ "churn_score": 0.05,
+ "total_churn": 15,
+ "files_changed": ["api/v1/router.go"],
+ "is_tier_0": False,
+ "critical_path_score": 1.0, 
+ "dependency_risk_score": 0.2
 }
 
 # Case 3: Large but Safe
 large_safe: FeatureVector = {
-     "feature_version": "v6",
-    "churn_score": 0.4, # Capped
-    "total_churn": 800, # Large absolute
-    "files_changed": ["docs/README.md"],
-    "is_tier_0": False,
-    "critical_path_score": 0.0
+ "feature_version": "v6",
+ "churn_score": 0.4, # Capped
+ "total_churn": 800, # Large absolute
+ "files_changed": ["docs/README.md"],
+ "is_tier_0": False,
+ "critical_path_score": 0.0
 }
 
 # Case 4: Tiny Critical (Downgrade Rule)
 tiny_critical: FeatureVector = {
-     "feature_version": "v6",
-    "churn_score": 0.4, # High relative
-    "total_churn": 35,  # Tiny absolute
-    "files_changed": ["tsdb/db.go"],
-    "is_tier_0": False,
-    "critical_subsystems": ["tsdb/"],
-    "critical_path_score": 1.0, 
-    "dependency_risk_score": 0.2,
-    "file_historical_risk_score": 0.5
+ "feature_version": "v6",
+ "churn_score": 0.4, # High relative
+ "total_churn": 35, # Tiny absolute
+ "files_changed": ["tsdb/db.go"],
+ "is_tier_0": False,
+ "critical_subsystems": ["tsdb/"],
+ "critical_path_score": 1.0, 
+ "dependency_risk_score": 0.2,
+ "file_historical_risk_score": 0.5
 }
 
 print("=== Tier-0 Gate Test ===")
