@@ -18,6 +18,8 @@ credentials/
 !**/secrets/evidence.py
 !**/secrets/entropy.py
 !**/controls/secrets.py
+!compliancebot/features/secrets/**
+
 
 
 # Generated Runtime Output
