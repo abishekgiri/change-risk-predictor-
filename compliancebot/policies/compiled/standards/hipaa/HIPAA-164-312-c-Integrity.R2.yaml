@@ -1,28 +1,28 @@
 {
- "policy_id": "HIPAA-164-312-c-Integrity.R2",
- "version": "1.0.0",
- "name": "HIPAA 164.312(c) - Integrity - Rule R2",
- "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
- "controls": [
- {
- "signal": "licenses.banned_detected",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "HIPAA 164.312(c) Integrity: Use of unauthorized/banned software components detected."
- },
- "metadata": {
- "parent_policy": "HIPAA-164-312-c-Integrity",
- "rule_id": "R2",
- "version": "1.0.0",
- "priority": 119,
- "compliance": {
- "HIPAA": "164.312(c) - Integrity"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "HIPAA-164-312-c-Integrity.R2",
+  "version": "1.0.0",
+  "name": "HIPAA 164.312(c) - Integrity - Rule R2",
+  "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
+  "controls": [
+    {
+      "signal": "licenses.banned_detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "HIPAA 164.312(c) Integrity: Use of unauthorized/banned software components detected."
+  },
+  "metadata": {
+    "parent_policy": "HIPAA-164-312-c-Integrity",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "HIPAA": "164.312(c) - Integrity"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

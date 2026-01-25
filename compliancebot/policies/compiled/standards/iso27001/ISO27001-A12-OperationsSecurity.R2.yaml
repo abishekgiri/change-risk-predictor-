@@ -1,28 +1,28 @@
 {
- "policy_id": "ISO27001-A12-OperationsSecurity.R2",
- "version": "1.0.0",
- "name": "ISO 27001 A.12 - Operations Security - Rule R2",
- "description": "",
- "controls": [
- {
- "signal": "env.production_violation",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "ISO 27001 A.12.1.4: Separation of environments violated. Production config found in non-prod code."
- },
- "metadata": {
- "parent_policy": "ISO27001-A12-OperationsSecurity",
- "rule_id": "R2",
- "version": "1.0.0",
- "priority": 119,
- "compliance": {
- "ISO27001": "A.12 - Operations Security"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "ISO27001-A12-OperationsSecurity.R2",
+  "version": "1.0.0",
+  "name": "ISO 27001 A.12 - Operations Security - Rule R2",
+  "description": "",
+  "controls": [
+    {
+      "signal": "env.production_violation",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "ISO 27001 A.12.1.4: Separation of environments violated. Production config found in non-prod code."
+  },
+  "metadata": {
+    "parent_policy": "ISO27001-A12-OperationsSecurity",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "ISO27001": "A.12 - Operations Security"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

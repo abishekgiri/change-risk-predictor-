@@ -1,24 +1,24 @@
 #!/bin/bash
 
-# RiskBot Doctor - Diagnostic Script
+# ComplianceBot Doctor - Diagnostic Script
 
 echo "========================================"
-echo "🩺 RiskBot Doctor"
+echo " ComplianceBot Doctor"
 echo "========================================"
 
 # 1. Check Token
 echo ""
 echo "[1] Checking GITHUB_TOKEN..."
 if [ -z "$GITHUB_TOKEN" ]; then
- echo "❌ GITHUB_TOKEN is NOT set."
- echo " Fix: export GITHUB_TOKEN=\$(grep GITHUB_TOKEN .env | cut -d '=' -f2)"
+ echo "[FAIL] GITHUB_TOKEN is NOT set."
+ echo " Fix: export GITHUB_TOKEN=\$(grep '^GITHUB_TOKEN=' .env | cut -d '=' -f2- | tr -d '\"' | tr -d \"'\")"
  exit 1
 else
  LEN=${#GITHUB_TOKEN}
  if [ "$LEN" -lt 40 ]; then
- echo "⚠️ GITHUB_TOKEN seems too short (length: $LEN). Expected ~40 chars."
+ echo "[WARN] GITHUB_TOKEN seems too short (length: $LEN). Expected ~40 chars."
  else
- echo "✅ GITHUB_TOKEN is set (length: $LEN)."
+ echo "[OK] GITHUB_TOKEN is set."
  fi
 fi
 
@@ -29,11 +29,11 @@ USER_RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.
 LOGIN=$(echo "$USER_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin).get('login', ''))")
 
 if [ -z "$LOGIN" ]; then
- echo "❌ Authentication FAILED."
+ echo "[FAIL] Authentication FAILED."
  echo " Response: $USER_RESP"
  exit 1
 else
- echo "✅ Authenticated as: $LOGIN"
+ echo "[OK] Authenticated as: $LOGIN"
 fi
 
 # 3. Check Rate Limits
@@ -43,20 +43,24 @@ RATE_RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.
 REMAINING=$(echo "$RATE_RESP" | python3 -c "import sys, json; print(json.load(sys.stdin).get('rate', {}).get('remaining', 'UNKNOWN'))")
 
 if [ "$REMAINING" == "UNKNOWN" ] || [ "$REMAINING" -lt 10 ]; then
- echo "⚠️ Low Rate Limit! Remaining: $REMAINING"
+ echo "[WARN] Low Rate Limit! Remaining: $REMAINING"
 else
- echo "✅ Rate Limit OK. Remaining: $REMAINING"
+ echo "[OK] Rate Limit OK. Remaining: $REMAINING"
 fi
 
-# 4. Check RiskBot CLI
+# 4. Check ComplianceBot CLI
 echo ""
-echo "[4] Checking RiskBot CLI..."
-if command -v riskbot &> /dev/null; then
- echo "✅ 'riskbot' command found."
- python3 -c "import riskbot; print(f' Version: {riskbot.__version__}')" 2>/dev/null || echo " (Version check failed)"
+echo "[4] Checking ComplianceBot CLI..."
+if command -v compliancebot &> /dev/null; then
+  echo "[OK] 'compliancebot' command found."
 else
- echo "❌ 'riskbot' command NOT found in PATH."
- echo " Run: pip install -e ."
+  # Try python module check
+  if python3 -c "import compliancebot" &> /dev/null; then
+     echo "[OK] 'compliancebot' python module found."
+  else
+     echo "[FAIL] 'compliancebot' NOT found."
+     echo " Run: pip install -e ."
+  fi
 fi
 
 echo ""

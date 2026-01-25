@@ -1,28 +1,28 @@
 {
- "policy_id": "ISO27001-A9-AccessControl.R2",
- "version": "1.0.0",
- "name": "ISO 27001 A.9 - Access Control - Rule R2",
- "description": "",
- "controls": [
- {
- "signal": "approvals.security_review",
- "operator": "<",
- "value": 1
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "Requirement failed: approvals.security_review >= 1"
- },
- "metadata": {
- "parent_policy": "ISO27001-A9-AccessControl",
- "rule_id": "R2",
- "version": "1.0.0",
- "priority": 119,
- "compliance": {
- "ISO27001": "A.9 - Access Control"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "ISO27001-A9-AccessControl.R2",
+  "version": "1.0.0",
+  "name": "ISO 27001 A.9 - Access Control - Rule R2",
+  "description": "",
+  "controls": [
+    {
+      "signal": "approvals.security_review",
+      "operator": "<",
+      "value": 1
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Requirement failed: approvals.security_review >= 1"
+  },
+  "metadata": {
+    "parent_policy": "ISO27001-A9-AccessControl",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "ISO27001": "A.9 - Access Control"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

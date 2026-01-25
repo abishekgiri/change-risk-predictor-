@@ -1,28 +1,28 @@
 {
- "policy_id": "HIPAA-164-312-c-Integrity.R1",
- "version": "1.0.0",
- "name": "HIPAA 164.312(c) - Integrity - Rule R1",
- "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
- "controls": [
- {
- "signal": "env.production_violation",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "HIPAA 164.312(c) Integrity Violation: Production configuration in non-prod environment creates integrity risk."
- },
- "metadata": {
- "parent_policy": "HIPAA-164-312-c-Integrity",
- "rule_id": "R1",
- "version": "1.0.0",
- "priority": 120,
- "compliance": {
- "HIPAA": "164.312(c) - Integrity"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "HIPAA-164-312-c-Integrity.R1",
+  "version": "1.0.0",
+  "name": "HIPAA 164.312(c) - Integrity - Rule R1",
+  "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
+  "controls": [
+    {
+      "signal": "env.production_violation",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "HIPAA 164.312(c) Integrity Violation: Production configuration in non-prod environment creates integrity risk."
+  },
+  "metadata": {
+    "parent_policy": "HIPAA-164-312-c-Integrity",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "HIPAA": "164.312(c) - Integrity"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

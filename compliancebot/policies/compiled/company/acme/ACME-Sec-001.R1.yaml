@@ -1,28 +1,28 @@
 {
- "policy_id": "ACME-Sec-001.R1",
- "version": "1.0.0",
- "name": "Acme Corp Security Standard - Rule R1",
- "description": "Company-specific overrides and stricter enforcement.",
- "controls": [
- {
- "signal": "approvals.count",
- "operator": "<",
- "value": 2
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "Requirement failed: approvals.count >= 2"
- },
- "metadata": {
- "parent_policy": "ACME-Sec-001",
- "rule_id": "R1",
- "version": "1.0.0",
- "priority": 120,
- "compliance": {
- "Internal": "Sec-Std-01"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "ACME-Sec-001.R1",
+  "version": "1.0.0",
+  "name": "Acme Corp Security Standard - Rule R1",
+  "description": "Company-specific overrides and stricter enforcement.",
+  "controls": [
+    {
+      "signal": "approvals.count",
+      "operator": "<",
+      "value": 2
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Requirement failed: approvals.count >= 2"
+  },
+  "metadata": {
+    "parent_policy": "ACME-Sec-001",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "Internal": "Sec-Std-01"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

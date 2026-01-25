@@ -1,28 +1,28 @@
 {
- "policy_id": "ISO27001-A14-SecureDevelopment.R1",
- "version": "1.0.0",
- "name": "ISO 27001 A.14 - System Acquisition, Development and Maintenance - Rule R1",
- "description": "",
- "controls": [
- {
- "signal": "privileged.is_sensitive",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "WARN",
- "message": "ISO 27001 A.14.2.5: Sensitive code modification requires security review."
- },
- "metadata": {
- "parent_policy": "ISO27001-A14-SecureDevelopment",
- "rule_id": "R1",
- "version": "1.0.0",
- "priority": 110,
- "compliance": {
- "ISO27001": "A.14 - System Acquisition, Development and Maintenance"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "ISO27001-A14-SecureDevelopment.R1",
+  "version": "1.0.0",
+  "name": "ISO 27001 A.14 - System Acquisition, Development and Maintenance - Rule R1",
+  "description": "",
+  "controls": [
+    {
+      "signal": "privileged.is_sensitive",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "WARN",
+    "message": "ISO 27001 A.14.2.5: Sensitive code modification requires security review."
+  },
+  "metadata": {
+    "parent_policy": "ISO27001-A14-SecureDevelopment",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 110,
+    "compliance": {
+      "ISO27001": "A.14 - System Acquisition, Development and Maintenance"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

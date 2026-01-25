@@ -6,7 +6,9 @@ import os
 import json
 import sys
 import yaml
+import uuid
 from typing import Dict, Any, Optional
+
 
 def _write_json(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -194,6 +196,11 @@ def analyze_pr(args):
 
     # Phase 5: Audit & Evidence Layer
     # -------------------------------
+    audit_id = str(uuid.uuid4())
+    repo_name = args.repo
+    pr_num = args.pr
+    bundle_manifest_hash = "SKIPPED"
+
     try:
         from compliancebot.audit.log import AuditLogger
         from compliancebot.audit.types import AuditEvent
@@ -201,7 +208,6 @@ def analyze_pr(args):
         from compliancebot.evidence.bundler import EvidenceBundler
         from compliancebot.reports.generate import ReportGenerator
         from datetime import datetime, timezone
-        import uuid
 
         # 1. Traceability Injection
         injector = TraceabilityInjector()
@@ -211,13 +217,8 @@ def analyze_pr(args):
                 findings.append(injector.inject(res))
 
         # 2. Evidence Bundle
-        audit_id = str(uuid.uuid4())
-        repo_name = args.repo
-        pr_num = args.pr
-
-        bundle_manifest_hash = "SKIPPED"
-
         if not args.no_bundle:
+
             # We need diff text for full evidence.
             # Ideally passed from perform_analysis lookup but we don't have it easily exposed.
             # We can use a placeholder or try to fetch if easy.
@@ -549,8 +550,11 @@ def pick_hard(args):
         try:
             analyze_pr(MockArgs())
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"Failed: {e}")
         print("\n" + "-"*60 + "\n")
+
 
 def main():
     parser = argparse.ArgumentParser(description="ComplianceBot CI CLI")

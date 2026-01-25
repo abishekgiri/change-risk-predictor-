@@ -1,28 +1,28 @@
 {
- "policy_id": "HIPAA-164-312-a-AccessControl.R1",
- "version": "1.0.0",
- "name": "HIPAA 164.312(a) - Access Control - Rule R1",
- "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
- "controls": [
- {
- "signal": "secrets.detected",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "HIPAA 164.312(a)(2)(i) Violation: Hardcoded credentials detected. ePHI systems must enforce unique user identification."
- },
- "metadata": {
- "parent_policy": "HIPAA-164-312-a-AccessControl",
- "rule_id": "R1",
- "version": "1.0.0",
- "priority": 120,
- "compliance": {
- "HIPAA": "164.312(a) - Access Control"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "HIPAA-164-312-a-AccessControl.R1",
+  "version": "1.0.0",
+  "name": "HIPAA 164.312(a) - Access Control - Rule R1",
+  "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
+  "controls": [
+    {
+      "signal": "secrets.detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "HIPAA 164.312(a)(2)(i) Violation: Hardcoded credentials detected. ePHI systems must enforce unique user identification."
+  },
+  "metadata": {
+    "parent_policy": "HIPAA-164-312-a-AccessControl",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "HIPAA": "164.312(a) - Access Control"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

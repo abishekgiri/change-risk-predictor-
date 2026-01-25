@@ -1,28 +1,28 @@
 {
- "policy_id": "HIPAA-164-312-a-AccessControl.R2",
- "version": "1.0.0",
- "name": "HIPAA 164.312(a) - Access Control - Rule R2",
- "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
- "controls": [
- {
- "signal": "approvals.security_review",
- "operator": "<",
- "value": 1
- }
- ],
- "enforcement": {
- "result": "BLOCK",
- "message": "Requirement failed: approvals.security_review >= 1"
- },
- "metadata": {
- "parent_policy": "HIPAA-164-312-a-AccessControl",
- "rule_id": "R2",
- "version": "1.0.0",
- "priority": 119,
- "compliance": {
- "HIPAA": "164.312(a) - Access Control"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "HIPAA-164-312-a-AccessControl.R2",
+  "version": "1.0.0",
+  "name": "HIPAA 164.312(a) - Access Control - Rule R2",
+  "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
+  "controls": [
+    {
+      "signal": "approvals.security_review",
+      "operator": "<",
+      "value": 1
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Requirement failed: approvals.security_review >= 1"
+  },
+  "metadata": {
+    "parent_policy": "HIPAA-164-312-a-AccessControl",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "HIPAA": "164.312(a) - Access Control"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }

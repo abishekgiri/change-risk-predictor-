@@ -1,28 +1,28 @@
 {
- "policy_id": "SOC2-CC7.R1",
- "version": "1.0.0",
- "name": "SOC 2 CC7 - System Operations - Rule R1",
- "description": "Monitors system operations for anomalies and boundary violations.",
- "controls": [
- {
- "signal": "privileged.is_sensitive",
- "operator": "==",
- "value": true
- }
- ],
- "enforcement": {
- "result": "WARN",
- "message": "SOC 2 CC7.2: Sensitive system code modified. Verify this is a planned system operation."
- },
- "metadata": {
- "parent_policy": "SOC2-CC7",
- "rule_id": "R1",
- "version": "1.0.0",
- "priority": 110,
- "compliance": {
- "SOC2": "CC7.2 - Security Event Monitoring"
- },
- "effective_date": null,
- "supersedes": null
- }
+  "policy_id": "SOC2-CC7.R1",
+  "version": "1.0.0",
+  "name": "SOC 2 CC7 - System Operations - Rule R1",
+  "description": "Monitors system operations for anomalies and boundary violations.",
+  "controls": [
+    {
+      "signal": "privileged.is_sensitive",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "WARN",
+    "message": "SOC 2 CC7.2: Sensitive system code modified. Verify this is a planned system operation."
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC7",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 110,
+    "compliance": {
+      "SOC2": "CC7.2 - Security Event Monitoring"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
 }
