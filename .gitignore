@@ -17,6 +17,8 @@ credentials/
 !**/secrets/types.py
 !**/secrets/evidence.py
 !**/secrets/entropy.py
+!**/controls/secrets.py
+
 
 # Generated Runtime Output
 audit_bundles/
