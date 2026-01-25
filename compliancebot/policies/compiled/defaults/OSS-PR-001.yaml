@@ -1,0 +1,11 @@
+policy_id: OSS-PR-001
+name: "Open Source License Policy"
+description: "Prevents introduction of forbidden or unknown licenses"
+scope: pull_request
+controls:
+  - signal: licenses.forbidden_count
+    operator: ">"
+    value: 0
+enforcement:
+  result: BLOCK
+  message: "PR contains forbidden open-source licenses. Remove or replace these dependencies."

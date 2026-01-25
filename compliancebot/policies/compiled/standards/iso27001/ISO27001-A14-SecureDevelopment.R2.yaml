@@ -1,0 +1,28 @@
+{
+  "policy_id": "ISO27001-A14-SecureDevelopment.R2",
+  "version": "1.0.0",
+  "name": "ISO 27001 A.14 - System Acquisition, Development and Maintenance - Rule R2",
+  "description": "",
+  "controls": [
+    {
+      "signal": "licenses.banned_detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "ISO 27001 A.14.2.1: Use of banned software components (licenses) is prohibited."
+  },
+  "metadata": {
+    "parent_policy": "ISO27001-A14-SecureDevelopment",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "ISO27001": "A.14 - System Acquisition, Development and Maintenance"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "compiled_at": "2026-01-25T19:20:17.110253+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "SEC-PR-TEST": {
+      "source_hash": "3e3b1a1a5ed9c02f2edd80487403dd474e8e34ab9cef5a6e6efb43598b005e12",
+      "version": "1.0.0",
+      "rules": [
+        "SEC-PR-TEST.R1",
+        "SEC-PR-TEST.R2"
+      ]
+    }
+  }
+}

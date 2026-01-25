@@ -3,9 +3,9 @@ import json
 import glob
 import os
 from typing import Dict, Any
-from riskbot.features.feature_store import FeatureStore
-from riskbot.scoring.risk_score import RiskScorer
-from riskbot.features.types import RawSignals
+from compliancebot.features.feature_store import FeatureStore
+from compliancebot.scoring.risk_score import RiskScorer
+from compliancebot.features.types import RawSignals
 
 class TestGoldenFixtures(unittest.TestCase):
     def setUp(self):
@@ -30,8 +30,8 @@ class TestGoldenFixtures(unittest.TestCase):
         # These are "average" repo stats
         # log(50) ~ 3.9, log(1000) ~ 6.9
         self.store.baselines = {
-            "log_churn_mean": 4.0,  # ~55 lines
-            "log_churn_std": 1.5,   # decent spread
+            "log_churn_mean": 4.0, # ~55 lines
+            "log_churn_std": 1.5, # decent spread
             "files_changed_p50": 3,
             "files_changed_p90": 15
         }
@@ -41,8 +41,8 @@ class TestGoldenFixtures(unittest.TestCase):
         # Let's mock it directly.
         self.store.history_engine.bucket_stats = {
             "churn_high": {"incidents": 5, "total": 10}, # 50% risk
-            "churn_med": {"incidents": 1, "total": 20},  # 5% risk
-            "churn_low": {"incidents": 0, "total": 50}   # 0% risk
+            "churn_med": {"incidents": 1, "total": 20}, # 5% risk
+            "churn_low": {"incidents": 0, "total": 50} # 0% risk
         }
         # Mock file risk map for CriticalityEngine
         self.store.criticality_engine.file_risk_map = {} 
@@ -53,7 +53,7 @@ class TestGoldenFixtures(unittest.TestCase):
         
         if not fixture_files:
             self.fail("No golden fixtures found in tests/fixtures/")
-            
+        
         for fpath in fixture_files:
             with self.subTest(fixture=os.path.basename(fpath)):
                 print(f"Running fixture: {os.path.basename(fpath)}")
@@ -71,14 +71,14 @@ class TestGoldenFixtures(unittest.TestCase):
                 
                 # 3. Assertions
                 # Risk Score
-                score = score_data["score"]
+                score = score_data["risk_score"]
                 if "risk_score_min" in expect:
                     self.assertGreaterEqual(score, expect["risk_score_min"], 
                         f"Score {score} < min {expect['risk_score_min']}")
                 if "risk_score_max" in expect:
                     self.assertLessEqual(score, expect["risk_score_max"], 
                         f"Score {score} > max {expect['risk_score_max']}")
-                        
+                
                 # Feature Value Checks
                 for feat, checks in expect.get("feature_checks", {}).items():
                     val = features.get(feat, 0.0)
@@ -88,7 +88,7 @@ class TestGoldenFixtures(unittest.TestCase):
                         self.assertLessEqual(val, checks["max"], f"{feat}={val} > max {checks['max']}")
                     if "eq" in checks:
                         self.assertAlmostEqual(val, checks["eq"], delta=0.01, msg=f"{feat}={val} != {checks['eq']}")
-                        
+                
                 # Explanation Checks
                 reasons = " ".join(score_data["reasons"])
                 for phrase in expect.get("explanations_contain", []):
@@ -98,4 +98,4 @@ class TestGoldenFixtures(unittest.TestCase):
                     self.assertNotIn(phrase, reasons, f"Unexpected reason: '{phrase}' in '{reasons}'")
 
 if __name__ == "__main__":
-    unittest.main()
+ unittest.main()

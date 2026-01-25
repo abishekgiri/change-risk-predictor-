@@ -1,10 +1,157 @@
-__pycache__/
-*.pyc
-.venv/
+# Secrets & Credentials
 .env
-.DS_Store
-data/
-outputs/
-uvicorn.log
-riskbot.db
+.env.*
+*.key
+*.pem
+secrets/
+credentials/
+
+# GitHub tokens, API keys, passwords
+*token*
+*secret*
+*password*
+# But allow files with these in their name that are safe
+!**/secrets/scanner.py
+!**/secrets/patterns.py
+!**/secrets/detector.py
+!**/secrets/types.py
+!**/secrets/evidence.py
+!**/secrets/entropy.py
+!**/controls/secrets.py
+!compliancebot/features/secrets/**
+
+
+
+# Generated Runtime Output
+audit_bundles/
+*.bundle/
+explanation__*.json
+explanation__*.md
+out*.json
+p3_*.json
+result*.json
+policy_flip.json
+data/runs.jsonl
+
+
+# Caches & Build Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+virtualenv/
+
+# Logs & Temp Files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Editor / OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Database Files
+*.db
+*.sqlite
+*.sqlite3
+# But allow schema files
+!**/schema.py
+
+# Coverage Reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Node modules (if any)
+node_modules/
+
+# Python packaging
+*.whl
+pip-log.txt
+pip-delete-this-directory.txt
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+.tox/
+.nox/
+.hypothesis/
+
+# Translations
+*.mo
+*.pot
+
+# Scrapy
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# PyBuilder
+target/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# mypy
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython
+cython_debug/

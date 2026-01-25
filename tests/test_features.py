@@ -1,10 +1,10 @@
 import unittest
-from riskbot.features import normalize
-from riskbot.features.churn import ChurnEngine
-from riskbot.features.criticality import CriticalityEngine
-from riskbot.features.dependency import DependencyEngine
-from riskbot.features.history import HistoryEngine
-from riskbot.features.types import RawSignals
+from compliancebot.features import normalize
+from compliancebot.features.churn import ChurnEngine
+from compliancebot.features.criticality import CriticalityEngine
+from compliancebot.features.dependency import DependencyEngine
+from compliancebot.features.history import HistoryEngine
+from compliancebot.features.types import RawSignals
 
 class TestFeatures(unittest.TestCase):
     
@@ -39,12 +39,12 @@ class TestFeatures(unittest.TestCase):
         # log1p(100) ~ 4.6. z = (4.6-2)/1 = 2.6.
         # map(2.6, -1, 3) -> (2.6+1)/4 = 0.9.
         raw_high: RawSignals = {
-            "total_churn": 100, "files_changed": ["a","b","c","d","e","f"], 
-            "per_file_churn": {"a":100}
+            "total_churn": 2000, "files_changed": ["a","b","c","d","e","f"], 
+            "per_file_churn": {"a":2000}
         }
         feats, _ = engine.compute_features(raw_high, baselines)
         self.assertGreater(feats["churn_score"], 0.8)
-        self.assertEqual(feats["top_file_churn_ratio"], 1.0) # 100/100
+        self.assertEqual(feats["top_file_churn_ratio"], 1.0) # 2000/2000
 
     def test_criticality_engine(self):
         config = {"critical_paths": {"high": ["auth/"]}}
@@ -63,7 +63,7 @@ class TestFeatures(unittest.TestCase):
         # Mock buckets
         engine.bucket_stats = {
             "churn_high": {"incidents": 10, "total": 10}, # 100% rate, small sample
-            "crit_low": {"incidents": 0, "total": 100}    # 0% rate, large sample
+            "crit_low": {"incidents": 0, "total": 100} # 0% rate, large sample
         }
         
         # Inputs resulting in churn_high + crit_low
@@ -81,4 +81,4 @@ class TestFeatures(unittest.TestCase):
         self.assertTrue(0.2 < score < 0.5)
 
 if __name__ == "__main__":
-    unittest.main()
+ unittest.main()

@@ -1,0 +1,28 @@
+{
+  "policy_id": "HIPAA-164-312-b-AuditControls.R1",
+  "version": "1.0.0",
+  "name": "HIPAA 164.312(b) - Audit Controls - Rule R1",
+  "description": "Implement hardware, software, and/or procedural mechanisms that record and examine activity in information systems that contain or use electronic protected health information.",
+  "controls": [
+    {
+      "signal": "privileged.is_sensitive",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "WARN",
+    "message": "HIPAA 164.312(b): Sensitive system modification detected. Ensure this change is logged in the audit trail."
+  },
+  "metadata": {
+    "parent_policy": "HIPAA-164-312-b-AuditControls",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 110,
+    "compliance": {
+      "HIPAA": "164.312(b) - Audit Controls"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

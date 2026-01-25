@@ -1,7 +1,7 @@
 [project]
-name = "riskbot"
-version = "0.1.0"
-description = "AI-powered PR risk assessment"
+name = "compliancebot"
+version = "0.2.0"
+description = "Automated Compliance & Policy Enforcement for Engineering"
 requires-python = ">=3.9"
 dependencies = [
     "PyGithub==2.4.0",
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["riskbot"]
+packages = ["compliancebot"]
 
 [project.scripts]
-riskbot = "riskbot.cli:main"
+compliancebot = "compliancebot.cli:main"

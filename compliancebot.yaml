@@ -1,0 +1,103 @@
+# RiskBot Configuration (Enterprise)
+
+# Scoring Engine Settings
+scoring:
+  # Mode: baseline (heuristic), logistic (simple ML), tree (advanced ML)
+  mode: baseline 
+  # Enforcement: report_only (never fails job), enforce (fails job on decision=FAIL)
+  enforcement: report_only
+
+# Thresholds for Decisions
+thresholds:
+  warn_score: 10
+  fail_score: 25
+  warn_prob: 0.10
+  fail_prob: 0.25
+  # Gate Logic: score (0-100), prob (0-1), or both
+  gate_mode: score
+  
+  # Environment Overrides (activates via RISKBOT_ENV env var)
+  overrides:
+    prod:
+      fail_score: 70
+      fail_prob: 0.70
+    staging:
+      fail_score: 80
+
+# Provider Settings (GitHub/GitLab)
+provider:
+  type: github
+  
+# GitHub Specifics
+github:
+  auth_mode: pat # pat or app
+  # cache_ttl_seconds: 3600
+
+# Feature Weights (Baseline Model)
+weights:
+  history: 0.35
+  dependency: 0.20
+  churn: 0.20
+  criticality: 0.15
+  complexity: 0.10
+
+# Critical Path Definitions
+critical_paths:
+  # Multiplier for multiplicative scoring mode
+  multiplier: 2.5
+  
+  # Tier-0 (Hard Gate): Changes here FAIL immediately if size > 0
+  tier_0:
+    - "internal/backend/" # Terraform
+  
+  # Smart Tiered Bonuses (Additive Model)
+  # core: +25, high: +15, medium: +10, low: +5
+  bonuses:
+    core: 25
+    high: 15
+    medium: 10
+    low: 5
+  
+  # Tier definitions
+  core:
+    - "auth/"
+    - "consensus/" # Etcd/K8s
+    - "crypto/"
+    - "scheduler/" # K8s
+    - "raft/" # Etcd
+    - "wal/" # Etcd
+  
+  high:
+    - "api/"
+    - "storage/" # Prometheus
+    - "tsdb/" # Prometheus
+    - "promql/" # Prometheus (General)
+    - "payment/"
+    - "security/"
+  
+  medium:
+    - "config/"
+    - "proxy/"
+    - "cmd/"
+  
+  low:
+    - "test/"
+    - "testdata/"
+    - "docs/"
+    - "examples/"
+  
+  # Specific Tier overrides for Prometheus (User Request)
+  # These map to high if not covered by general tier_0
+  prometheus_high: 
+    - "tsdb/"
+    - "cmd/prometheus/"
+    - "storage/"
+    - "scrape/"
+    - "config/"
+
+# Bypass Logic (Emergency Hatches)
+bypass_users:
+  - "dependabot[bot]"
+bypass_labels:
+  - "emergency-fix"
+  - "incident-response"

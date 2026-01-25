@@ -1,0 +1,13 @@
+policy_id: SEC-PR-001
+name: "High Severity Changes Require Senior Review"
+description: "Changes identified as High Severity by the Core Risk Engine must be blocked until review."
+scope: pull_request
+controls:
+  - signal: core_risk.severity_level
+    operator: "in"
+    value: ["HIGH", "CRITICAL"]
+enforcement:
+  result: BLOCK
+  message: "Change requires Senior review due to High Severity."
+evidence:
+  include: ["core_risk.violations", "core_risk.evidence"]

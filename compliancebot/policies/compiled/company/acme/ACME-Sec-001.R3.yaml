@@ -1,0 +1,28 @@
+{
+  "policy_id": "ACME-Sec-001.R3",
+  "version": "1.0.0",
+  "name": "Acme Corp Security Standard - Rule R3",
+  "description": "Company-specific overrides and stricter enforcement.",
+  "controls": [
+    {
+      "signal": "deployment.risk_score",
+      "operator": ">",
+      "value": 80
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "ACME Policy Violation: Deployment risk score too high (>80). Reduce risk before merging."
+  },
+  "metadata": {
+    "parent_policy": "ACME-Sec-001",
+    "rule_id": "R3",
+    "version": "1.0.0",
+    "priority": 118,
+    "compliance": {
+      "Internal": "Sec-Std-01"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

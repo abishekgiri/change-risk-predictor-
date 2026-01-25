@@ -1,0 +1,30 @@
+{
+  "compiled_at": "2026-01-25T19:10:54.401738+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "SOC2-CC8": {
+      "source_hash": "4a33e3172c91d4304ee14c80b0e727c2a8d6758add17c8106dcb5fd829ada5eb",
+      "version": "1.0.0",
+      "rules": [
+        "SOC2-CC8.R1",
+        "SOC2-CC8.R2"
+      ]
+    },
+    "SOC2-CC7": {
+      "source_hash": "a4d05f269fe0fcf8bff93d4e396501c99a97ab68cde8be57966ebed07c9c9851",
+      "version": "1.0.0",
+      "rules": [
+        "SOC2-CC7.R1",
+        "SOC2-CC7.R2"
+      ]
+    },
+    "SOC2-CC6": {
+      "source_hash": "e9af88f5d318e45e9d974ee0ca73688a6696717478555916110b312de854f51b",
+      "version": "1.0.0",
+      "rules": [
+        "SOC2-CC6.R1",
+        "SOC2-CC6.R2"
+      ]
+    }
+  }
+}

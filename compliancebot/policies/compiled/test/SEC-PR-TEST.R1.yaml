@@ -1,0 +1,28 @@
+{
+  "policy_id": "SEC-PR-TEST.R1",
+  "version": "1.0.0",
+  "name": "Test Policy - Rule R1",
+  "description": "",
+  "controls": [
+    {
+      "signal": "test.signal",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Block message"
+  },
+  "metadata": {
+    "parent_policy": "SEC-PR-TEST",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "TEST": "T1"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

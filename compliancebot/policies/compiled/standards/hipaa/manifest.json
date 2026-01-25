@@ -1,0 +1,29 @@
+{
+  "compiled_at": "2026-01-25T19:10:54.407393+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "HIPAA-164-312-c-Integrity": {
+      "source_hash": "526051441fd3e2bf43a6a929cc05c0a3cc4c4f3bde768bf055056d9546dae40d",
+      "version": "1.0.0",
+      "rules": [
+        "HIPAA-164-312-c-Integrity.R1",
+        "HIPAA-164-312-c-Integrity.R2"
+      ]
+    },
+    "HIPAA-164-312-b-AuditControls": {
+      "source_hash": "c48beec3c74f9b4b9524a1328af8793ef87f542286008192484537e1846edb0c",
+      "version": "1.0.0",
+      "rules": [
+        "HIPAA-164-312-b-AuditControls.R1"
+      ]
+    },
+    "HIPAA-164-312-a-AccessControl": {
+      "source_hash": "354b62fe6dde776363d5229d6e6ae1ac42f7072edddfbe0efde26575cb4b262c",
+      "version": "1.0.0",
+      "rules": [
+        "HIPAA-164-312-a-AccessControl.R1",
+        "HIPAA-164-312-a-AccessControl.R2"
+      ]
+    }
+  }
+}

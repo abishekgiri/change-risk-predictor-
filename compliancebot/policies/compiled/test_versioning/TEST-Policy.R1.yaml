@@ -1,0 +1,26 @@
+{
+ "policy_id": "TEST-Policy.R1",
+ "version": "2.0.0",
+ "name": "Test Policy V2 - Rule R1",
+ "description": "",
+ "controls": [
+ {
+ "signal": "test.signal",
+ "operator": "==",
+ "value": true
+ }
+ ],
+ "enforcement": {
+ "result": "BLOCK",
+ "message": null
+ },
+ "metadata": {
+ "parent_policy": "TEST-Policy",
+ "rule_id": "R1",
+ "version": "2.0.0",
+ "priority": 120,
+ "compliance": {},
+ "effective_date": "2026-01-01",
+ "supersedes": "1.0.0"
+ }
+}

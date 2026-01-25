@@ -1,15 +1,15 @@
 import os
 import sqlite3
-from riskbot.config import RISK_DB_PATH
+from compliancebot.config import DB_PATH
 
 def test_dashboard_data_smoke():
     """
     Verifies that the database used by the dashboard exists and has data.
     This ensures the dashboard won't crash on startup due to missing tables.
     """
-    assert os.path.exists(RISK_DB_PATH), f"DB not found at {RISK_DB_PATH}"
+    assert os.path.exists(DB_PATH), f"DB not found at {DB_PATH}"
     
-    conn = sqlite3.connect(RISK_DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     try:
         # Check Stats Query
         total = conn.execute("SELECT COUNT(*) FROM pr_runs").fetchone()[0]
@@ -21,4 +21,3 @@ def test_dashboard_data_smoke():
         
     finally:
         conn.close()
-

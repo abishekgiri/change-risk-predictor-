@@ -1,0 +1,48 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": [
+        "summary",
+        "tone",
+        "key_reasons",
+        "next_steps",
+        "evidence_refs",
+        "disclaimer"
+    ],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Concise summary of the decision."
+        },
+        "tone": {
+            "type": "string",
+            "enum": [
+                "engineer",
+                "manager"
+            ]
+        },
+        "key_reasons": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "next_steps": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "evidence_refs": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "description": "List of authority evidence keys referenced (e.g. 'factor:churn')"
+        },
+        "disclaimer": {
+            "type": "string",
+            "pattern": "^AI-generated.*"
+        }
+    }
+}

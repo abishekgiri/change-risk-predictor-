@@ -1,0 +1,28 @@
+{
+  "policy_id": "SOC2-CC8.R1",
+  "version": "1.0.0",
+  "name": "SOC 2 CC8 - Change Management - Rule R1",
+  "description": "Ensures changes are authorized and tested prior to deployment.",
+  "controls": [
+    {
+      "signal": "approvals.count",
+      "operator": "<",
+      "value": 1
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Requirement failed: approvals.count >= 1"
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC8",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "SOC2": "CC8.1 - Authorization of Changes"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

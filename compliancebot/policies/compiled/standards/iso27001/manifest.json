@@ -1,0 +1,30 @@
+{
+  "compiled_at": "2026-01-25T19:10:54.405210+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "ISO27001-A12-OperationsSecurity": {
+      "source_hash": "d652f98e1c6644286a01403898b6b22f085ff10b4f825c3ee42f6963132b70c3",
+      "version": "1.0.0",
+      "rules": [
+        "ISO27001-A12-OperationsSecurity.R1",
+        "ISO27001-A12-OperationsSecurity.R2"
+      ]
+    },
+    "ISO27001-A9-AccessControl": {
+      "source_hash": "4a32bccc17aa3a4f5b7b04c45cb83a2e06b6f11f72f4e35c67538b80214c2f1a",
+      "version": "1.0.0",
+      "rules": [
+        "ISO27001-A9-AccessControl.R1",
+        "ISO27001-A9-AccessControl.R2"
+      ]
+    },
+    "ISO27001-A14-SecureDevelopment": {
+      "source_hash": "d6f08cac288a58e57b68a71c8458c94c0d592221de128cb80c827f9919c3cd66",
+      "version": "1.0.0",
+      "rules": [
+        "ISO27001-A14-SecureDevelopment.R1",
+        "ISO27001-A14-SecureDevelopment.R2"
+      ]
+    }
+  }
+}

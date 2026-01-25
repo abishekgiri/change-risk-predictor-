@@ -1,0 +1,28 @@
+{
+  "policy_id": "ISO27001-A9-AccessControl.R1",
+  "version": "1.0.0",
+  "name": "ISO 27001 A.9 - Access Control - Rule R1",
+  "description": "",
+  "controls": [
+    {
+      "signal": "secrets.detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "ISO 27001 A.9.4.3: Interactive password management required. Hardcoded secrets prohibited."
+  },
+  "metadata": {
+    "parent_policy": "ISO27001-A9-AccessControl",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "ISO27001": "A.9 - Access Control"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

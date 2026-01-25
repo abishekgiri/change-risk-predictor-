@@ -1,0 +1,28 @@
+{
+  "policy_id": "SOC2-CC8.R2",
+  "version": "1.0.0",
+  "name": "SOC 2 CC8 - Change Management - Rule R2",
+  "description": "Ensures changes are authorized and tested prior to deployment.",
+  "controls": [
+    {
+      "signal": "licenses.banned_detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "SOC 2 CC8.1 Violation: Unauthorized software license detected."
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC8",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "SOC2": "CC8.1 - Authorization of Changes"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

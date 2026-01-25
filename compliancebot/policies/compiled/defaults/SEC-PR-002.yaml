@@ -1,0 +1,11 @@
+policy_id: SEC-PR-002
+name: "Secret Detection Policy"
+description: "Blocks PRs containing hardcoded secrets"
+scope: pull_request
+controls:
+  - signal: secrets.detected
+    operator: "=="
+    value: true
+enforcement:
+  result: BLOCK
+  message: "PR contains hardcoded secrets. Remove all secrets before merging."

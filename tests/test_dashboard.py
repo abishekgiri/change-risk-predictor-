@@ -1,6 +1,6 @@
 import unittest
 import os
-from riskbot.config import RISK_DB_PATH
+from compliancebot.config import DB_PATH as RISK_DB_PATH
 
 class TestDashboardSmoke(unittest.TestCase):
     def test_environment_setup(self):

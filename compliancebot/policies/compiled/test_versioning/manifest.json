@@ -1,0 +1,13 @@
+{
+  "compiled_at": "2026-01-24T03:24:07.505446+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "TEST-Policy": {
+      "source_hash": "7d23e33c96a432029bd85d7f498c3c96a314ef2f0b179f1d3b35791c62fc5f9c",
+      "version": "2.0.0",
+      "rules": [
+        "TEST-Policy.R1"
+      ]
+    }
+  }
+}

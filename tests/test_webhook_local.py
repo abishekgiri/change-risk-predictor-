@@ -1,7 +1,7 @@
 import unittest.mock
 from fastapi.testclient import TestClient
-from riskbot.server import app
-from riskbot.config import RISK_DB_PATH
+from compliancebot.server import app
+from compliancebot.config import DB_PATH
 import sqlite3
 import os
 import json
@@ -34,7 +34,7 @@ def test_webhook_pr_opened():
     # Mock external requests (GitHub API) so we don't hit real limits or need tokens
     with unittest.mock.patch("requests.post") as mock_post, \
          unittest.mock.patch("requests.get") as mock_get, \
-         unittest.mock.patch("riskbot.server.GITHUB_TOKEN", "mock_token"):
+         unittest.mock.patch("compliancebot.server.GITHUB_TOKEN", "mock_token"):
         
         # Mock file fetch (files changed)
         # We need check which URL it was called with to return different things
@@ -42,13 +42,13 @@ def test_webhook_pr_opened():
             mock_resp = unittest.mock.Mock()
             mock_resp.status_code = 200
             
-            if "/contents/riskbot_config.yml" in url:
+            if "/contents/compliancebot.yaml" in url or "/contents/riskbot_config.yml" in url:
                 # Return empty config or mock config
                 mock_resp.json.return_value = {"content": ""} # defaulting to empty
             elif "/files" in url:
                 mock_resp.json.return_value = [{"filename": "config.py", "additions": 10, "deletions": 5}]
             else:
-                 mock_resp.json.return_value = {}
+                mock_resp.json.return_value = {}
             return mock_resp
 
         mock_get.side_effect = mock_get_side_effect
@@ -75,24 +75,21 @@ def test_webhook_pr_opened():
             if "/check-runs" in call[0][0]:
                 check_run_called = True
                 json_body = call[1]['json']
-                assert json_body['name'] == "RiskBot CI"
+                assert json_body['name'] == "ComplianceBot CI"
                 assert json_body['head_sha'] == "head123"
-                # Check if details_url is passed (we enabled it)
-                # Note: config.RISK_WEBHOOK_URL is loaded from env, which might be empty in test.
-                # Ideally we should mock env, but this basic assertion is enough for now.
         
         assert check_run_called, "create_check_run was not called"
-    
-    # 3. Verify DB
-    conn = sqlite3.connect(RISK_DB_PATH)
-    row = conn.execute(
-        "SELECT * FROM pr_runs WHERE repo=? AND pr_number=?", 
-        ("test/webhook-repo", 999)
-    ).fetchone()
-    conn.close()
-    
-    assert row is not None, "PR run not saved to DB"
-    print("Success: Webhook processed and Run saved to DB!")
+        
+        # 3. Verify DB
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT * FROM pr_runs WHERE repo=? AND pr_number=?", 
+            ("test/webhook-repo", 999)
+        ).fetchone()
+        conn.close()
+        
+        assert row is not None, "PR run not saved to DB"
+        print("Success: Webhook processed and Run saved to DB!")
 
 def test_webhook_ping():
     """Test GitHub Ping event."""

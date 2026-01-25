@@ -1,0 +1,15 @@
+{
+  "compiled_at": "2026-01-25T19:10:54.409391+00:00",
+  "compiler_version": "1.0.0",
+  "policies": {
+    "ACME-Sec-001": {
+      "source_hash": "f01b298295a58680e497a0b3fb385c5d8851c1d6d0d856c05b8ae3ba214f8a20",
+      "version": "1.0.0",
+      "rules": [
+        "ACME-Sec-001.R1",
+        "ACME-Sec-001.R2",
+        "ACME-Sec-001.R3"
+      ]
+    }
+  }
+}

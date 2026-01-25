@@ -1,0 +1,28 @@
+{
+  "policy_id": "ACME-Sec-001.R2",
+  "version": "1.0.0",
+  "name": "Acme Corp Security Standard - Rule R2",
+  "description": "Company-specific overrides and stricter enforcement.",
+  "controls": [
+    {
+      "signal": "licenses.id",
+      "operator": "==",
+      "value": "GPL-3.0"
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "ACME Policy Violation: GPL-3.0 is strictly banned for commercial distribution."
+  },
+  "metadata": {
+    "parent_policy": "ACME-Sec-001",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "Internal": "Sec-Std-01"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

@@ -1,0 +1,14 @@
+policy_id: SEC-PR-004
+name: "Approval Enforcement Policy"
+description: "Requires appropriate approvals before merging"
+scope: pull_request
+controls:
+  - signal: approvals.required
+    operator: "=="
+    value: true
+  - signal: approvals.satisfied
+    operator: "=="
+    value: false
+enforcement:
+  result: BLOCK
+  message: "Required approvals missing. Cannot merge until approval requirements are met."

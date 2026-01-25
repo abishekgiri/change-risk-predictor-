@@ -1,0 +1,28 @@
+{
+  "policy_id": "SOC2-CC7.R2",
+  "version": "1.0.0",
+  "name": "SOC 2 CC7 - System Operations - Rule R2",
+  "description": "Monitors system operations for anomalies and boundary violations.",
+  "controls": [
+    {
+      "signal": "env.production_violation",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "SOC 2 CC7.1 Violation: Production configuration in non-prod environment detected."
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC7",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "SOC2": "CC7.2 - Security Event Monitoring"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

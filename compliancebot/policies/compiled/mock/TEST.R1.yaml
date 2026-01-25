@@ -1,0 +1,21 @@
+policy_id: "TEST.R1"
+name: "Mock Test Policy R1"
+description: "A mock policy for testing and demonstration purposes."
+scope: "pull_request"
+enabled: true
+
+controls:
+  - signal: "features.lines_added"
+    operator: "<"
+    value: 1000000
+
+enforcement:
+  result: "COMPLIANT"
+  message: "Test policy always passes."
+
+metadata:
+  parent_policy: "TEST"
+  version: "1.2.3"
+  compliance:
+    SOC2: "CC1.1"
+  source_file: "test.dsl"

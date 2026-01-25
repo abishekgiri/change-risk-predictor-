@@ -1,0 +1,28 @@
+{
+  "policy_id": "SOC2-CC6.R1",
+  "version": "1.0.0",
+  "name": "SOC 2 CC6 - Logical and Physical Access Controls - Rule R1",
+  "description": "Ensures logical access is secured via secret scanning and approval workflows.",
+  "controls": [
+    {
+      "signal": "secrets.detected",
+      "operator": "==",
+      "value": true
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "SOC 2 CC6.1 Violation: Hardcoded credentials detected. This bypasses logical access controls."
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC6",
+    "rule_id": "R1",
+    "version": "1.0.0",
+    "priority": 120,
+    "compliance": {
+      "SOC2": "CC6.1 - Logical Access Security Software"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}

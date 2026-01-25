@@ -1,0 +1,28 @@
+{
+  "policy_id": "SOC2-CC6.R2",
+  "version": "1.0.0",
+  "name": "SOC 2 CC6 - Logical and Physical Access Controls - Rule R2",
+  "description": "Ensures logical access is secured via secret scanning and approval workflows.",
+  "controls": [
+    {
+      "signal": "approvals.security_review",
+      "operator": "<",
+      "value": 1
+    }
+  ],
+  "enforcement": {
+    "result": "BLOCK",
+    "message": "Requirement failed: approvals.security_review >= 1"
+  },
+  "metadata": {
+    "parent_policy": "SOC2-CC6",
+    "rule_id": "R2",
+    "version": "1.0.0",
+    "priority": 119,
+    "compliance": {
+      "SOC2": "CC6.1 - Logical Access Security Software"
+    },
+    "effective_date": null,
+    "supersedes": null
+  }
+}
