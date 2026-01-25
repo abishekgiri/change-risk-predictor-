@@ -21,6 +21,14 @@ credentials/
 # Generated Runtime Output
 audit_bundles/
 *.bundle/
+explanation__*.json
+explanation__*.md
+out*.json
+p3_*.json
+result*.json
+policy_flip.json
+data/runs.jsonl
+
 
 # Caches & Build Artifacts
 __pycache__/
