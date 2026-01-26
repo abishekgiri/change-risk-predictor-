@@ -30,7 +30,7 @@ inputs:
 
 runs:
   using: 'docker'
-  image: 'Dockerfile'
+  image: 'docker://ghcr.io/abishekgiri/compliancebot:v1'
   args:
     - 'analyze-pr'
     - '--repo'
