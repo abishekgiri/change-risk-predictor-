@@ -93,6 +93,32 @@ cp .env.example .env
 # add GITHUB_TOKEN to .env
 ```
 
+### GitHub Action Usage
+
+Integrate directly into your CI pipeline without managing Python dependencies:
+
+```yaml
+# .github/workflows/compliance.yml
+name: Compliance Check
+on:
+  pull_request:
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v3
+      - uses: abishekgiri/change-risk-predictor-@v1
+        with:
+          mode: report_only # or 'block' to enforce
+          token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+See [docs/phase8_packaging.md](docs/phase8_packaging.md) for full documentation.
+
 ### Demo (Recommended)
 
 Run a real, high-risk scenario against a large public repository:

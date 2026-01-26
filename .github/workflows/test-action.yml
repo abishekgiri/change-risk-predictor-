@@ -1,0 +1,23 @@
+name: Test Action Locally
+
+on:
+  push:
+    branches:
+      - riskbot-test
+  pull_request:
+
+jobs:
+  test-local-action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Run ComplianceBot Action (Report Only)
+        uses: ./
+        with:
+          mode: report_only
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify Audit Bundle Exists
+        run: |
+          ls -F audit_bundles/

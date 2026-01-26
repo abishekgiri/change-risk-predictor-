@@ -17,8 +17,9 @@ dependencies = [
     "GitPython>=3.1.0",
 ]
 
-[tool.setuptools]
-packages = ["compliancebot"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["compliancebot*"]
 
 [project.scripts]
 compliancebot = "compliancebot.cli:main"

@@ -1,0 +1,39 @@
+# Exclude version control
+.git
+.gitignore
+
+# Exclude virtual environments
+venv/
+.venv/
+env/
+
+# Exclude python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Exclude tests and docs (keep image small)
+tests/
+docs/
+
+# Exclude local runtime artifacts
+audit_bundles/
+*.bundle/
+runs.jsonl
+*.json
+*.md
+
+# Keep requirements/setup
+!requirements.txt
+!pyproject.toml
+!README.md
+!LICENSE
+!action.yml

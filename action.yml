@@ -1,0 +1,45 @@
+name: 'ComplianceBot Change Risk Analyzer'
+description: 'Automated Change Risk Scoring & Compliance Enforcement for Pull Requests'
+author: 'Abishek Giri'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  repo:
+    description: 'Repository name (owner/repo)'
+    required: false
+    default: ${{ github.repository }}
+  pr:
+    description: 'Pull Request Number'
+    required: false
+    default: ${{ github.event.pull_request.number }}
+  mode:
+    description: 'Enforcement Mode: report_only (Exit 0 always) or block (Exit 1 on failure)'
+    required: false
+    default: 'report_only'
+  token:
+    description: 'GitHub Token for API access'
+    required: false
+    default: ${{ github.token }}
+  config:
+    description: 'Path to custom configuration file'
+    required: false
+    default: 'compliancebot.yaml'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - 'analyze-pr'
+    - '--repo'
+    - ${{ inputs.repo }}
+    - '--pr'
+    - ${{ inputs.pr }}
+    - '--config'
+    - ${{ inputs.config }}
+
+  env:
+    GITHUB_TOKEN: ${{ inputs.token }}
+    COMPLIANCEBOT_ENFORCEMENT: ${{ inputs.mode }}
