@@ -155,3 +155,7 @@ dmypy.json
 
 # Cython
 cython_debug/
+
+# Secrets
+compliancebot-app.pem
+*.pem

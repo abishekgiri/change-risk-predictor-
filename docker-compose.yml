@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  # Job Queue Buffer
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  # Audit Log Database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: compliancebot
+      POSTGRES_PASSWORD: development_password
+      POSTGRES_DB: compliancebot_saas
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
