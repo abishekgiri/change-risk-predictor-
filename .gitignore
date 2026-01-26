@@ -159,3 +159,10 @@ cython_debug/
 # Secrets
 compliancebot-app.pem
 *.pem
+data/runs.jsonl
+api.pid
+worker.pid
+*.log
+risk_result*.json
+risk_result_explanation*.md
+risk_result_explanation*.json
