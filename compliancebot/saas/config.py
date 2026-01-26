@@ -1,20 +1,23 @@
 import os
 from typing import Optional
+from dotenv import load_dotenv
 
-def load_private_key() -> Optional[bytes]:
+load_dotenv()
+
+def load_private_key() -> Optional[str]:
     """
     Load GitHub App Private Key from file or environment.
     """
     # 1. Try file first (Docker/Local)
     pem_path = os.getenv("GITHUB_PRIVATE_KEY_PATH", "compliancebot-app.pem")
     if os.path.exists(pem_path):
-        with open(pem_path, 'rb') as f:
+        with open(pem_path, 'r') as f:
             return f.read()
     
     # 2. Try env var (Deployment)
     pem_env = os.getenv("GITHUB_PRIVATE_KEY")
     if pem_env:
-        return pem_env.encode()
+        return pem_env
         
     return None
 

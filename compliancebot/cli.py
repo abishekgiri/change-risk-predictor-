@@ -474,6 +474,10 @@ def analyze_pr(args):
 
     control_result = result["control_result"]
 
+    if args.enforce and control_result == "BLOCK":
+        print(f"Blocking: Result=BLOCK -> EXIT 1")
+        sys.exit(1)
+    
     if enforce_mode == "report_only":
         print(f"Report-Only Mode: Result={control_result} -> EXIT 0")
         sys.exit(0)
@@ -575,6 +579,7 @@ def main():
     # Phase 7: AI Flags
     p_analyze.add_argument("--ai-explain", action="store_true", help="Generate AI-rewritten explanation")
     p_analyze.add_argument("--ai-suggestions", action="store_true", help="Generate AI fix suggestions")
+    p_analyze.add_argument("--enforce", action="store_true", help="Exit with non-zero code on failure")
 
     # hotspots
     p_hotspots = subparsers.add_parser("hotspots", help="Identify predictive bug hotspots")

@@ -5,6 +5,8 @@ from compliancebot.config import DB_PATH
 import sqlite3
 import os
 import json
+import hmac
+import hashlib
 
 client = TestClient(app)
 
@@ -31,10 +33,18 @@ def test_webhook_pr_opened():
     }
     
     # 2. Post
+    # Generate signature
+    secret = "mock_secret"
+    # Ensure consistent JSON serialization
+    payload_bytes = json.dumps(payload).encode('utf-8')
+    mac = hmac.new(secret.encode(), msg=payload_bytes, digestmod=hashlib.sha256)
+    signature = "sha256=" + mac.hexdigest()
+
     # Mock external requests (GitHub API) so we don't hit real limits or need tokens
     with unittest.mock.patch("requests.post") as mock_post, \
          unittest.mock.patch("requests.get") as mock_get, \
-         unittest.mock.patch("compliancebot.server.GITHUB_TOKEN", "mock_token"):
+         unittest.mock.patch("compliancebot.server.GITHUB_TOKEN", "mock_token"), \
+         unittest.mock.patch("compliancebot.server.GITHUB_SECRET", secret):
         
         # Mock file fetch (files changed)
         # We need check which URL it was called with to return different things
@@ -58,8 +68,12 @@ def test_webhook_pr_opened():
         
         response = client.post(
             "/webhooks/github",
-            json=payload,
-            headers={"X-GitHub-Event": "pull_request"}
+            content=payload_bytes,
+            headers={
+                "X-GitHub-Event": "pull_request",
+                "X-Hub-Signature-256": signature,
+                "Content-Type": "application/json"
+            }
         )
         
         assert response.status_code == 200, f"Response: {response.text}"

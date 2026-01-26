@@ -6,7 +6,8 @@ import json
 from datetime import datetime
 from compliancebot.saas.worker.auth import get_installation_token, get_github_client
 from compliancebot.saas.db.base import SessionLocal
-from compliancebot.saas.db.models import AnalysisRun
+from compliancebot.saas.db.models import AnalysisRun, Repository
+from compliancebot.saas.policy import resolve_effective_policy
 
 def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commit_sha: str):
     """
@@ -69,6 +70,20 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
             description = "Analysis completed."
             state = "error"
             
+            # Phase 9: Fetch Repository and Effective Policy
+            repo_record = db.query(Repository).filter(
+                Repository.full_name == repo_slug
+            ).first()
+            
+            strictness = "block"  # Default
+            if repo_record:
+                try:
+                    effective_policy = resolve_effective_policy(db, repo_record.id)
+                    strictness = effective_policy.get("strictness", "block")
+                    print(f"WORKER: Using strictness={strictness} for {repo_slug}")
+                except Exception as e:
+                    print(f"WORKER: Failed to resolve policy: {e}, using default strictness=block")
+            
             if proc.returncode == 0 and os.path.exists(os.path.join(work_dir, "result.json")):
                 with open(os.path.join(work_dir, "result.json")) as f:
                     result = json.load(f)
@@ -76,14 +91,22 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
                     # Fix: handle non-int severity
                     sev = result.get("severity", 0)
                     risk_score = int(sev) if isinstance(sev, int) else 0
-                    
+                
+                # Phase 9: Apply strictness mapping ONLY if result is BLOCK/NON_COMPLIANT
                 if verdict == "BLOCK":
-                    state = "failure"
-                    description = f"Blocked: Risk Level {result.get('severity')}"
+                    if strictness == "block":
+                        state = "failure"
+                        description = f"Blocked: Risk Level {result.get('severity')}"
+                    elif strictness == "warn":
+                        state = "success"  # Neutral not widely supported, use success with warning
+                        description = f"Warning (not blocking): Risk Level {result.get('severity')}"
+                    else:  # "pass"
+                        state = "success"
+                        description = f"Informational: Risk Level {result.get('severity')} (not enforced)"
                 elif verdict == "WARN":
-                    state = "success" # GitHub 'neutral' not widely supported on status, usually success w/ warning
+                    state = "success"
                     description = f"Warning: Risk Level {result.get('severity')}"
-                else: 
+                else:  # COMPLIANT
                     state = "success"
                     description = "Compliance Checks Passed"
             else:

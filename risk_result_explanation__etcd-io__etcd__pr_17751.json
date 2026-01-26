@@ -1,0 +1,6 @@
+{
+  "summary": "Compliance Status: BLOCK",
+  "details": [
+    "[SEC-PR-001] core_risk.severity_level (HIGH) in ['HIGH', 'CRITICAL']"
+  ]
+}
