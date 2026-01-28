@@ -1,6 +1,6 @@
 import json
 from typing import List
-from compliancebot.hotspots.types import FileRiskRecord
+from releasegate.hotspots.types import FileRiskRecord
 
 def render_markdown(records: List[FileRiskRecord], top_n: int = 20) -> str:
     """

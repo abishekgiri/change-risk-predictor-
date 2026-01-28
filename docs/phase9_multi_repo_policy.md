@@ -225,10 +225,10 @@ The repository override for `high_threshold` wins (60 instead of 80), while `req
 
 ## Files Modified
 
-- `compliancebot/saas/db/models.py` - Added stable GitHub IDs and policy columns
-- `compliancebot/saas/policy.py` - New file with merge logic and policy resolver
-- `compliancebot/saas/worker/tasks.py` - Updated to use effective policy and strictness mapping
-- `compliancebot/saas/api/main.py` - Added policy endpoints and webhook provisioning
+- `releasegate/saas/db/models.py` - Added stable GitHub IDs and policy columns
+- `releasegate/saas/policy.py` - New file with merge logic and policy resolver
+- `releasegate/saas/worker/tasks.py` - Updated to use effective policy and strictness mapping
+- `releasegate/saas/api/main.py` - Added policy endpoints and webhook provisioning
 - `scripts/verify_phase9.py` - Comprehensive test suite
 - `scripts/seed_phase9_db.py` - Idempotent database seeding script
 

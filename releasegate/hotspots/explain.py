@@ -1,5 +1,5 @@
 from typing import List
-from compliancebot.hotspots.types import FileRiskRecord
+from releasegate.hotspots.types import FileRiskRecord
 
 def explain_file_risk(record: FileRiskRecord) -> FileRiskRecord:
     """

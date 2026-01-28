@@ -3,7 +3,7 @@ import json
 import random
 import uuid
 from datetime import datetime, timedelta
-from compliancebot.config import DB_PATH
+from releasegate.config import DB_PATH
 import os
 
 def generate_mock_data(n=60):

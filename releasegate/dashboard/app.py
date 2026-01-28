@@ -5,12 +5,12 @@ import json
 import os
 import sys
 
-# Add project root to path so we can import compliancebot modules
+# Add project root to path so we can import releasegate modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from compliancebot.config import DB_PATH
-from compliancebot.storage.sqlite import add_label
-from compliancebot.model.train import train as train_model
+from releasegate.config import DB_PATH
+from releasegate.storage.sqlite import add_label
+from releasegate.model.train import train as train_model
 
 st.set_page_config(page_title="ComplianceBot Dashboard", page_icon=None, layout="wide")
 

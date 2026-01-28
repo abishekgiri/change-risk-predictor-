@@ -1,7 +1,7 @@
 import pytest
-from compliancebot.review import engine
-from compliancebot.scoring.types import RiskResult
-from compliancebot.explain.types import ExplanationReport
+from releasegate.review import engine
+from releasegate.scoring.types import RiskResult
+from releasegate.explain.types import ExplanationReport
 
 def test_rationale_cleans_bad_heuristics():
     """

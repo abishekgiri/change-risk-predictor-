@@ -1,5 +1,5 @@
-from compliancebot.scoring.risk_score import RiskScorer
-from compliancebot.features.feature_store import FeatureStore
+from releasegate.scoring.risk_score import RiskScorer
+from releasegate.signals.feature_store import FeatureStore
 from typing import Dict, Any
 
 class CoreRiskControl:

@@ -92,7 +92,7 @@ Provides non-enforcing engineering guidance to unblock risky changes.
 See the Authority and AI Assistant working together on a "Hard" test case:
 
 ```bash
-python3 -m compliancebot.cli pick-hard \
+python3 -m releasegate.cli pick-hard \
  --repo prometheus/prometheus \
  --mode huge_churn \
  --ai-explain \
@@ -133,8 +133,8 @@ AI artifacts written to: audit_bundles/prometheus_prometheus/pr_17855/{uuid}/ai
 
 ### Developer API
 ```python
-from compliancebot.ai.explain_writer import AIExplanationWriter
-from compliancebot.ai.safety_gate import AISafetyGate
+from releasegate.ai.explain_writer import AIExplanationWriter
+from releasegate.ai.safety_gate import AISafetyGate
 
 # 1. Generate AI Explanation
 writer = AIExplanationWriter()

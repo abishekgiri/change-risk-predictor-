@@ -1,6 +1,6 @@
 from redis import Redis
 from rq import Queue
-from compliancebot.saas.config import SaaSConfig
+from releasegate.saas.config import SaaSConfig
 
 # Redis Connection
 redis_conn = Redis.from_url(SaaSConfig.REDIS_URL)

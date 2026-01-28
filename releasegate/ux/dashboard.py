@@ -1,6 +1,6 @@
 from typing import List
-from compliancebot.ux.analytics import ComplianceAnalytics
-from compliancebot.ux.types import DecisionRecord
+from releasegate.ux.analytics import ComplianceAnalytics
+from releasegate.ux.types import DecisionRecord
 import json
 
 class DashboardGenerator:

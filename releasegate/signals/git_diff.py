@@ -1,5 +1,5 @@
 from typing import List, Dict, Set
-from compliancebot.utils.shell import run_command
+from releasegate.utils.shell import run_command
 
 def get_changed_files(base: str, head: str) -> List[str]:
     """Return a list of changed file paths between base and head."""

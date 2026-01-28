@@ -1,8 +1,8 @@
 from typing import Dict, Any, List
-from compliancebot.config import SEVERITY_THRESHOLD_HIGH
-from compliancebot.features.types import FeatureVector
-from compliancebot.scoring.types import RiskResult
-from compliancebot.scoring import baseline, thresholds, calibration, model
+from releasegate.config import SEVERITY_THRESHOLD_HIGH
+from releasegate.signals.types import FeatureVector
+from releasegate.scoring.types import RiskResult
+from releasegate.scoring import baseline, thresholds, calibration, model
 
 class RiskScorer:
     """
@@ -268,7 +268,7 @@ class RiskScorer:
         """
         Calculate score and generate explanation report.
         """
-        from compliancebot.explain import explainer as exp
+        from releasegate.explain import explainer as exp
         
         # Calculate risk
         result = self.calculate_score(features, evidence)

@@ -53,7 +53,7 @@ def resolve_effective_policy(session: Session, repo_id: int) -> Dict[str, Any]:
         - repo_id: Repository ID
         - repo_name: Full repository name (owner/repo)
     """
-    from compliancebot.saas.db.models import Repository, Organization
+    from releasegate.saas.db.models import Repository, Organization
     
     # Fetch repository
     repo = session.query(Repository).filter(Repository.id == repo_id).first()

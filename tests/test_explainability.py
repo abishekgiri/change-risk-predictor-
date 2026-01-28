@@ -4,8 +4,8 @@ import json
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from compliancebot.explain.types import ExplanationReport, Contributor
-from compliancebot.explain import markdown
+from releasegate.explain.types import ExplanationReport, Contributor
+from releasegate.explain import markdown
 
 def test_markdown_determinism():
  """

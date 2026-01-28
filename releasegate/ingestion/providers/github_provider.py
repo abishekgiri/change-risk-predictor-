@@ -4,8 +4,8 @@ import os
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from github import Github, Auth
-from compliancebot.config import GITHUB_TOKEN, DB_PATH
-from compliancebot.ingestion.providers.base import GitProvider
+from releasegate.config import GITHUB_TOKEN, DB_PATH
+from releasegate.ingestion.providers.base import GitProvider
 
 class GitHubProvider(GitProvider):
     """

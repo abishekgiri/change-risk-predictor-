@@ -2,11 +2,11 @@ from typing import List, Dict, Any, Optional
 import os
 import json
 import hashlib
-from compliancebot.audit.types import TraceableFinding
-from compliancebot.engine import PolicyResult
+from releasegate.audit.types import TraceableFinding
+from releasegate.engine import PolicyResult
 
 # Assuming Phase 4 compiled policies are in a known location
-COMPILED_ROOT = "compliancebot/policies/compiled"
+COMPILED_ROOT = "releasegate.policy/compiled"
 
 class TraceabilityInjector:
     """

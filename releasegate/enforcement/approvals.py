@@ -6,9 +6,9 @@ Ensures PRs have required approvals from appropriate reviewers.
 from typing import Dict, Any, List
 from datetime import datetime
 from .types import ControlBase, ControlContext, ControlSignalSet, Finding
-from compliancebot.features.approvals.types import Review, ApprovalRequirement
-from compliancebot.features.approvals.validator import validate_approvals
-from compliancebot.features.approvals.evidence import approvals_to_findings
+from releasegate.signals.approvals.types import Review, ApprovalRequirement
+from releasegate.signals.approvals.validator import validate_approvals
+from releasegate.signals.approvals.evidence import approvals_to_findings
 
 class ApprovalsControl(ControlBase):
     """

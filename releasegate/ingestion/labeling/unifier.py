@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Optional
-from compliancebot.ingestion.labeling.base import LabelResult
+from releasegate.ingestion.labeling.base import LabelResult
 
 class LabelUnifier:
     """

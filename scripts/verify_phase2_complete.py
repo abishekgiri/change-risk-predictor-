@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from compliancebot.engine import ComplianceEngine
-from compliancebot.audit.evidence import EvidenceBundler
+from releasegate.engine import ComplianceEngine
+from releasegate.audit.evidence import EvidenceBundler
 
 def main():
     print(" Starting Phase 2 End-to-End Verification...")

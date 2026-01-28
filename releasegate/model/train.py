@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from compliancebot.config import DB_PATH
+from releasegate.config import DB_PATH
 
 MODEL_PATH = "data/model.pkl"
 

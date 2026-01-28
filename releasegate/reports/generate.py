@@ -2,7 +2,7 @@ import csv
 import json
 import os
 from typing import List
-from compliancebot.audit.types import TraceableFinding
+from releasegate.audit.types import TraceableFinding
 
 class ReportGenerator:
     """

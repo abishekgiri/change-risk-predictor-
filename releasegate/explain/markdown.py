@@ -1,4 +1,4 @@
-from compliancebot.explain.types import ExplanationReport, Contributor
+from releasegate.explain.types import ExplanationReport, Contributor
 
 def render(report: ExplanationReport) -> str:
     """

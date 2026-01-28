@@ -1,7 +1,7 @@
 [project]
-name = "compliancebot"
+name = "releasegate"
 version = "0.2.0"
-description = "Automated Compliance & Policy Enforcement for Engineering"
+description = "ReleaseGate: Enterprise Change Governance Engine"
 requires-python = ">=3.9"
 dependencies = [
     "PyGithub==2.4.0",
@@ -19,7 +19,8 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["compliancebot*"]
+include = ["releasegate*"]
 
 [project.scripts]
-compliancebot = "compliancebot.cli:main"
+releasegate = "releasegate.cli:main"
+riskbot = "releasegate.compat.riskbot_shim:main"

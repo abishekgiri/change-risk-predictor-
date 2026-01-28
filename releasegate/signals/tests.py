@@ -1,5 +1,5 @@
 from typing import List
-from compliancebot.config import TEST_PATHS
+from releasegate.config import TEST_PATHS
 
 def has_test_changes(files: List[str]) -> bool:
     """Check if any of the changed files are test files."""

@@ -9,7 +9,7 @@ def verify_full_ux():
     # 1. Run CLI (using pick-hard demo mode to trigger logic)
     # Using 'huge_churn' mode to trigger Churn Explanation
     cmd = [
-        "python3", "-m", "compliancebot.cli", "pick-hard", 
+        "python3", "-m", "releasegate.cli", "pick-hard", 
         "--repo", "prometheus/prometheus", 
         "--mode", "huge_churn"
     ]

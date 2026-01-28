@@ -22,6 +22,6 @@ Overrides are performed using **Protected Labels**.
 - `hotfix-approved`
 
 ## Policy Security
-Policies are defined as code in the `compliancebot/policies/` directory.
+Policies are defined as code in the `releasegate/policies/` directory.
 - This directory should be protected via **CODEOWNERS**.
 - Changes to policies trigger a self-compliance check.

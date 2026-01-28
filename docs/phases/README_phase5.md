@@ -68,27 +68,27 @@ Phase 5 features are enabled by default in the CLI.
 
 ### Basic Run
 ```bash
-python3 -m compliancebot.cli analyze-pr --repo owner/repo --pr 123
+python3 -m releasegate.cli analyze-pr --repo owner/repo --pr 123
 ```
 *Creates a bundle in `./audit_bundles` and appends to the log.*
 
 ### Custom Output Location
 ```bash
-python3 -m compliancebot.cli analyze-pr --repo owner/repo --pr 123 \
+python3 -m releasegate.cli analyze-pr --repo owner/repo --pr 123 \
 --audit-out /mnt/secure_volume/audit_logs
 ```
 
 ### Export Formats
 Control which reports are generated in the bundle:
 ```bash
-python3 -m compliancebot.cli analyze-pr ... --report json,csv
+python3 -m releasegate.cli analyze-pr ... --report json,csv
 ```
 *(Options: `all` (default), `json`, `md`, `csv`, `none`)*
 
 ### Disable Audit (Dev Mode)
 To ship faster or validte rules without creating noise:
 ```bash
-python3 -m compliancebot.cli analyze-pr ... --no-bundle --no-audit-log
+python3 -m releasegate.cli analyze-pr ... --no-bundle --no-audit-log
 ```
 
 ---
@@ -99,7 +99,7 @@ We provide a suite of scripts to verify the integrity of the audit layer. To run
 
 ```bash
 PYTHONPATH=. pytest -q && \
-PYTHONPATH=. python3 -m compliancebot.policy_engine.compile && \
+PYTHONPATH=. python3 -m releasegate.policy_engine.compile && \
 PYTHONPATH=. python3 scripts/verify_phase5_audit_log.py && \
 PYTHONPATH=. python3 scripts/verify_phase5_bundle.py && \
 PYTHONPATH=. python3 scripts/verify_phase5_traceability.py && \

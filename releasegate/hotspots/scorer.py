@@ -1,6 +1,6 @@
 from typing import List
 from datetime import datetime
-from compliancebot.hotspots.types import FileRiskRecord
+from releasegate.hotspots.types import FileRiskRecord
 
 def score_files(file_data: dict, min_samples: int = 10) -> List[FileRiskRecord]:
     """

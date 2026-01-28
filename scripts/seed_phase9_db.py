@@ -4,8 +4,8 @@ Seed the database with test organizations and repositories for Phase 9 testing.
 Idempotent - can be run multiple times safely.
 """
 
-from compliancebot.saas.db.base import SessionLocal
-from compliancebot.saas.db.models import Organization, Repository
+from releasegate.saas.db.base import SessionLocal
+from releasegate.saas.db.models import Organization, Repository
 from sqlalchemy.exc import IntegrityError
 
 db = SessionLocal()

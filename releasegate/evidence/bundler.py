@@ -4,10 +4,10 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Any
 
-from compliancebot.storage.paths import get_bundle_path
-from compliancebot.audit.types import AuditEvent, TraceableFinding
-from compliancebot.storage.atomic import ensure_directory, atomic_write
-from compliancebot.evidence.snippets import extract_snippet
+from releasegate.storage.paths import get_bundle_path
+from releasegate.audit.types import AuditEvent, TraceableFinding
+from releasegate.storage.atomic import ensure_directory, atomic_write
+from releasegate.evidence.snippets import extract_snippet
 
 class EvidenceBundler:
     """

@@ -1,9 +1,9 @@
 from typing import Dict, Any, List, Optional
-from compliancebot.policies.types import Policy, ControlSignal
-from compliancebot.policies.loader import PolicyLoader
-from compliancebot.controls.core_risk import CoreRiskControl
-from compliancebot.controls.registry import ControlRegistry
-from compliancebot.controls.types import ControlContext
+from releasegate.policy.policy_types import Policy, ControlSignal
+from releasegate.policy.loader import PolicyLoader
+from releasegate.enforcement.core_risk import CoreRiskControl
+from releasegate.enforcement.registry import ControlRegistry
+from releasegate.enforcement.types import ControlContext
 from pydantic import BaseModel
 
 class PolicyResult(BaseModel):
@@ -26,7 +26,7 @@ class ComplianceEngine:
     """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.loader = PolicyLoader("compliancebot/policies/compiled")
+        self.loader = PolicyLoader("releasegate.policy/compiled")
         self.policies = self.loader.load_all()
         
         # Instantiate Controls

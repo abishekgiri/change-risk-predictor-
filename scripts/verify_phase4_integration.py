@@ -1,12 +1,12 @@
 import os
 import sys
 import shutil
-from compliancebot.engine import ComplianceEngine
-from compliancebot.policy_engine.builder import PolicyBuilder
+from releasegate.engine import ComplianceEngine
+from releasegate.policy.builder import PolicyBuilder
 
 # Paths
-DSL_ROOT = "compliancebot/policies/dsl"
-COMPILED_ROOT = "compliancebot/policies/compiled"
+DSL_ROOT = "releasegate.policy/dsl"
+COMPILED_ROOT = "releasegate.policy/compiled"
 
 def verify_integration():
     print("Starting Phase 4 End-to-End Verification")

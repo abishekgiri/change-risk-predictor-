@@ -4,9 +4,9 @@ Phase 9 Verification Script
 Tests multi-repo policy inheritance and strictness enforcement.
 """
 
-from compliancebot.saas.db.base import SessionLocal
-from compliancebot.saas.db.models import Organization, Repository
-from compliancebot.saas.policy import resolve_effective_policy, merge_configs
+from releasegate.saas.db.base import SessionLocal
+from releasegate.saas.db.models import Organization, Repository
+from releasegate.saas.policy import resolve_effective_policy, merge_configs
 
 
 def test_policy_merge():

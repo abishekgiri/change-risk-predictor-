@@ -4,14 +4,14 @@ Control Registry - orchestrates all Phase 3 controls.
 Executes controls in deterministic order and aggregates signals.
 """
 from typing import Dict, Any, List
-from compliancebot.controls.types import ControlContext, ControlSignalSet, ControlBase, Finding
+from releasegate.enforcement.types import ControlContext, ControlSignalSet, ControlBase, Finding
 
 # Import Phase 3 controls
-from compliancebot.controls.secrets import SecretsControl
-from compliancebot.controls.privileged_change import PrivilegedChangeControl
-from compliancebot.controls.approvals import ApprovalsControl
-from compliancebot.controls.licenses import LicensesControl
-from compliancebot.controls.env_boundary import EnvironmentBoundaryControl
+from releasegate.enforcement.secrets import SecretsControl
+from releasegate.enforcement.privileged_change import PrivilegedChangeControl
+from releasegate.enforcement.approvals import ApprovalsControl
+from releasegate.enforcement.licenses import LicensesControl
+from releasegate.enforcement.env_boundary import EnvironmentBoundaryControl
 
 class ControlRegistry:
     """

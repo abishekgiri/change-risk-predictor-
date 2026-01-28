@@ -1,9 +1,9 @@
-from compliancebot.features.feature_store import FeatureStore
-from compliancebot.storage.sqlite import save_run
-from compliancebot.scoring.calibration import Calibrator
-from compliancebot.scoring.risk_score import RiskScorer
-from compliancebot.ingestion.pr_parser import PRParser
-from compliancebot.config import (
+from releasegate.signals.feature_store import FeatureStore
+from releasegate.storage.sqlite import save_run
+from releasegate.scoring.calibration import Calibrator
+from releasegate.scoring.risk_score import RiskScorer
+from releasegate.ingestion.pr_parser import PRParser
+from releasegate.config import (
     GITHUB_TOKEN, WEBHOOK_URL,
     SEVERITY_THRESHOLD_HIGH
 )
@@ -360,7 +360,7 @@ async def github_webhook(
     evidence = []
 
     # Instantiate Provider
-    from compliancebot.ingestion.providers.github_provider import GitHubProvider
+    from releasegate.ingestion.providers.github_provider import GitHubProvider
     # Minimal config for provider
     provider_config = {"github": {"repo": repo_full_name, "cache_ttl": 3600}}
     provider = GitHubProvider(provider_config)
@@ -395,7 +395,7 @@ async def github_webhook(
     raw_signals["linked_issue_ids"] = linked_issues
 
     # Calculate Score & Evaluate Policies
-    from compliancebot.engine import ComplianceEngine
+    from releasegate.engine import ComplianceEngine
     engine = ComplianceEngine(config)
     run_result = engine.evaluate(raw_signals)
 

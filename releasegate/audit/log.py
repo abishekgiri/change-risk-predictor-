@@ -3,9 +3,9 @@ import hashlib
 import os
 from typing import Optional, Dict
 
-from compliancebot.audit.types import AuditEvent
-from compliancebot.storage.atomic import atomic_write
-from compliancebot.storage.paths import get_audit_log_path
+from releasegate.audit.types import AuditEvent
+from releasegate.storage.atomic import atomic_write
+from releasegate.storage.paths import get_audit_log_path
 
 class AuditLogger:
     """

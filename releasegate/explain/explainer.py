@@ -1,8 +1,8 @@
 from typing import Dict, Any, List
-from compliancebot.features.types import RawSignals, FeatureVector
-from compliancebot.scoring.types import RiskResult
-from compliancebot.explain.types import Contributor, ExplanationReport
-from compliancebot.explain import templates, severity
+from releasegate.signals.types import RawSignals, FeatureVector
+from releasegate.scoring.types import RiskResult
+from releasegate.explain.types import Contributor, ExplanationReport
+from releasegate.explain import templates, severity
 
 # Deterministic tie-breaking priority
 CONTRIBUTOR_PRIORITY = [

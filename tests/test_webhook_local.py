@@ -1,7 +1,7 @@
 import unittest.mock
 from fastapi.testclient import TestClient
-from compliancebot.server import app
-from compliancebot.config import DB_PATH
+from releasegate.server import app
+from releasegate.config import DB_PATH
 import sqlite3
 import os
 import json
@@ -43,8 +43,8 @@ def test_webhook_pr_opened():
     # Mock external requests (GitHub API) so we don't hit real limits or need tokens
     with unittest.mock.patch("requests.post") as mock_post, \
          unittest.mock.patch("requests.get") as mock_get, \
-         unittest.mock.patch("compliancebot.server.GITHUB_TOKEN", "mock_token"), \
-         unittest.mock.patch("compliancebot.server.GITHUB_SECRET", secret):
+         unittest.mock.patch("releasegate.server.GITHUB_TOKEN", "mock_token"), \
+         unittest.mock.patch("releasegate.server.GITHUB_SECRET", secret):
         
         # Mock file fetch (files changed)
         # We need check which URL it was called with to return different things
@@ -52,7 +52,7 @@ def test_webhook_pr_opened():
             mock_resp = unittest.mock.Mock()
             mock_resp.status_code = 200
             
-            if "/contents/compliancebot.yaml" in url or "/contents/riskbot_config.yml" in url:
+            if "/contents/releasegate.yaml" in url or "/contents/riskbot_config.yml" in url:
                 # Return empty config or mock config
                 mock_resp.json.return_value = {"content": ""} # defaulting to empty
             elif "/files" in url:

@@ -3,7 +3,7 @@
 ComplianceBot comes with three pre-built standard rule packs. These are technically verified implementations of common compliance controls.
 
 ## 1. SOC 2 Type II
-Located in: `compliancebot/policies/dsl/standards/soc2/`
+Located in: `releasegate/policies/dsl/standards/soc2/`
 
 | Policy ID | Control | Logic |
 |-----------|---------|-------|
@@ -12,7 +12,7 @@ Located in: `compliancebot/policies/dsl/standards/soc2/`
 | **SOC2_CC8** | Change Management | Requires at least 1 approval (`approvals.count >= 1`). Bans unauthorized licenses. |
 
 ## 2. ISO 27001:2013
-Located in: `compliancebot/policies/dsl/standards/iso27001/`
+Located in: `releasegate/policies/dsl/standards/iso27001/`
 
 | Policy ID | Annex A Control | Logic |
 |-----------|-----------------|-------|
@@ -21,7 +21,7 @@ Located in: `compliancebot/policies/dsl/standards/iso27001/`
 | **ISO27001_A14** | System Acquisition (A.14) | Secure engineering principles. License compliance. |
 
 ## 3. HIPAA Security Rule
-Located in: `compliancebot/policies/dsl/standards/hipaa/`
+Located in: `releasegate/policies/dsl/standards/hipaa/`
 
 | Policy ID | Section | Logic |
 |-----------|---------|-------|

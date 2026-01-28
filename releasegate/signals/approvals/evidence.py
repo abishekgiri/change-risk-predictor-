@@ -2,7 +2,7 @@
 Convert approval findings to universal evidence format.
 """
 from typing import List
-from compliancebot.controls.types import Finding
+from releasegate.enforcement.types import Finding
 from .types import ApprovalFinding
 
 def approval_to_finding(approval: ApprovalFinding) -> Finding:

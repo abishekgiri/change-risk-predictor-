@@ -1,8 +1,8 @@
 import sqlite3
 import json
 import os
-from compliancebot.config import DB_PATH, JSONL_PATH
-from compliancebot.storage.schema import init_db
+from releasegate.config import DB_PATH, JSONL_PATH
+from releasegate.storage.schema import init_db
 
 def save_run(repo, pr_number, base_sha, head_sha, score_data, features):
     init_db()
