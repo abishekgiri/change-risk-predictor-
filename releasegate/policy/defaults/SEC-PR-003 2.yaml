@@ -1,0 +1,11 @@
+policy_id: SEC-PR-003
+name: "Privileged Code Change Policy"
+description: "Requires additional scrutiny for changes to sensitive code paths"
+scope: pull_request
+controls:
+  - signal: privileged.detected
+    operator: "=="
+    value: true
+enforcement:
+  result: WARN
+  message: "Privileged code path modified. Security team review recommended."

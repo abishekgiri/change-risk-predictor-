@@ -35,8 +35,9 @@ def test_idempotency(clean_db):
     assert stored is not None
     assert stored["decision_id"] == d1.decision_id
     
-    # 4. Verify uniqueness constraint
-    # Trying to reuse the same KEY with different ID should fail at SQL level
+    # 4. Verify Idempotency (Safe Handling)
+    # Trying to reuse the same KEY with different ID should NOT fail, 
+    # but should return the EXISTING decision (d1)
     d2 = Decision(
         timestamp=datetime.now(timezone.utc),
         release_status="ALLOWED",
@@ -46,12 +47,13 @@ def test_idempotency(clean_db):
         evaluation_key="key1", # DUPLICATE KEY
         enforcement_targets=EnforcementTargets(repository="r", ref="sha")
     )
+
+    # Should NOT raise IntegrityError anymore
+    result = AuditRecorder.record_with_context(d2, "r", 1)
     
-    try:
-        AuditRecorder.record_with_context(d2, "r", 1)
-        pytest.fail("Should have raised IntegrityError (Unique Constraint)")
-    except sqlite3.IntegrityError:
-        pass # Expected
+    # Should return the ORIGINAL decision (d1), ignoring the new ID (d2)
+    assert result.decision_id == d1.decision_id
+    assert result.context_id == d1.context_id
 
 def test_planner_blocked(clean_db):
     """Test that blocked decisions generate proper actions."""

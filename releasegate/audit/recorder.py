@@ -83,5 +83,23 @@ class AuditRecorder:
                 decision.evaluation_key
             ))
             conn.commit()
+            return decision
+
+        except sqlite3.IntegrityError as e:
+            # Idempotency: evaluation_key already exists -> fetch existing row
+            if "audit_decisions.evaluation_key" in str(e) or "evaluation_key" in str(e):
+                cursor.execute("""
+                    SELECT full_decision_json
+                    FROM audit_decisions
+                    WHERE evaluation_key = ?
+                    LIMIT 1
+                """, (decision.evaluation_key,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    existing = row[0]
+                    if isinstance(existing, str):
+                        existing = json.loads(existing)
+                    return Decision.model_validate(existing)
+            raise
         finally:
             conn.close()

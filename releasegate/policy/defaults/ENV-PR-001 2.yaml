@@ -1,0 +1,11 @@
+policy_id: ENV-PR-001
+name: "Environment Boundary Policy"
+description: "Prevents production config from leaking into non-production code"
+scope: pull_request
+controls:
+  - signal: env_boundary.has_violations
+    operator: "=="
+    value: true
+enforcement:
+  result: BLOCK
+  message: "Production configuration detected in non-production code. Remove violations before merging."

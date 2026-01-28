@@ -1,0 +1,10 @@
+actors:
+  default_role: "Engineer"
+  github_to_role:
+    abishekgiri: "Admin"
+    dependabot: "Bot"
+    release-bot: "Bot"
+
+policies:
+  defaults:
+    environment: "UNKNOWN"
