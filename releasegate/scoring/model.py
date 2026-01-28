@@ -1,7 +1,7 @@
 import pickle
 import os
 from typing import Optional, Dict, Tuple
-from compliancebot.features.types import FeatureVector
+from releasegate.signals.types import FeatureVector
 
 MODEL_PATH = "riskbot/scoring/model_v1.pkl"
 

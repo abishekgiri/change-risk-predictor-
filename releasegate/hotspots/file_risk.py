@@ -1,8 +1,8 @@
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List
-from compliancebot.config import DB_PATH
-from compliancebot.features import normalize
+from releasegate.config import DB_PATH
+from releasegate.signals import normalize
 import math
 
 def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:

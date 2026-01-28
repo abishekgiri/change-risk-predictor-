@@ -1,5 +1,5 @@
 from github import GithubIntegration
-from compliancebot.saas.config import SaaSConfig
+from releasegate.saas.config import SaaSConfig
 import time
 
 def get_installation_token(installation_id: int) -> str:

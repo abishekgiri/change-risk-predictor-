@@ -6,7 +6,7 @@ import random
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import new engine
-from compliancebot.engine import ComplianceEngine
+from releasegate.engine import ComplianceEngine
 
 def demo_risk_scoring():
     print(" ComplianceBot V2: Scoring & Calibration Demo")

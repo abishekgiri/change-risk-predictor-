@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Data storage
-DB_PATH = os.getenv("COMPLIANCE_DB_PATH", os.getenv("DB_PATH", "data/compliancebot.db"))
+DB_PATH = os.getenv("COMPLIANCE_DB_PATH", os.getenv("DB_PATH", "data/releasegate.db"))
 JSONL_PATH = os.getenv("COMPLIANCE_JSONL_PATH", os.getenv("JSONL_PATH", "data/runs.jsonl"))
 
 # Webhook URL (for details_url in Check Runs)

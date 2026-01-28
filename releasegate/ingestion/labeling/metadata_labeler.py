@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
-from compliancebot.ingestion.labeling.base import BaseLabeler, LabelResult
-from compliancebot.ingestion.providers.base import GitProvider
+from releasegate.ingestion.labeling.base import BaseLabeler, LabelResult
+from releasegate.ingestion.providers.base import GitProvider
 
 class MetadataLabeler(BaseLabeler):
     """

@@ -13,4 +13,4 @@ phase6:
 clean:
 	rm -rf __pycache__
 	rm -rf .pytest_cache
-	rm -rf compliancebot/__pycache__
+	rm -rf releasegate/__pycache__

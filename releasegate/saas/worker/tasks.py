@@ -4,10 +4,10 @@ import tempfile
 import subprocess
 import json
 from datetime import datetime
-from compliancebot.saas.worker.auth import get_installation_token, get_github_client
-from compliancebot.saas.db.base import SessionLocal
-from compliancebot.saas.db.models import AnalysisRun, Repository
-from compliancebot.saas.policy import resolve_effective_policy
+from releasegate.saas.worker.auth import get_installation_token, get_github_client
+from releasegate.saas.db.base import SessionLocal
+from releasegate.saas.db.models import AnalysisRun, Repository
+from releasegate.saas.policy import resolve_effective_policy
 
 def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commit_sha: str):
     """
@@ -48,10 +48,10 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
             # Enforcing BLOCK mode effectively via check
             
             # Note: In real prod, this runs inside a Docker container.
-            # Here, we assume 'compliancebot' is installed in the worker env.
+            # Here, we assume 'releasegate' is installed in the worker env.
             
             cmd = [
-                "compliancebot", "analyze-pr",
+                "releasegate", "analyze-pr",
                 "--repo", repo_slug,
                 "--pr", str(pr_number),
                 "--token", token, # Pass app token as GITHUB_TOKEN

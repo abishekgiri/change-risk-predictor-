@@ -3,9 +3,9 @@ import json
 import glob
 import os
 from typing import Dict, Any
-from compliancebot.features.feature_store import FeatureStore
-from compliancebot.scoring.risk_score import RiskScorer
-from compliancebot.features.types import RawSignals
+from releasegate.signals.feature_store import FeatureStore
+from releasegate.scoring.risk_score import RiskScorer
+from releasegate.signals.types import RawSignals
 
 class TestGoldenFixtures(unittest.TestCase):
     def setUp(self):

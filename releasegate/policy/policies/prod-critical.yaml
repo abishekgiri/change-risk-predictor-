@@ -1,0 +1,12 @@
+id: prod-critical-change
+description: Block high risk changes in production
+priority: 10
+when:
+  environment:
+    eq: "PRODUCTION"
+  context:
+    change.lines_changed:
+      gt: 500
+then:
+  decision: "BLOCKED"
+  message: "Change is too large for automatic approval in PRODUCTION"

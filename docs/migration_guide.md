@@ -31,7 +31,7 @@ policy LEGACY_MIGRATION_01 {
 ### 4. Compile
 Run the compiler:
 ```bash
-python3 -m compliancebot.policy_engine.compile
+python3 -m releasegate.policy_engine.compile
 ```
 
 ### 5. Verify

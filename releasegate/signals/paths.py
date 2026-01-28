@@ -1,5 +1,5 @@
 from typing import List
-from compliancebot.config import CRITICAL_PATHS
+from releasegate.config import CRITICAL_PATHS
 
 def get_critical_path_touches(files: List[str]) -> List[str]:
     """Return which critical paths are touched."""

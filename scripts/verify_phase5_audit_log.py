@@ -3,8 +3,8 @@ import json
 import uuid
 import shutil
 from datetime import datetime, timezone
-from compliancebot.audit.log import AuditLogger
-from compliancebot.audit.types import AuditEvent
+from releasegate.audit.log import AuditLogger
+from releasegate.audit.types import AuditEvent
 
 REPO = "abishekgiri/change-risk-predictor"
 LOG_DIR = "audit_bundles/logs/abishekgiri_change-risk-predictor"

@@ -5,8 +5,8 @@ Prevents secrets from being committed to source code.
 """
 from typing import Dict, Any
 from .types import ControlBase, ControlContext, ControlSignalSet, Finding
-from compliancebot.features.secrets.scanner import scan_pr_diff
-from compliancebot.features.secrets.evidence import secrets_to_findings
+from releasegate.signals.secrets.scanner import scan_pr_diff
+from releasegate.signals.secrets.evidence import secrets_to_findings
 
 class SecretsControl(ControlBase):
     """

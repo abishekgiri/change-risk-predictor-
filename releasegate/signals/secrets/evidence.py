@@ -2,7 +2,7 @@
 Convert secret findings to universal evidence format.
 """
 from typing import List
-from compliancebot.controls.types import Finding
+from releasegate.enforcement.types import Finding
 from .types import SecretFinding
 
 def secret_to_finding(secret: SecretFinding) -> Finding:

@@ -1,6 +1,6 @@
 from typing import Dict, Any, List, Optional
-from compliancebot.ux.types import ExplanationFactor, DecisionExplanation
-from compliancebot.ux.remediation import get_remediation
+from releasegate.ux.types import ExplanationFactor, DecisionExplanation
+from releasegate.ux.remediation import get_remediation
 
 class ExplanationEngine:
     """

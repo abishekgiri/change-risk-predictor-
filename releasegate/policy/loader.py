@@ -1,39 +1,45 @@
 import os
 import yaml
-from typing import List, Dict
-from compliancebot.policies.types import Policy
+from typing import List
+from .types import PolicyDef
 
 class PolicyLoader:
-    """
-    Loads and validates policies from YAML files.
-    """
-    def __init__(self, policy_dir: str):
+    def __init__(self, policy_dir: str = "releasegate/policy/policies"):
         self.policy_dir = policy_dir
 
-    def load_all(self) -> List[Policy]:
-        """Load all enabled policies from the directory."""
+    def load_policies(self) -> List[PolicyDef]:
+        """
+        Recursively load all YAML policies from the directory.
+        Returns validated PolicyDef objects sorted by Priority (asc), then ID.
+        """
         policies = []
+        
         if not os.path.exists(self.policy_dir):
-            print(f"Warning: Policy directory {self.policy_dir} does not exist.")
             return []
 
         for root, _, files in os.walk(self.policy_dir):
             for file in files:
-                if file.endswith((".yaml", ".yml")):
-                    p = self._load_file(os.path.join(root, file))
-                    if p and p.enabled:
-                        policies.append(p)
-        return policies
+                if file.startswith("_"):
+                    continue
+                if file.endswith(".yaml") or file.endswith(".yml"):
+                    full_path = os.path.join(root, file)
+                    try:
+                        with open(full_path, "r") as f:
+                            data = yaml.safe_load(f)
+                            # Handle empty files
+                            if not data:
+                                continue
+                            
+                            # Support multi-document streams if needed, for now assume single
+                            policy = PolicyDef(**data)
+                            policy.source_file = full_path
+                            policies.append(policy)
+                    except Exception as e:
+                        print(f"WARN: Failed to load policy {full_path}: {e}")
+        
+        # Sort deterministic: Priority ASC (1 wins over 100), then ID ASC
+        return sorted(policies, key=lambda p: (p.priority, p.id))
 
-    def _load_file(self, path: str) -> Policy:
-        try:
-            with open(path, "r") as f:
-                data = yaml.safe_load(f)
-            
-            # Allow list of policies in one file or single policy per file
-            # For now, assume single policy per file for simplicity
-            return Policy(**data)
-        except Exception as e:
-            print(f"Error loading policy from {path}: {e}")
-            return None
-
+    def load_all(self) -> List[PolicyDef]:
+        """Alias for load_policies (legacy compatibility)."""
+        return self.load_policies()

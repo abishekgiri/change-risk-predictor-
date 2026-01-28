@@ -4,8 +4,8 @@ import sqlite3
 import re
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
-from compliancebot.config import DB_PATH
-from compliancebot.ingestion.providers.base import GitProvider
+from releasegate.config import DB_PATH
+from releasegate.ingestion.providers.base import GitProvider
 
 class GitLabProvider(GitProvider):
     """

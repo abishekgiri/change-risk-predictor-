@@ -1,14 +1,14 @@
 # Phase 8: Packaging for Scale
 
 ## Overview
-This document outlines the strategy for packaging `compliancebot` into a production-ready service, focusing on Dockerization and GitHub Action distribution.
+This document outlines the strategy for packaging `releasegate` into a production-ready service, focusing on Dockerization and GitHub Action distribution.
 
 ## 1. Dockerized Service
 **Goal:** Package the tool so it runs consistently on any machine, CI, or SaaS platform.
 
 ### Architecture
 - **Base Image:** `python:3.10-slim` (Optimization for size)
-- **Security:** Runs as non-root user `compliancebot` (UID 1000).
+- **Security:** Runs as non-root user `releasegate` (UID 1000).
 - **Permissions:** 
   - Source code in `/app` (Read-only for the process).
   - Runtime workspace in `/workspace`.
@@ -21,7 +21,7 @@ docker run --rm \
   -w /workspace \
   -e GITHUB_TOKEN=... \
   ghcr.io/abishekgiri/change-risk-predictor:v1 \
-  compliancebot analyze-pr --repo owner/repo --pr 123
+  releasegate analyze-pr --repo owner/repo --pr 123
 ```
 
 ## 2. GitHub Action Marketplace Listing

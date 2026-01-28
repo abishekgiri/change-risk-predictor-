@@ -1,10 +1,10 @@
 from typing import Dict, Any, List, Tuple
-from compliancebot.config import DB_PATH
-from compliancebot.features.types import RawSignals, FeatureVector, FeatureExplanation
-from compliancebot.features.churn import ChurnEngine
-from compliancebot.features.criticality import CriticalityEngine
-from compliancebot.features.history import HistoryEngine
-from compliancebot.features.dependency import DependencyEngine
+from releasegate.config import DB_PATH
+from releasegate.signals.types import RawSignals, FeatureVector, FeatureExplanation
+from releasegate.signals.churn import ChurnEngine
+from releasegate.signals.criticality import CriticalityEngine
+from releasegate.signals.history import HistoryEngine
+from releasegate.signals.dependency import DependencyEngine
 
 class FeatureStore:
     """

@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from compliancebot.ingestion.labeling.base import BaseLabeler, LabelResult
+from releasegate.ingestion.labeling.base import BaseLabeler, LabelResult
 
 class RevertLabeler(BaseLabeler):
     """

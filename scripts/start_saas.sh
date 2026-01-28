@@ -16,17 +16,17 @@ sleep 10
 
 # 3. Create DB Tables
 echo "Initializing Database..."
-python3 -c "from compliancebot.saas.db.base import Base, engine; from compliancebot.saas.db import models; Base.metadata.create_all(bind=engine)"
+python3 -c "from releasegate.saas.db.base import Base, engine; from releasegate.saas.db import models; Base.metadata.create_all(bind=engine)"
 
 # 4. Start Services in Background
 echo "Starting Worker (RQ)..."
 # Using nohup to keep it running
-nohup rq worker --url redis://localhost:6379/0 compliancebot.saas.worker.tasks > worker.log 2>&1 &
+nohup rq worker --url redis://localhost:6379/0 releasegate.saas.worker.tasks > worker.log 2>&1 &
 WORKER_PID=$!
 echo "Worker started (PID $WORKER_PID). Logs: worker.log"
 
 echo "Starting API (FastAPI)..."
-nohup uvicorn compliancebot.saas.api.main:app --reload --port 8000 > api.log 2>&1 &
+nohup uvicorn releasegate.saas.api.main:app --reload --port 8000 > api.log 2>&1 &
 API_PID=$!
 echo "API started (PID $API_PID). Logs: api.log"
 

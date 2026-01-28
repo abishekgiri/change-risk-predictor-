@@ -1,6 +1,6 @@
 import argparse
 import sys
-from compliancebot.storage.sqlite import add_label
+from releasegate.storage.sqlite import add_label
 
 def main():
     parser = argparse.ArgumentParser(description="Label a PR with an outcome")

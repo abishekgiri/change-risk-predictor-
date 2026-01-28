@@ -25,7 +25,7 @@ C -->|Evaluate| E[Audit Finding]
 ## Usage
 
 ### 1. Writing a Policy
-Create a file in `compliancebot/policies/dsl/company/my_policy.dsl`:
+Create a file in `releasegate/policies/dsl/company/my_policy.dsl`:
 ```groovy
 policy ACME_Sec_01 {
 version: "1.0.0"
@@ -45,14 +45,14 @@ require approvals.count >= 2
 ### 2. Compiling (Build)
 Run the compiler to generate YAML artifacts and `manifest.json`:
 ```bash
-python3 -m compliancebot.policy_engine.compile
+python3 -m releasegate.policy_engine.compile
 ```
-Artifacts will be generated in `compliancebot/policies/compiled/`.
+Artifacts will be generated in `releasegate/policies/compiled/`.
 
 ### 3. Evaluating
 The engine automatically loads compiled policies.
 ```python
-from compliancebot.engine import ComplianceEngine
+from releasegate.engine import ComplianceEngine
 engine = ComplianceEngine(config)
 result = engine.evaluate(signals)
 
@@ -76,7 +76,7 @@ print("Compliance Check Failed!")
 To run the full Phase 4 verification suite:
 ```bash
 PYTHONPATH=. \
-python3 -m compliancebot.policy_engine.compile && \
+python3 -m releasegate.policy_engine.compile && \
 python3 scripts/verify_phase4_dsl.py && \
 python3 scripts/verify_phase4_standards.py && \
 python3 scripts/verify_phase4_traceability.py && \

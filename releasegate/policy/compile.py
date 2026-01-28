@@ -1,10 +1,10 @@
 import os
 import sys
-from compliancebot.policy_engine.builder import PolicyBuilder
+from releasegate.policy.builder import PolicyBuilder
 
 # Configuration
-DSL_ROOT = "compliancebot/policies/dsl"
-COMPILED_ROOT = "compliancebot/policies/compiled"
+DSL_ROOT = "releasegate.policy/dsl"
+COMPILED_ROOT = "releasegate.policy/compiled"
 
 def main():
     print("Phase 4: Compiling Compliance DSL")

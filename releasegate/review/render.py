@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from typing import Dict, Any, List
-from compliancebot.review.types import ReviewPriorityResult
+from releasegate.review.types import ReviewPriorityResult
 
 def to_json(result: ReviewPriorityResult, context: Dict[str, Any] = None) -> Dict[str, Any]:
     """

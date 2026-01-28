@@ -51,14 +51,14 @@ fi
 # 4. Check ComplianceBot CLI
 echo ""
 echo "[4] Checking ComplianceBot CLI..."
-if command -v compliancebot &> /dev/null; then
-  echo "[OK] 'compliancebot' command found."
+if command -v releasegate &> /dev/null; then
+  echo "[OK] 'releasegate' command found."
 else
   # Try python module check
-  if python3 -c "import compliancebot" &> /dev/null; then
-     echo "[OK] 'compliancebot' python module found."
+  if python3 -c "import releasegate" &> /dev/null; then
+     echo "[OK] 'releasegate' python module found."
   else
-     echo "[FAIL] 'compliancebot' NOT found."
+     echo "[FAIL] 'releasegate' NOT found."
      echo " Run: pip install -e ."
   fi
 fi

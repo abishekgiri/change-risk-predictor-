@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
-from compliancebot.saas.config import SaaSConfig
-from compliancebot.saas.worker.queue import job_queue
-from compliancebot.saas.db.base import SessionLocal
-from compliancebot.saas.db.models import Organization, Repository
-from compliancebot.saas.policy import resolve_effective_policy
+from releasegate.saas.config import SaaSConfig
+from releasegate.saas.worker.queue import job_queue
+from releasegate.saas.db.base import SessionLocal
+from releasegate.saas.db.models import Organization, Repository
+from releasegate.saas.policy import resolve_effective_policy
 import hmac
 import hashlib
 import json
@@ -105,7 +105,7 @@ async def webhook_handler(request: Request, authorized: bool = Depends(verify_si
             
             # Enqueue Job
             job = job_queue.enqueue(
-                "compliancebot.saas.worker.tasks.run_analysis_job",
+                "releasegate.saas.worker.tasks.run_analysis_job",
                 installation_id=install_id,
                 repo_slug=repo_full_name,
                 pr_number=pr_number,
@@ -252,4 +252,4 @@ def get_effective_policy(repo_id: int):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "compliancebot-saas-api"}
+    return {"status": "ok", "service": "releasegate-saas-api"}

@@ -19,7 +19,7 @@ The SaaS MVP enables "Zero Config" usage. Instead of users configuring GitHub Ac
 - **Why:** GitHub expects fast webhook responses (<10s). Analysis takes time.
 
 ### 3. Worker Service (The Brain)
-- **Role:** Executes the heavy `compliancebot` analysis.
+- **Role:** Executes the heavy `releasegate` analysis.
 - **Flow:**
   1. **Authenticate:** Generates an Installation Token for the specific Org/Repo.
   2. **Status: Pending:** Tells GitHub "ComplianceBot is running...".

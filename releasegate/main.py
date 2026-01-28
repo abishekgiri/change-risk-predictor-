@@ -6,13 +6,13 @@ from dotenv import load_dotenv
 # Load env vars
 load_dotenv()
 
-from compliancebot.features.git_diff import get_diff_stats, get_changed_files, get_file_stats
-from compliancebot.features.churn import get_churn_stats
-from compliancebot.features.tests import has_test_changes
-from compliancebot.features.paths import get_critical_path_touches
-from compliancebot.scoring.rules_v1 import calculate_score
-from compliancebot.scoring.explain import generate_markdown_report
-from compliancebot.storage.sqlite import save_run
+from releasegate.signals.git_diff import get_diff_stats, get_changed_files, get_file_stats
+from releasegate.signals.churn import get_churn_stats
+from releasegate.signals.tests import has_test_changes
+from releasegate.signals.paths import get_critical_path_touches
+from releasegate.scoring.rules_v1 import calculate_score
+from releasegate.scoring.explain import generate_markdown_report
+from releasegate.storage.sqlite import save_run
 
 def main():
     parser = argparse.ArgumentParser(description="Calculate PR risk score")
@@ -76,7 +76,7 @@ def main():
             print(f"Posting comment to {args.repo} PR #{args.pr}...")
             try:
                 # Local import to avoid NameError if top-level import fails or is cyclic
-                from compliancebot.integrations.github import post_comment
+                from releasegate.integrations.github import post_comment
                 post_comment(args.repo, args.pr, report)
             except Exception as e:
                 print(f"Error posting comment: {e}")

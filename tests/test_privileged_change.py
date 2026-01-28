@@ -2,8 +2,8 @@
 Unit tests for Privileged Code Change Detection.
 """
 import pytest
-from compliancebot.controls.privileged_change import PrivilegedChangeControl
-from compliancebot.controls.types import ControlContext
+from releasegate.enforcement.privileged_change import PrivilegedChangeControl
+from releasegate.enforcement.types import ControlContext
 
 def test_auth_path_detection():
  """Test detection of authentication code changes."""

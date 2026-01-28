@@ -1,6 +1,6 @@
 from typing import Dict, List, Tuple
-from compliancebot.features.types import FeatureVector
-from compliancebot.features import normalize
+from releasegate.signals.types import FeatureVector
+from releasegate.signals import normalize
 
 DEFAULT_WEIGHTS = {
  "churn": 0.25,

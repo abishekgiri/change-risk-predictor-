@@ -1,0 +1,12 @@
+id: prod-smoke
+description: Smoke test policy for production
+priority: 1
+when:
+  environment:
+    eq: "PRODUCTION"
+then:
+  decision: "CONDITIONAL"
+  requires:
+    approvals: 1
+    roles: ["Senior Engineer"]
+  message: "Smoke policy matched: PRODUCTION requires 1 senior approval."

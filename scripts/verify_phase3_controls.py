@@ -18,8 +18,8 @@ def main():
     # Test 1: Secrets Control
     print("\n1. Secret Scanner...")
     try:
-        from compliancebot.controls.secrets import SecretsControl
-        from compliancebot.controls.types import ControlContext
+        from releasegate.enforcement.secrets import SecretsControl
+        from releasegate.enforcement.types import ControlContext
         
         control = SecretsControl()
         context = ControlContext(
@@ -42,7 +42,7 @@ def main():
     # Test 2: Privileged Change Control
     print("\n2. Privileged Code Detection...")
     try:
-        from compliancebot.controls.privileged_change import PrivilegedChangeControl
+        from releasegate.enforcement.privileged_change import PrivilegedChangeControl
         
         control = PrivilegedChangeControl()
         context = ControlContext(
@@ -66,7 +66,7 @@ def main():
     # Test 3: Approvals Control
     print("\n3. Approval Enforcement...")
     try:
-        from compliancebot.controls.approvals import ApprovalsControl
+        from releasegate.enforcement.approvals import ApprovalsControl
         
         control = ApprovalsControl()
         context = ControlContext(
@@ -89,7 +89,7 @@ def main():
     # Test 4: License Control
     print("\n4. License Scanner...")
     try:
-        from compliancebot.controls.licenses import LicensesControl
+        from releasegate.enforcement.licenses import LicensesControl
         
         control = LicensesControl()
         context = ControlContext(
@@ -112,7 +112,7 @@ def main():
     # Test 5: Environment Boundary Control
     print("\n5. Environment Boundaries...")
     try:
-        from compliancebot.controls.env_boundary import EnvironmentBoundaryControl
+        from releasegate.enforcement.env_boundary import EnvironmentBoundaryControl
         
         control = EnvironmentBoundaryControl()
         context = ControlContext(

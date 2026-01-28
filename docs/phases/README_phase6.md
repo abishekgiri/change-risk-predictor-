@@ -40,7 +40,7 @@ Phase 6 features are automatically integrated into the CLI.
 
 ### Run Analysis with Explanations
 ```bash
-python3 -m compliancebot.cli analyze-pr --repo owner/repo --pr 123
+python3 -m releasegate.cli analyze-pr --repo owner/repo --pr 123
 ```
 
 You will see a new section in the output:
@@ -106,7 +106,7 @@ Analytics Verification Successful
 === Running Phase 6: End-to-End UX ===
 Verifying Phase 6 Enterprise UX End-to-End
 ==========================================
-Running CLI: python3 -m compliancebot.cli pick-hard --repo prometheus/prometheus --mode huge_churn
+Running CLI: python3 -m releasegate.cli pick-hard --repo prometheus/prometheus --mode huge_churn
 
 --- CLI Output Snippet ---
 ============================================================

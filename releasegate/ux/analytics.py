@@ -1,7 +1,7 @@
 from typing import List, Dict
 from datetime import datetime
 from collections import defaultdict
-from compliancebot.ux.types import DecisionRecord
+from releasegate.ux.types import DecisionRecord
 
 class ComplianceAnalytics:
     """

@@ -5,7 +5,7 @@ Prevents disallowed open-source licenses from being introduced.
 """
 from typing import Dict, Any, List
 from .types import ControlBase, ControlContext, ControlSignalSet, Finding
-from compliancebot.features.licenses.detector import detect_licenses, classify_license
+from releasegate.signals.licenses.detector import detect_licenses, classify_license
 
 class LicensesControl(ControlBase):
     """

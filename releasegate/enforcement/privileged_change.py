@@ -10,7 +10,7 @@ class PrivilegedChangeControl(ControlBase):
     """
     Privileged code change detection.
     
-    Identifies changes to sensitive paths defined in compliancebot.yaml:
+    Identifies changes to sensitive paths defined in releasegate.yaml:
     - Authentication/authorization code
     - Payment processing
     - Cryptographic operations

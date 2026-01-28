@@ -1,9 +1,9 @@
 import sqlite3
 import json
 from typing import Dict, Tuple, Any, List
-from compliancebot.config import DB_PATH
-from compliancebot.features.types import RawSignals, FeatureExplanation
-from compliancebot.features import normalize
+from releasegate.config import DB_PATH
+from releasegate.signals.types import RawSignals, FeatureExplanation
+from releasegate.signals import normalize
 
 class CriticalityEngine:
     """

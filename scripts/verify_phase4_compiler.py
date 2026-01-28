@@ -1,10 +1,10 @@
 import os
 import shutil
 import json
-from compliancebot.policy_engine.builder import PolicyBuilder
+from releasegate.policy.builder import PolicyBuilder
 
-SOURCE_DIR = "compliancebot/policies/dsl/test"
-OUTPUT_DIR = "compliancebot/policies/compiled/test"
+SOURCE_DIR = "releasegate.policy/dsl/test"
+OUTPUT_DIR = "releasegate.policy/compiled/test"
 
 SAMPLE_DSL = """
 policy SEC_PR_TEST {

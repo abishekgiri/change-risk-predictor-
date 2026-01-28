@@ -1,10 +1,10 @@
 import unittest
-from compliancebot.features import normalize
-from compliancebot.features.churn import ChurnEngine
-from compliancebot.features.criticality import CriticalityEngine
-from compliancebot.features.dependency import DependencyEngine
-from compliancebot.features.history import HistoryEngine
-from compliancebot.features.types import RawSignals
+from releasegate.signals import normalize
+from releasegate.signals.churn import ChurnEngine
+from releasegate.signals.criticality import CriticalityEngine
+from releasegate.signals.dependency import DependencyEngine
+from releasegate.signals.history import HistoryEngine
+from releasegate.signals.types import RawSignals
 
 class TestFeatures(unittest.TestCase):
     

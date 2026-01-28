@@ -3,14 +3,14 @@ Unit tests for Approval Enforcement.
 """
 import pytest
 from datetime import datetime
-from compliancebot.features.approvals.types import Review, ApprovalRequirement
-from compliancebot.features.approvals.validator import (
+from releasegate.signals.approvals.types import Review, ApprovalRequirement
+from releasegate.signals.approvals.validator import (
  is_review_stale,
  get_reviewer_roles,
  validate_approvals
 )
-from compliancebot.controls.approvals import ApprovalsControl
-from compliancebot.controls.types import ControlContext
+from releasegate.enforcement.approvals import ApprovalsControl
+from releasegate.enforcement.types import ControlContext
 
 def test_stale_review_detection():
  """Test detection of stale reviews."""

@@ -1,8 +1,8 @@
 from typing import Dict, Any, List
-from compliancebot.scoring.types import RiskResult
-from compliancebot.explain.types import ExplanationReport
-from compliancebot.review.types import ReviewPriorityResult
-from compliancebot.review import priority
+from releasegate.scoring.types import RiskResult
+from releasegate.explain.types import ExplanationReport
+from releasegate.review.types import ReviewPriorityResult
+from releasegate.review import priority
 
 def compute_review_priority(
     pr_id: str,

@@ -1,462 +1,278 @@
-# ComplianceBot
+# ComplianceBot (formerly RiskBot) - Engineering Policy Enforcement
 
-**Deterministic Compliance Enforcement & Change Risk Analysis for Modern CI/CD**
+RiskBot is a deterministic, explainable change-risk analysis system for GitHub repositories. It analyzes pull requests and repository history to estimate the risk that a change will introduce bugs, regressions, or instability, and it explains *why* a change is risky in terms engineers actually understand.
 
-ComplianceBot is an enterprise-grade compliance and change-risk analysis platform designed for software teams that require **predictable enforcement**, **audit-ready evidence**, and **transparent decision-making**.
-
-It enforces security and compliance policies (SOC 2, ISO 27001, HIPAA) and evaluates operational change risk across pull requests — **without using machine learning in the enforcement path**.
-
-AI is used only as a non-enforcing assistant to explain decisions and suggest remediation, never to make or modify decisions.
+RiskBot is designed as an engineering decision-support tool, not a black-box AI reviewer. It integrates cleanly into CI/CD workflows and scales from individual repos to team-level engineering operations.
 
 ---
 
-## Why ComplianceBot Exists
-
-Most compliance and security tooling fails in one of two ways:
-
-1. **Manual processes** that are slow, inconsistent, and unscalable
-2. **Black-box automation** that makes unpredictable decisions and destroys trust
-
-ComplianceBot takes a different approach.
-
-**Every enforcement decision is deterministic, explainable, and auditable.**
-
-This makes ComplianceBot suitable for:
-- Regulated environments
-- External audits
-- High-risk production systems
-- Organizations that require trust in automation
-
----
-
-## Core Guarantees
-
-- **No ML in enforcement** — decisions are 100% reproducible
-- **Immutable audit evidence** — every run produces a tamper-evident bundle
-- **Policy-as-Code** — compliance rules are versioned and reviewed like software
-- **AI never enforces** — it can explain and suggest, but cannot block or approve
-- **Full traceability** — every decision links back to source policy and evidence
-
----
-
-## High-Level Architecture
-
-ComplianceBot is built in explicit phases, each adding capability while preserving determinism.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 7: AI Assistant (Optional) │
-│ • AI Explanations • Fix Suggestions • Safety Gate │
-└─────────────────────────────────────────────────────────────┘
- ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 6: Enterprise UX & Trust │
-│ • Human Explanations • Remediation • Analytics │
-└─────────────────────────────────────────────────────────────┘
- ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 5: Evidence & Audit Layer │
-│ • Hash-Chained Logs • Evidence Bundles • Traceability │
-└─────────────────────────────────────────────────────────────┘
- ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 4: Policy Engine & DSL │
-│ • Policy-as-Code • Compiler • Standard Packs │
-└─────────────────────────────────────────────────────────────┘
- ↓
-┌─────────────────────────────────────────────────────────────┐
-│ Phase 3: Core Compliance Controls │
-│ • Secrets • Privileged Code • Approvals │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Authority vs Assistant** separation is enforced at the architecture level.
-
----
-
-## Quick Start
-
-### Requirements
-
-- **Python 3.10+**
-- GitHub Personal Access Token (read-only is sufficient for analysis)
-
-### Installation
-
-```bash
-git clone https://github.com/yourusername/change-risk-predictor.git
-cd change-risk-predictor
-
-pip install -r requirements.txt
-
-cp .env.example .env
-# add GITHUB_TOKEN to .env
-```
-
-### GitHub Action Usage
-
-Integrate directly into your CI pipeline without managing Python dependencies:
-
-```yaml
-# .github/workflows/compliance.yml
-name: Compliance Check
-on:
-  pull_request:
-
-jobs:
-  compliance:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v3
-      - uses: abishekgiri/change-risk-predictor-@v1
-        with:
-          mode: report_only # or 'block' to enforce
-          token: ${{ secrets.GITHUB_TOKEN }}
-```
-
-See [docs/phase8_packaging.md](docs/phase8_packaging.md) for full documentation.
-
-### Demo (Recommended)
-
-Run a real, high-risk scenario against a large public repository:
-
-```bash
-python3 -m compliancebot.cli pick-hard \
- --repo prometheus/prometheus \
- --mode huge_churn \
- --ai-explain \
- --ai-suggestions
-```
-
-This demonstrates:
-- Deterministic enforcement
-- Human-readable explanations
-- AI assistant output
-- Full audit bundle generation
-
----
-
-## CLI Usage
-
-### Analyze a Pull Request
-
-```bash
-python3 -m compliancebot.cli analyze-pr \
- --repo owner/repo \
- --pr 123
-```
-
-### With AI Assistance (Non-Enforcing)
-
-```bash
-python3 -m compliancebot.cli analyze-pr \
- --repo owner/repo \
- --pr 123 \
- --ai-explain \
- --ai-suggestions
-```
-
-### Enforcement Modes
-
-```bash
-COMPLIANCEBOT_ENFORCEMENT=enforce # hard gate
-COMPLIANCEBOT_ENFORCEMENT=report_only
-```
-
-### Exit Codes
-
-- **0** → PASS
-- **1** → BLOCK
-- **2** → WARN
-
----
-
-## Policy-as-Code
-
-Policies are written in a human-readable DSL and compiled into deterministic YAML.
-
-```groovy
-policy ACME_Sec_01 {
- version: "1.0.0"
- name: "Enforce Code Review"
- 
- control Approvals {
- signals: [ approvals.count ]
- }
- 
- rules {
- require approvals.count >= 2
- }
-}
-```
-
-Policies are:
-- **Versioned**
-- **Reviewed**
-- **Compiled**
-- **Fully traceable** to enforcement results
-
- **Documentation:** [docs/phases/README_phase4.md](docs/phases/README_phase4.md)
-
----
-
-## Compliance Controls
-
-Out-of-the-box enterprise controls include:
-
-- Secret scanning (AWS keys, tokens, private keys)
-- Privileged file modification detection
-- Approval enforcement
-- License compliance
-- Environment boundary protection
-
- **Documentation:** [docs/phases/README_phase3.md](docs/phases/README_phase3.md)
-
----
-
-## Immutable Audit Bundles
-
-Every run produces a tamper-evident audit bundle:
-
-```
-audit_bundles/{repo}/{pr}/{uuid}/
-├── manifest.json # SHA256 hashes
-├── findings.json # Technical findings
-├── policies_used.json # Active policies
-├── inputs/ # PR snapshot
-├── artifacts/ # Code diffs
-├── reports/ # Human & machine reports
-└── ai/ # Optional AI artifacts
-```
-
-AI artifacts are stored separately to preserve authority immutability.
-
- **Documentation:** [docs/phases/README_phase5.md](docs/phases/README_phase5.md)
-
----
-
-## Explainable Decisions (Phase 6)
-
-All decisions are accompanied by deterministic explanations:
-
-```
-Operational Risk Gate: BLOCK (Score: 75/100)
-
-Primary Drivers:
-- Extremely High Code Churn: 21,517 lines (Threshold: 500)
-
-Recommended Actions:
-- Split PR into smaller changes
-- Add regression tests
-```
-
- **Documentation:** [docs/phases/README_phase6.md](docs/phases/README_phase6.md)
-
----
-
-## AI Assistant (Phase 7 — Optional)
-
-### The Iron Rule of AI in Compliance
-
-> **AI can explain and suggest, but never enforce.**
-
-AI operates **after** decisions are made and must pass a Safety Gate.
-
-Example output:
-
-```
-AI ASSISTANT (Non-Enforcing) [Safety Gate: PASS]
-
-Key reasons:
-• Change volume is high (21,517 lines)
-• Churn threshold exceeded
-
-Evidence Refs:
-risk_score, factor:extremely_high_code_churn
-```
-
-AI outputs are:
-- **Fact-locked**
-- **Evidence-referenced**
-- **Audited**
-- **Persisted separately**
-
- **Documentation:** [docs/phases/README_phase7.md](docs/phases/README_phase7.md)
+## Table of Contents
+
+* [Project Structure](#project-structure)
+* [What Problem RiskBot Solves](#what-problem-riskbot-solves)
+* [Core Capabilities](#core-capabilities)
+* [How RiskBot Works](#how-riskbot-works)
+* [Installation](#installation)
+* [Authentication](#authentication)
+* [CLI Commands](#cli-commands)
+* [End-to-End Usage](#end-to-end-usage)
+* [Real World Output](#real-world-output)
+* [Data Quality Guarantees](#data-quality-guarantees)
+* [Design Philosophy](#design-philosophy)
+* [License](#license)
+* [Author](#author)
 
 ---
 
 ## Project Structure
 
-```
+The codebase is organized into modular components for ingestion, scoring, and reporting.
+
+```text
 change-risk-predictor/
-├── compliancebot/ # Core application
-│ ├── ai/ # Phase 7: AI Assistant
-│ │ ├── explain_writer.py
-│ │ ├── fix_suggester.py
-│ │ ├── safety_gate.py
-│ │ └── provider.py
-│ ├── audit/ # Phase 5: Audit & Evidence
-│ │ ├── log.py
-│ │ └── traceability.py
-│ ├── evidence/
-│ │ └── bundler.py
-│ ├── ux/ # Phase 6: Enterprise UX
-│ │ ├── explain.py
-│ │ ├── remediation.py
-│ │ └── analytics.py
-│ ├── policies/ # Phase 4: Policy definitions
-│ │ ├── dsl/ # Human-readable policies
-│ │ │ ├── standards/ # SOC2, ISO27001, HIPAA
-│ │ │ └── company/ # Custom policies
-│ │ └── compiled/ # Generated YAML (DO NOT EDIT)
-│ ├── policy_engine/
-│ │ ├── compile.py
-│ │ └── loader.py
-│ ├── engine.py # Compliance Engine
-│ └── cli.py # Command-line interface
-├── scripts/ # Verification & utilities
-│ ├── run_phase3.sh
-│ ├── run_phase4.sh
-│ ├── run_phase5.sh
-│ ├── run_phase6.sh
-│ └── run_phase7.sh
-├── tests/ # Test suite
-│ ├── test_engine.py
-│ ├── test_policies.py
-│ ├── test_audit.py
-│ └── test_ai.py
-├── docs/ # Documentation
-│ ├── phases/ # Phase-specific docs
-│ │ ├── README_phase3.md
-│ │ ├── README_phase4.md
-│ │ ├── README_phase5.md
-│ │ ├── README_phase6.md
-│ │ └── README_phase7.md
-│ ├── policy_authoring.md
-│ ├── standard_packs.md
-│ ├── ci_integration.md
-│ └── dsl_reference.md
-├── audit_bundles/ # Generated audit evidence
-├── .env.example # Environment template
-├── requirements.txt # Python dependencies
-├── compliancebot.yaml # Configuration
-└── README.md # This file
+riskbot/ # Core application package
+cli.py # CLI entrypoint (analyze-pr, hotspots, review-priority)
+server.py # FastAPI server for GitHub Webhooks
+main.py # Entrypoint logic
+config.py # Configuration loading
+features/ # Feature extraction (churn, complexity, history)
+hotspots/ # Predictive bug hotspot engine
+review/ # Review prioritization logic
+scoring/ # Risk scoring models and thresholds
+ingestion/ # Data providers (GitHub/GitLab) and normalization
+explain/ # Explanation generation (Markdown/JSON)
+storage/ # SQL/File storage backend
+templates/ # Text templates for output
+scripts/ # Operational scripts
+ingest_repo.py # Batch ingestion script
+verify_providers.py # Auth and provider verification
+tests/ # Unit and integration tests
+docs/ # Documentation assets
+riskbot.yaml # Main configuration file
+requirements.txt # Python dependencies
+Procfile # Deployment configuration
+Dockerfile # Container definition
+README.md # Project documentation
 ```
 
 ---
 
-## Verification
+## What Problem RiskBot Solves
 
-Each phase includes its own verification script:
+Modern software teams merge large numbers of pull requests under time pressure. Existing tools focus on *style*, *tests*, or *security*, but rarely answer higher-level questions such as:
+
+* Which PR should be reviewed first?
+* Is this change actually risky, or just large?
+* Where are bugs most likely to appear next sprint?
+* When should a merge be blocked vs allowed?
+
+RiskBot treats **code changes themselves as risk signals** and produces a clear, auditable assessment that helps engineers prioritize attention and reduce operational risk.
+
+---
+
+## Core Capabilities
+
+### 1. Pull Request Risk Analysis
+
+Analyze an individual PR and receive:
+
+* Risk score (0-100)
+* Risk probability (0.0-1.0)
+* Risk level: LOW / MEDIUM / HIGH
+* Decision: PASS / WARN / FAIL
+* Human-readable explanation
+* Machine-readable JSON output
 
 ```bash
-./scripts/run_phase3.sh
-./scripts/run_phase4.sh
-./scripts/run_phase5.sh
-./scripts/run_phase6.sh
-./scripts/run_phase7.sh
+riskbot analyze-pr --repo owner/repo --pr 6
 ```
 
-Run all tests:
+### 2. Predictive Bug Hotspots
+
+RiskBot analyzes repository history to surface **files most likely to cause future bugs**.
 
 ```bash
-pytest
+riskbot hotspots --repo owner/repo
 ```
 
----
+Hotspot scoring considers:
+* Historical change frequency
+* Incident correlation
+* Recent churn
+* Limited-history uncertainty
 
-## Configuration
+This helps teams focus refactoring, testing, and reviews where it matters most.
 
-### Environment Variables
+### 3. PR Priority Triage
+
+Automatically rank open PRs by urgency:
 
 ```bash
-GITHUB_TOKEN=...
-COMPLIANCEBOT_ENFORCEMENT=report_only
-COMPLIANCEBOT_AI_PROVIDER=mock
+riskbot review-priority --repo owner/repo --open
 ```
 
-### Policy Configuration
+Output priorities:
+* **P0** - review immediately
+* **P1** - review soon
+* **P2** - normal priority
 
-```yaml
-scoring:
- enforcement: report_only
- 
-policies:
- enabled:
- - SOC2
- - ISO27001
- - HIPAA
+This is particularly useful for release managers, platform teams, and on-call rotations.
+
+---
+
+## How RiskBot Works
+
+RiskBot combines deterministic heuristics with statistical normalization. There is no opaque ML black box in the critical path.
+
+### Signals Used
+
+* **Churn metrics**: lines changed, distribution, concentration
+* **File history**: prior incidents and risky areas
+* **Context signals**: dependencies, critical paths
+* **Stability smoothing**: bounded normalization to avoid noisy scores
+
+### Key Properties
+
+* Deterministic (same input -> same output)
+* Explainable (every score is justified)
+* Robust to partial data
+* Safe defaults (never blocks silently)
+
+---
+
+## Installation
+
+### From source
+
+```bash
+git clone https://github.com/abishekgiri/change-risk-predictor
+cd change-risk-predictor
+pip install -e .
 ```
 
 ---
 
-## Design Principles
+## Authentication
 
-### 1. Determinism over ML
+RiskBot can operate on public repositories without authentication, but **full fidelity analysis requires GitHub API access**.
 
-**ML may assist interpretation, but must never control enforcement in compliance-critical systems.**
+Set a GitHub token:
 
-All enforcement decisions are deterministic and reproducible.
+```bash
+export GITHUB_TOKEN='ghp_your_token_here'
+```
 
-### 2. Auditability first
-
-Every decision produces cryptographic evidence suitable for external audits.
-
-### 3. Separation of concerns
-
-**Authority decides. Assistant explains.**
-
-The enforcement layer and AI layer are architecturally separated.
-
-### 4. Policy-as-Code
-
-Compliance rules are versioned, reviewed, and tested like software.
-
-### 5. Zero trust automation
-
-No implicit trust. Everything is proven with evidence.
+Recommended scopes:
+* Public repos: `public_repo`
+* Private repos: `repo`
 
 ---
 
-## Documentation
+## CLI Commands
 
-- **[Phase 3 – Core Controls](docs/phases/README_phase3.md)**: Secret scanning, privileged code detection, approvals
-- **[Phase 4 – Policy Engine](docs/phases/README_phase4.md)**: DSL, compiler, standard packs
-- **[Phase 5 – Audit Layer](docs/phases/README_phase5.md)**: Immutable evidence bundles, hash-chained logs
-- **[Phase 6 – Trust & UX](docs/phases/README_phase6.md)**: Explanation engine, remediation, analytics
-- **[Phase 7 – AI Assistant](docs/phases/README_phase7.md)**: AI explanations, fix suggestions, safety gate
+### Analyze a PR
 
-Additional resources:
-- [Policy Authoring Guide](docs/policy_authoring.md)
-- [Standard Packs Reference](docs/standard_packs.md)
-- [CI/CD Integration](docs/ci_integration.md)
-- [DSL Reference](docs/dsl_reference.md)
+```bash
+riskbot analyze-pr --repo owner/repo --pr 6
+```
+
+Optional explicit token:
+
+```bash
+riskbot analyze-pr --repo owner/repo --pr 6 --token $GITHUB_TOKEN
+```
+
+### Find Hotspots
+
+```bash
+riskbot hotspots --repo owner/repo
+```
+
+### Review Priority
+
+```bash
+riskbot review-priority --repo owner/repo --open
+```
+
+Sync GitHub labels:
+
+```bash
+riskbot review-priority --repo owner/repo --open --sync-labels
+```
 
 ---
 
-## Status
+## End-to-End Usage
 
-**Production Ready (Core Architecture Verified)**
+Run the full pipeline:
 
-All phases 3–7 are complete, verified, and auditable.
+```bash
+riskbot analyze-pr --repo owner/repo --pr 6 \
+&& riskbot hotspots --repo owner/repo \
+&& riskbot review-priority --repo owner/repo --open
+```
+
+---
+
+## Real World Output
+
+Actual output from running `analyze-pr` on a public PR:
+
+```json
+// riskbot analyze-pr --repo abishekgiri/change-risk-predictor- --pr 6
+{
+"risk_score": 13,
+"risk_prob": 0.13,
+"risk_level": "LOW",
+"decision": "PASS",
+"reasons": [
+"Moderate Churn: 108 LOC"
+],
+"evidence": [
+"Files changed: 1",
+"Modified: .github/workflows/ci-risk-bot.yml",
+"Total churn: 108 LOC",
+"Commits: 1",
+"Concentrated Churn: 100% in single file"
+],
+"model_version": "baseline-v1",
+"data_quality": "FULL"
+}
+```
+
+---
+
+## Data Quality Guarantees
+
+RiskBot explicitly reports data completeness:
+
+* **FULL** - all signals available
+* **PARTIAL** - limited GitHub data (safe fallback behavior)
+
+RiskBot never silently degrades or invents data.
+
+---
+
+## Design Philosophy
+
+RiskBot follows three core principles:
+1. **Explainability over accuracy claims**
+2. **Determinism over hype**
+3. **Engineering trust over novelty**
+
+RiskBot does not claim to predict bugs perfectly. It provides **structured risk signals** that engineers can reason about.
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+MIT License
 
 ---
 
-**ComplianceBot** — Deterministic compliance automation with complete transparency and auditability.
-trigger Mon Jan 26 01:50:16 EST 2026
-trigger Mon Jan 26 01:52:40 EST 2026
-trigger3 Mon Jan 26 01:57:18 EST 2026
-trigger4 Mon Jan 26 01:58:02 EST 2026
-trigger5 Mon Jan 26 01:59:31 EST 2026
-trigger-final Mon Jan 26 02:03:33 EST 2026
-trigger-final Mon Jan 26 02:10:09 EST 2026
-trigger-final Mon Jan 26 02:12:05 EST 2026
+## Author
+
+**Abishek Kumar Giri**
+Computer Science - Software & Systems Engineering
+
+> RiskBot is built on the belief that **boring, explainable systems are the ones engineers trust in production**.

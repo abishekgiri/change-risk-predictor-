@@ -1,10 +1,10 @@
 import os
 import json
 # Simulate Phase 6 inputs
-from compliancebot.ux.types import DecisionExplanation, ExplanationFactor
-from compliancebot.ai.explain_writer import AIExplanationWriter
-from compliancebot.ai.fix_suggester import AIFixSuggester
-from compliancebot.ai.safety_gate import AISafetyGate
+from releasegate.ux.types import DecisionExplanation, ExplanationFactor
+from releasegate.ai.explain_writer import AIExplanationWriter
+from releasegate.ai.fix_suggester import AIFixSuggester
+from releasegate.ai.safety_gate import AISafetyGate
 
 def verify_full_phase7():
     print("Verifying Phase 7 End-to-End Pipeline")

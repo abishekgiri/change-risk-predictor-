@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, Enum, Text, JSON, Boolean
 from sqlalchemy.sql import func
-from compliancebot.saas.db.base import Base
+from releasegate.saas.db.base import Base
 import datetime
 import enum
 

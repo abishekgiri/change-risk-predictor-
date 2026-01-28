@@ -1,7 +1,7 @@
 import json
 import os
 from typing import Dict, Any, List
-from compliancebot.ai.provider import get_provider
+from releasegate.ai.provider import get_provider
 
 class AIFixSuggester:
     """

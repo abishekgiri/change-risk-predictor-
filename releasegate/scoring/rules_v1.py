@@ -1,4 +1,4 @@
-from compliancebot.config import (
+from releasegate.config import (
     WEIGHT_CRITICAL_PATH, WEIGHT_HIGH_CHURN, 
     WEIGHT_LARGE_CHANGE, WEIGHT_NO_TESTS,
     SEVERITY_THRESHOLD_HIGH, SEVERITY_THRESHOLD_MEDIUM

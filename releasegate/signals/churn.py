@@ -1,6 +1,6 @@
 from typing import Dict, Tuple, Any
-from compliancebot.features.types import RawSignals, FeatureExplanation
-from compliancebot.features import normalize
+from releasegate.signals.types import RawSignals, FeatureExplanation
+from releasegate.signals import normalize
 
 class ChurnEngine:
     """

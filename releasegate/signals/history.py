@@ -1,6 +1,6 @@
 from typing import Dict, Tuple, Any
-from compliancebot.features.types import RawSignals, FeatureExplanation
-from compliancebot.features import normalize
+from releasegate.signals.types import RawSignals, FeatureExplanation
+from releasegate.signals import normalize
 
 class HistoryEngine:
     """
@@ -16,7 +16,7 @@ class HistoryEngine:
 
     def _load_bucket_stats(self) -> Dict[str, Dict[str, int]]:
         import sqlite3
-        from compliancebot.config import DB_PATH
+        from releasegate.config import DB_PATH
         stats = {}
         
         try:

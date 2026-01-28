@@ -1,7 +1,7 @@
 from typing import Dict, Tuple, Any, List
-from compliancebot.features.types import RawSignals, FeatureExplanation
-from compliancebot.features import normalize
-# from compliancebot.ingestion.dependency_graph import DependencyGraph # If available
+from releasegate.signals.types import RawSignals, FeatureExplanation
+from releasegate.signals import normalize
+# from releasegate.ingestion.dependency_graph import DependencyGraph # If available
 
 class DependencyEngine:
     """

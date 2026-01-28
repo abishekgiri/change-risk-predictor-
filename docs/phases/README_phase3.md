@@ -34,7 +34,7 @@ All controls are:
 
 ```bash
 # Scan a PR for secrets
-compliancebot analyze-pr owner/repo 123
+releasegate analyze-pr owner/repo 123
 ```
 
 **Configuration**: None required (uses built-in patterns)
@@ -51,7 +51,7 @@ token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz"
 password = "aB3$xK9mQ2vL7nP4wR8sT6yU1zC5fG0hJ"
 ```
 
-**Policy**: [`SEC-PR-002.yaml`](compliancebot/policies/defaults/SEC-PR-002.yaml)
+**Policy**: [`SEC-PR-002.yaml`](releasegate/policies/defaults/SEC-PR-002.yaml)
 
 ---
 
@@ -59,7 +59,7 @@ password = "aB3$xK9mQ2vL7nP4wR8sT6yU1zC5fG0hJ"
 
 **Detects**: Changes to authentication, payment, crypto, migrations, infrastructure code
 
-**Configuration** (`compliancebot.yaml`):
+**Configuration** (`releasegate.yaml`):
 ```yaml
 privileged_paths:
 auth:
@@ -86,7 +86,7 @@ infra:
 # WARN: Authentication code modified. Security team review required.
 ```
 
-**Policy**: [`SEC-PR-003.yaml`](compliancebot/policies/defaults/SEC-PR-003.yaml)
+**Policy**: [`SEC-PR-003.yaml`](releasegate/policies/defaults/SEC-PR-003.yaml)
 
 ---
 
@@ -94,7 +94,7 @@ infra:
 
 **Validates**: PRs have required approvals from appropriate roles
 
-**Configuration** (`compliancebot.yaml`):
+**Configuration** (`releasegate.yaml`):
 ```yaml
 approval_requirements:
 - role: security
@@ -113,7 +113,7 @@ charlie: [developer]
 - Role-based requirements
 - Counts only APPROVED reviews (not CHANGES_REQUESTED or COMMENTED)
 
-**Policy**: [`SEC-PR-004.yaml`](compliancebot/policies/defaults/SEC-PR-004.yaml)
+**Policy**: [`SEC-PR-004.yaml`](releasegate/policies/defaults/SEC-PR-004.yaml)
 
 ---
 
@@ -137,7 +137,7 @@ charlie: [developer]
 # BLOCKED: Forbidden license detected
 ```
 
-**Policy**: [`OSS-PR-001.yaml`](compliancebot/policies/defaults/OSS-PR-001.yaml)
+**Policy**: [`OSS-PR-001.yaml`](releasegate/policies/defaults/OSS-PR-001.yaml)
 
 ---
 
@@ -145,7 +145,7 @@ charlie: [developer]
 
 **Detects**: Production URLs, API keys, or config in non-production code
 
-**Configuration** (`compliancebot.yaml`):
+**Configuration** (`releasegate.yaml`):
 ```yaml
 environment_patterns:
 production:
@@ -164,7 +164,7 @@ nonprod_paths:
 API_URL = "https://api.prod.example.com" # BLOCKED
 ```
 
-**Policy**: [`ENV-PR-001.yaml`](compliancebot/policies/defaults/ENV-PR-001.yaml)
+**Policy**: [`ENV-PR-001.yaml`](releasegate/policies/defaults/ENV-PR-001.yaml)
 
 ---
 
@@ -193,11 +193,11 @@ Return: COMPLIANT / WARN / BLOCK
 
 ### Control Registry
 
-All Phase 3 controls are orchestrated by [`ControlRegistry`](compliancebot/controls/registry.py):
+All Phase 3 controls are orchestrated by [`ControlRegistry`](releasegate/controls/registry.py):
 
 ```python
-from compliancebot.controls.registry import ControlRegistry
-from compliancebot.controls.types import ControlContext
+from releasegate.controls.registry import ControlRegistry
+from releasegate.controls.types import ControlContext
 
 # Initialize registry
 registry = ControlRegistry(config)
@@ -306,7 +306,7 @@ All Phase 3 controls map to industry-standard compliance frameworks:
 ### File Structure
 
 ```
-compliancebot/
+releasegate/
 controls/
 types.py # Base interfaces (ControlBase, Finding)
 registry.py # Orchestrates all controls

@@ -2,8 +2,8 @@ import os
 import json
 import uuid
 import shutil
-from compliancebot.evidence.bundler import EvidenceBundler
-from compliancebot.audit.types import TraceableFinding
+from releasegate.evidence.bundler import EvidenceBundler
+from releasegate.audit.types import TraceableFinding
 
 REPO = "abishekgiri/change-risk-predictor"
 PR = 999

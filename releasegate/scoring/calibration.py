@@ -1,7 +1,7 @@
 from typing import Dict, List, Any
 import json
 import os
-from compliancebot.features import normalize
+from releasegate.signals import normalize
 
 class Calibrator:
     """
