@@ -27,7 +27,9 @@ class AuditRecorder:
         decision_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
         
         # 3. Insert (Insert Only - No Update)
-        conn = sqlite3.connect(DB_PATH)
+        # 3. Insert (Insert Only - No Update)
+        from releasegate.audit.db import get_connection
+        conn = get_connection()
         cursor = conn.cursor()
         
         # We assume pr_number might be available via Context linkage or we extract from decision if we added it?
@@ -59,7 +61,8 @@ class AuditRecorder:
         decision_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
         
         # 3. Insert
-        conn = sqlite3.connect(DB_PATH)
+        from releasegate.audit.db import get_connection
+        conn = get_connection()
         cursor = conn.cursor()
         
         try:
