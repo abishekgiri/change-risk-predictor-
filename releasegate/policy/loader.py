@@ -35,7 +35,8 @@ class PolicyLoader:
                             policy.source_file = full_path
                             policies.append(policy)
                     except Exception as e:
-                        print(f"WARN: Failed to load policy {full_path}: {e}")
+                        import sys
+                        print(f"WARN: Failed to load policy {full_path}: {e}", file=sys.stderr)
         
         # Sort deterministic: Priority ASC (1 wins over 100), then ID ASC
         return sorted(policies, key=lambda p: (p.priority, p.id))

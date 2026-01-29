@@ -1,0 +1,8 @@
+# Jira Role Map
+# Maps Jira Group Names to ReleaseGate Roles
+# Used to determine the 'Actor.role' in the evaluation context.
+
+"jira-administrators": "Admin"
+"developers": "Engineer"
+"senior-engineers": "Senior Engineer"
+"qa-team": "QA"

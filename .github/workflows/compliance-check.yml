@@ -24,10 +24,16 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install ComplianceBot
+      - name: Install ReleaseGate
         run: |
           pip install --upgrade pip
           pip install -e .
+
+      - name: Debug Environment
+        run: |
+          pip list
+          which releasegate || echo "releasegate not in PATH"
+          releasegate --help || echo "releasegate failed to run"
 
       - name: Run Policy Analysis
         env:
@@ -36,9 +42,9 @@ jobs:
           # Report-only mode for now
           COMPLIANCEBOT_ENFORCEMENT: report_only
         run: |
-          echo "Running ComplianceBot analysis for PR #${{ github.event.pull_request.number }}"
+          echo "Running ReleaseGate analysis for PR #${{ github.event.pull_request.number }}"
           
-          compliancebot analyze-pr \
+          releasegate evaluate \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
-            --output "compliance_report.json"
+            --format json > compliance_report.json

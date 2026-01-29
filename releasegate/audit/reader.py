@@ -10,7 +10,8 @@ class AuditReader:
     
     @staticmethod
     def list_decisions(repo: str, limit: int = 20, status: Optional[str] = None, pr: Optional[int] = None) -> List[Dict[str, Any]]:
-        conn = sqlite3.connect(DB_PATH)
+        from releasegate.audit.db import get_connection
+        conn = get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
@@ -36,7 +37,8 @@ class AuditReader:
 
     @staticmethod
     def get_decision(decision_id: str) -> Optional[Dict[str, Any]]:
-        conn = sqlite3.connect(DB_PATH)
+        from releasegate.audit.db import get_connection
+        conn = get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
@@ -54,7 +56,8 @@ class AuditReader:
 
     @staticmethod
     def get_decision_by_evaluation_key(evaluation_key: str) -> Optional[Dict[str, Any]]:
-        conn = sqlite3.connect(DB_PATH)
+        from releasegate.audit.db import get_connection
+        conn = get_connection()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
