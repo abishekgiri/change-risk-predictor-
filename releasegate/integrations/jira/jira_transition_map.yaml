@@ -1,0 +1,18 @@
+# Jira Transition Policy Map
+# Maps (Environment -> Project -> Transition) to [ReleaseGate Policy IDs]
+# Resolution Order:
+# 1. ENVIRONMENT -> PROJECT -> ISSUE_TYPE -> TRANSITION_ID
+# 2. ENVIRONMENT -> PROJECT -> TRANSITION_ID
+# 3. ENVIRONMENT -> DEFAULT -> TRANSITION_ID
+# 4. ENVIRONMENT -> DEFAULT -> TRANSITION_NAME
+
+PRODUCTION:
+  DEFAULT:
+    # "Ready for Prod" transition (Example ID 31)
+    "31": ["prod-smoke", "sec-pr-001"]
+    "Ready for Production": ["prod-smoke"]
+    
+STAGING:
+  DEFAULT:
+    # Less strict for staging
+    "Ready for QA": ["staging-smoke"]
