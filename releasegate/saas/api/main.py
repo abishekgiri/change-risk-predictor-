@@ -7,8 +7,12 @@ from releasegate.saas.policy import resolve_effective_policy
 import hmac
 import hashlib
 import json
+from fastapi import FastAPI, Request, HTTPException, Depends
+from releasegate.integrations.jira.routes import router as jira_router
 
 app = FastAPI(title="ComplianceBot SaaS Control Plane")
+
+app.include_router(jira_router, prefix="/integrations/jira", tags=["jira"])
 
 async def verify_signature(request: Request):
     """

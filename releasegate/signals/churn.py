@@ -7,9 +7,9 @@ class ChurnEngine:
     Computes churn-based risk features.
     """
     def compute_features(self, raw: RawSignals, baselines: Dict[str, float]) -> Tuple[Dict[str, float], FeatureExplanation]:
-        total_churn = raw["total_churn"]
-        files = raw["files_changed"]
-        per_file = raw["per_file_churn"]
+        total_churn = raw.get("total_churn", 0)
+        files = raw.get("files_changed", [])
+        per_file = raw.get("per_file_churn", {})
         
         # 1. Absolute Churn Scoring (Phase 8.5 Fix)
         # User Requirement: 
