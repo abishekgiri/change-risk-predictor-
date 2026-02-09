@@ -56,7 +56,7 @@ def get_pr_files(repo_full_name: str, pr_number: int):
         resp = requests.get(url, headers=headers)
         if resp.status_code != 200:
             print(f"Failed to fetch files: {resp.status_code}")
-            return [], {}
+            return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
 
         files_data = resp.json()
         filenames = [f['filename'] for f in files_data]
@@ -79,7 +79,7 @@ def get_pr_files(repo_full_name: str, pr_number: int):
         }, per_file
     except Exception as e:
         print(f"Error fetching files: {e}")
-        return [], {}, {}
+        return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
 
 
 def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:

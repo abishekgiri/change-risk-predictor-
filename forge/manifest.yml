@@ -1,0 +1,15 @@
+modules:
+  jira:workflowValidator:
+    - key: release-gate-validator
+      function: validate
+      title: ReleaseGate Validator
+      description: Enforces release policies based on risk and compliance.
+  function:
+    - key: validate
+      handler: index.run
+permissions:
+  scopes:
+    - read:jira-work
+app:
+  id: ari:cloud:ecosystem::app/invalid-id-placeholder
+  name: release-gate

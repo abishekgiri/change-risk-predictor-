@@ -76,8 +76,7 @@ class CriticalityEngine:
         if not cp:
             high_paths = ["api/", "auth/", "security/", "staging/src/k8s.io/client-go/", "staging/src/k8s.io/cli-runtime/"]
             med_paths = ["charts/", "templates/", "third_party/", "core/", "infra/"]
-        
-        if isinstance(cp, dict):
+        elif isinstance(cp, dict) and cp:
             high_paths = cp.get("high", [])
             med_paths = cp.get("medium", [])
             low_paths = cp.get("low", [])
@@ -118,7 +117,7 @@ class CriticalityEngine:
                 risky_file = f
                 history_source = "incident_history"
 
-        file_history = raw.get("file_history", {})
+        file_history = raw.get("file_history") or {}
         from datetime import datetime, timedelta, timezone
         import dateutil.parser
         now = datetime.now(timezone.utc)
@@ -177,4 +176,3 @@ class CriticalityEngine:
             "is_tier_0": matched_tier0,
             "test_files_count": test_files_count
         }, expl
-

@@ -1,9 +1,23 @@
 import argparse
 import sys
+import os
+import json
+import yaml
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="releasegate")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    analyze_p = sub.add_parser("analyze-pr", help="Analyze a PR and output decision.")
+    analyze_p.add_argument("--repo", required=True, help="Repository name (owner/repo)")
+    analyze_p.add_argument("--pr", required=True, help="PR number")
+    analyze_p.add_argument("--token", help="GitHub token (optional, else uses GITHUB_TOKEN env)")
+    analyze_p.add_argument("--config", default="compliancebot.yaml", help="Path to config yaml")
+    analyze_p.add_argument("--output", help="Write JSON result to file")
+    analyze_p.add_argument("--format", default="json", choices=["json", "text"])
+    analyze_p.add_argument("--post-comment", action="store_true", help="Post PR comment")
+    analyze_p.add_argument("--create-check", action="store_true", help="Create GitHub check run")
+    analyze_p.add_argument("--no-bundle", action="store_true", help="(ignored) compatibility flag")
 
     eval_p = sub.add_parser("evaluate", help="Evaluate policies for a change (PR/release).")
     eval_p.add_argument("--repo", required=True)
@@ -47,6 +61,133 @@ def main() -> int:
 
     if args.cmd == "version":
         print("releasegate 0.1.0")
+        return 0
+
+    if args.cmd == "analyze-pr":
+        # Set token if provided
+        if args.token:
+            os.environ["GITHUB_TOKEN"] = args.token
+
+        # Load config (best-effort)
+        config = {}
+        if args.config and os.path.exists(args.config):
+            try:
+                with open(args.config, "r") as f:
+                    config = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"Warning: Failed to load config {args.config}: {e}", file=sys.stderr)
+
+        # Ensure repo is available to downstream config lookups
+        config.setdefault("github", {})
+        if isinstance(config.get("github"), dict):
+            config["github"].setdefault("repo", args.repo)
+        config.setdefault("repo_slug", args.repo)
+
+        # Fetch PR metadata and files
+        try:
+            from releasegate.server import get_pr_details, get_pr_files, post_pr_comment, create_check_run
+        except Exception as e:
+            print(f"Error importing GitHub helpers: {e}", file=sys.stderr)
+            return 1
+
+        pr_number = int(args.pr)
+        pr_data = get_pr_details(args.repo, pr_number)
+        filenames, diff_stats, per_file_churn = get_pr_files(args.repo, pr_number)
+        config["head_sha"] = pr_data.get("head", {}).get("sha", "")
+
+        raw_signals = {
+            "repo": args.repo,
+            "pr_number": pr_number,
+            "diff": {},  # Diff content not available via this path (MVP)
+            "repo_slug": args.repo,
+            "entity_type": "pr",
+            "entity_id": str(pr_number),
+            "timestamp": pr_data.get("created_at", "unknown"),
+            "files_changed": filenames,
+            "lines_added": diff_stats.get("loc_added", 0),
+            "lines_deleted": diff_stats.get("loc_deleted", 0),
+            "total_churn": diff_stats.get("total_churn", 0),
+            "per_file_churn": per_file_churn,
+            "touched_services": [],
+            "linked_issue_ids": [],
+            "author": pr_data.get("user", {}).get("login"),
+            "branch": pr_data.get("head", {}).get("ref"),
+        }
+
+        # Evaluate policies
+        from releasegate.engine import ComplianceEngine
+        engine = ComplianceEngine(config)
+        run_result = engine.evaluate(raw_signals)
+
+        risk_score = run_result.metadata.get("core_risk_score", 0) or 0
+        risk_level = run_result.metadata.get("core_risk_level", "UNKNOWN")
+
+        reasons = []
+        for p in run_result.results:
+            if p.status in ["BLOCK", "WARN"]:
+                for v in p.violations:
+                    reasons.append(f"[{p.policy_id}] {v}")
+
+        output = {
+            "control_result": run_result.overall_status,
+            "severity": risk_score,
+            "severity_level": risk_level,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "decision": run_result.overall_status,
+            "reasons": reasons,
+            "evidence": run_result.metadata.get("phase3_findings", []),
+            "model_version": run_result.metadata.get("raw_features", {}).get("feature_version"),
+        }
+
+        # Write JSON output if requested
+        if args.output:
+            try:
+                with open(args.output, "w") as f:
+                    json.dump(output, f, indent=2)
+            except Exception as e:
+                print(f"Error writing output {args.output}: {e}", file=sys.stderr)
+                return 1
+
+        if args.format == "json":
+            print(json.dumps(output, indent=2))
+        else:
+            print(f"Decision: {run_result.overall_status}")
+            print(f"Risk: {risk_level} ({risk_score})")
+            if reasons:
+                print("Reasons:")
+                for r in reasons:
+                    print(f" - {r}")
+
+        # Optional PR comment/check
+        if args.post_comment and args.repo and pr_number:
+            comment_body = (
+                f"## {run_result.overall_status} Compliance Check\n\n"
+                f"**Severity**: {risk_level} ({risk_score})\n\n"
+                + ("\n".join(f"- {r}" for r in reasons) if reasons else "_No policy violations found._")
+            )
+            try:
+                post_pr_comment(args.repo, pr_number, comment_body)
+            except Exception as e:
+                print(f"Warning: Failed to post comment: {e}", file=sys.stderr)
+
+        if args.create_check and args.repo and pr_number:
+            try:
+                create_check_run(
+                    args.repo,
+                    pr_data.get("head", {}).get("sha", ""),
+                    risk_score,
+                    risk_level,
+                    reasons,
+                    evidence=None
+                )
+            except Exception as e:
+                print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
+
+        # Enforcement mode
+        mode = os.getenv("COMPLIANCEBOT_ENFORCEMENT", "report_only")
+        if mode == "block" and run_result.overall_status == "BLOCK":
+            return 1
         return 0
 
     if args.cmd == "evaluate":

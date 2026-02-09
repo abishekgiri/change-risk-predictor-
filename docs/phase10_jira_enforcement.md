@@ -1,6 +1,6 @@
 # Phase 10: Jira Workflow Enforcement
 
-**Status**: ✅ Released in v0.2.0
+**Status**:  Released in v0.2.0
 
 ## Overview
 Phase 10 introduces the **Jira Workflow Gate**, a blocking enforcement mechanism that sits between Jira transitions and the ReleaseGate decision engine. This allows teams to prevent risky changes from moving to production (e.g., "In Review" -> "Ready for Prod") unless they satisfy all governance policies.

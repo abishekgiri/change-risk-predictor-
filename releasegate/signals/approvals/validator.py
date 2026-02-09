@@ -16,6 +16,9 @@ def is_review_stale(review: Review, head_sha: str) -> bool:
     Returns:
         True if review is stale
     """
+    if not head_sha:
+        # No head_sha available -> cannot determine staleness, treat as fresh
+        return False
     return review.commit_id != head_sha
 
 def get_reviewer_roles(username: str, config: Dict[str, Any]) -> List[str]:
@@ -89,4 +92,3 @@ def validate_approvals(
         findings.append(finding)
     
     return findings
-

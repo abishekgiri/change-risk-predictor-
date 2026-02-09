@@ -7,8 +7,8 @@ from releasegate.storage.schema import init_db
 def save_run(repo, pr_number, base_sha, head_sha, score_data, features):
     init_db()
     
-    risk_score = score_data["risk_score"]
-    risk_level = score_data["risk_level"]
+    risk_score = score_data.get("risk_score", score_data.get("score", 0))
+    risk_level = score_data.get("risk_level", score_data.get("level", "UNKNOWN"))
     reasons_json = json.dumps(score_data["reasons"])
     features_json = json.dumps(features)
     
@@ -24,7 +24,7 @@ def save_run(repo, pr_number, base_sha, head_sha, score_data, features):
         cursor.execute("""
         INSERT OR IGNORE INTO pr_runs 
         (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt, schema_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
         """, (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt))
         
         conn.commit()
@@ -71,4 +71,3 @@ def add_label(repo: str, pr_number: int, label_type: str, severity: int = None):
     
     conn.commit()
     conn.close()
-

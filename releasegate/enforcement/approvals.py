@@ -49,6 +49,17 @@ class ApprovalsControl(ControlBase):
         
         # Fetch reviews from provider
         reviews = self._fetch_reviews(ctx)
+        if reviews is None:
+            # Fail-open if we can't fetch approvals data
+            return ControlSignalSet(
+                signals={
+                    "approvals.required": False,
+                    "approvals.satisfied": True,
+                    "approvals.skipped": True,
+                    "approvals.data_available": False
+                },
+                findings=[]
+            )
         
         # Validate approvals
         approval_findings = validate_approvals(
@@ -95,14 +106,14 @@ class ApprovalsControl(ControlBase):
             List of Review objects
         """
         if ctx.provider is None:
-            # No provider (testing mode), return empty
-            return []
+            # No provider (testing mode), signal skip
+            return None
         
         try:
             # Fetch reviews from GitHub/GitLab
-            # pr_reviews = ctx.provider.get_reviews(ctx.repo, ctx.pr_number)
-            # (provider implementation omitted in this chunk, fix only indentation)
-            return [] # Placeholder to maintain logic while fixing indentation
+            get_reviews = getattr(ctx.provider, "get_reviews", None)
+            if not callable(get_reviews):
+                return None
+            return get_reviews(ctx.repo, ctx.pr_number)
         except Exception as e:
-            return []
-
+            return None

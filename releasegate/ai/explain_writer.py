@@ -10,7 +10,9 @@ class AIExplanationWriter:
     """
     def __init__(self):
         self.provider = get_provider()
-        self.schema_path = os.path.join(os.path.dirname(__file__), "../../schemas/ai_explanation_v1.json")
+        self.schema_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "schemas", "ai_explanation_v1.json")
+        )
         with open(self.schema_path) as f:
             self.schema = json.load(f)
 
@@ -125,4 +127,3 @@ class AIExplanationWriter:
                 "summary": "AI generation failed.",
                 "disclaimer": "AI-generated. Error occurred."
             }
-
