@@ -26,7 +26,7 @@ class ComplianceEngine:
     """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.loader = PolicyLoader("releasegate.policy/compiled")
+        self.loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled")
         self.policies = self.loader.load_all()
         
         # Instantiate Controls
@@ -43,12 +43,12 @@ class ComplianceEngine:
         phase3_signals = {}
         phase3_findings = []
         
-        if "diff" in raw_signals and raw_signals["diff"]:
+        if "diff" in raw_signals:
             # Create control context for Phase 3 controls
             context = ControlContext(
                 repo=raw_signals.get("repo", "unknown"),
                 pr_number=raw_signals.get("pr_number", 0),
-                diff=raw_signals.get("diff", {}),
+                diff=raw_signals.get("diff") or {},
                 config=self.config,
                 provider=raw_signals.get("provider")
             )
@@ -169,8 +169,14 @@ class ComplianceEngine:
             if operator == ">=": return float(actual) >= float(expected)
             if operator == "<": return float(actual) < float(expected)
             if operator == "<=": return float(actual) <= float(expected)
-            if operator == "in": return actual in expected
-            if operator == "not in": return actual not in expected
+            if operator == "in":
+                if isinstance(actual, (list, tuple, set)):
+                    return any(a in expected for a in actual)
+                return actual in expected
+            if operator == "not in":
+                if isinstance(actual, (list, tuple, set)):
+                    return all(a not in expected for a in actual)
+                return actual not in expected
         except:
             return False
         return False

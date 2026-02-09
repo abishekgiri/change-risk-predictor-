@@ -98,5 +98,13 @@ def train():
     
     print(f"Model saved to {MODEL_PATH}")
 
+    # Save model metadata for inference alignment
+    meta = {
+        "features": list(X.columns),
+        "model_type": model.__class__.__name__
+    }
+    with open(MODEL_PATH + ".meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
 if __name__ == "__main__":
     train()

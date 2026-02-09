@@ -3,8 +3,8 @@ import sys
 from releasegate.policy.builder import PolicyBuilder
 
 # Configuration
-DSL_ROOT = "releasegate.policy/dsl"
-COMPILED_ROOT = "releasegate.policy/compiled"
+DSL_ROOT = "releasegate/policy/dsl"
+COMPILED_ROOT = "releasegate/policy/compiled"
 
 def main():
     print("Phase 4: Compiling Compliance DSL")
@@ -76,4 +76,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
