@@ -1,0 +1,19 @@
+{
+    "name": "release-gate",
+    "version": "1.0.0",
+    "main": "index.js",
+    "license": "MIT",
+    "scripts": {
+        "lint": "./node_modules/.bin/eslint src/**/* || npm run --silent lint:fix",
+        "lint:fix": "./node_modules/.bin/eslint src/**/* --fix",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+        "@forge/api": "^2.19.0",
+        "@forge/ui": "^1.9.0"
+    },
+    "devDependencies": {
+        "eslint": "^8.34.0",
+        "eslint-plugin-react-hooks": "^4.6.0"
+    }
+}

@@ -1,0 +1,27 @@
+{
+    "name": "release-gate",
+    "version": "1.0.0",
+    "main": "src/index.js",
+    "license": "MIT",
+    "scripts": {
+        "build": "npm run build:admin && npm run build:panel",
+        "build:admin": "vite build --config vite.config.admin.js",
+        "build:panel": "vite build --config vite.config.panel.js",
+        "lint": "./node_modules/.bin/eslint src/**/* || npm run --silent lint:fix",
+        "lint:fix": "./node_modules/.bin/eslint src/**/* --fix"
+    },
+    "dependencies": {
+        "@forge/api": "^2.19.0",
+        "@forge/bridge": "^5.12.0",
+        "@forge/react": "^11.11.0",
+        "@forge/resolver": "^1.7.1",
+        "@forge/ui": "^1.9.0"
+    },
+    "devDependencies": {
+        "@babel/preset-react": "^7.28.5",
+        "@vitejs/plugin-react": "^5.1.3",
+        "eslint": "^8.34.0",
+        "eslint-plugin-react-hooks": "^4.6.0",
+        "vite": "^7.3.1"
+    }
+}

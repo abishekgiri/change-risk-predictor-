@@ -6,7 +6,7 @@ from releasegate.audit.types import TraceableFinding
 from releasegate.engine import PolicyResult
 
 # Assuming Phase 4 compiled policies are in a known location
-COMPILED_ROOT = "releasegate.policy/compiled"
+COMPILED_ROOT = "releasegate/policy/compiled"
 
 class TraceabilityInjector:
     """
@@ -76,4 +76,3 @@ class TraceabilityInjector:
             dsl_source=meta.get("source_file", None),
             compiled_source=f"{result.policy_id}.yaml"
         )
-

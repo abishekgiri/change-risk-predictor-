@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from github import Github, Auth
 from releasegate.config import GITHUB_TOKEN, DB_PATH
 from releasegate.ingestion.providers.base import GitProvider
+from releasegate.storage.schema import init_db
 
 class GitHubProvider(GitProvider):
     """
@@ -16,6 +17,7 @@ class GitHubProvider(GitProvider):
         self.config = config
         self.repo_name = config.get("github", {}).get("repo")
         self.cache_ttl = config.get("github", {}).get("cache_ttl", 3600)
+        init_db()
         self.client = self._init_client()
 
     def _init_client(self):

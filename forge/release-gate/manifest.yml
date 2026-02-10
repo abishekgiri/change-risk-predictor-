@@ -1,0 +1,46 @@
+modules:
+
+  jira:workflowValidator:
+    - key: release-gate-transition-validator
+      name: Release Gate Validator
+      description: Blocks workflow transitions based on risk + policy.
+      function: validateTransition
+
+  jira:projectSettingsPage:
+    - key: release-gate-settings
+      resource: main
+      resolver: { function: resolver }
+      title: ReleaseGate Policy
+
+  jira:issuePanel:
+    - key: release-gate-panel
+      resource: release-gate-panel
+      title: ReleaseGate
+      resolver: { function: resolver }
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+
+  function:
+    - key: validateTransition
+      handler: index.run
+    - key: resolver
+      handler: index.resolver
+
+resources:
+  - key: main
+    path: dist/admin
+  - key: release-gate-panel
+    path: dist/panel
+
+permissions:
+  scopes:
+    - read:jira-work
+    - read:jira-user
+    - manage:jira-configuration
+    - storage:app
+
+app:
+  runtime:
+    name: nodejs20.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/d35e4f00-945c-41a0-9a86-c55be72bfc50

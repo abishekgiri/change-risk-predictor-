@@ -3,7 +3,7 @@ import os
 from typing import Optional, Dict, Tuple
 from releasegate.signals.types import FeatureVector
 
-MODEL_PATH = "riskbot/scoring/model_v1.pkl"
+MODEL_PATH = os.getenv("COMPLIANCEBOT_MODEL_PATH", "data/model.pkl")
 
 class RiskModel:
     """
@@ -70,4 +70,3 @@ class RiskModel:
             
     def get_version(self) -> str:
         return f"{self.model_type}-v1" if self.model else "none"
-

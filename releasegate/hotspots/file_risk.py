@@ -21,7 +21,7 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
     cursor = conn.cursor()
     
     # Calculate cutoff for "recent"
-    cutoff_date = (datetime.now() - timedelta(days=window_days)).isoformat()
+    cutoff_dt = datetime.now() - timedelta(days=window_days)
     
     file_data = {}
     
@@ -45,6 +45,12 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
             churn = row['churn'] or 0
             label = row['label_value'] # 1 = incident, 0 = safe, NULL = unknown
             timestamp = row['created_at']
+            ts_dt = None
+            if timestamp:
+                try:
+                    ts_dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                except Exception:
+                    ts_dt = None
             
             # Parse files (format may vary, handle gracefully)
             if isinstance(files_data, list):
@@ -61,7 +67,7 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
                         "incidents": 0,
                         "total_churn": 0,
                         "recent_churn": 0,
-                        "last_touched": timestamp
+                        "last_touched": ts_dt
                     }
                 
                 fd = file_data[file_path]
@@ -74,12 +80,13 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
                 file_churn = churn / len(files) if files else 0
                 fd["total_churn"] += file_churn
                 
-                if timestamp and timestamp >= cutoff_date:
+                if ts_dt and ts_dt >= cutoff_dt:
                     fd["recent_churn"] += file_churn
                 
                 # Track latest touch
-                if timestamp and (not fd["last_touched"] or timestamp > fd["last_touched"]):
-                    fd["last_touched"] = timestamp
+                if ts_dt:
+                    if not fd["last_touched"] or ts_dt > fd["last_touched"]:
+                        fd["last_touched"] = ts_dt
         
         except Exception as e:
             print(f"Error processing row: {e}")

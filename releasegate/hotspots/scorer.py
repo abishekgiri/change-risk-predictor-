@@ -46,7 +46,10 @@ def score_files(file_data: dict, min_samples: int = 10) -> List[FileRiskRecord]:
         # Parse last_touched
         last_touched_str = data.get("last_touched")
         try:
-            last_touched = datetime.fromisoformat(last_touched_str) if last_touched_str else datetime.now()
+            if isinstance(last_touched_str, datetime):
+                last_touched = last_touched_str
+            else:
+                last_touched = datetime.fromisoformat(last_touched_str) if last_touched_str else datetime.now()
         except:
             last_touched = datetime.now()
         
