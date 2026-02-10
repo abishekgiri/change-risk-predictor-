@@ -22,6 +22,29 @@ class WorkflowGate:
         Enforces idempotency, audit-on-error, and policy gates.
         """
         evaluation_key = self._compute_key(request)
+
+        # Override path (fail-open with ledger)
+        if request.context_overrides.get("override") is True:
+            try:
+                from releasegate.audit.overrides import record_override
+                import uuid
+                override_id = str(uuid.uuid4())
+                record_override(
+                    repo=request.context_overrides.get("repo", "unknown"),
+                    pr_number=request.context_overrides.get("pr_number"),
+                    issue_key=request.issue_key,
+                    decision_id=override_id,
+                    actor=request.actor_email or request.actor_account_id,
+                    reason=request.context_overrides.get("override_reason", "override")
+                )
+            except Exception as e:
+                logger.warning(f"Override ledger write failed: {e}")
+            return TransitionCheckResponse(
+                allow=True,
+                reason="Override applied",
+                decision_id=override_id,
+                status="ALLOWED"
+            )
         
         try:
             # 1. Idempotency Check
@@ -240,4 +263,3 @@ class WorkflowGate:
         # For Phase 10 MVP, we return a default or use map
         # In real life: fetch user groups from Jira -> check map
         return "Engineer" # Default safe assumption
-
