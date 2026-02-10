@@ -90,10 +90,13 @@ def main() -> int:
             print(f"Error importing GitHub helpers: {e}", file=sys.stderr)
             return 1
 
+        from releasegate.ingestion.providers.github_provider import GitHubProvider
+
         pr_number = int(args.pr)
         pr_data = get_pr_details(args.repo, pr_number)
         filenames, diff_stats, per_file_churn = get_pr_files(args.repo, pr_number)
         config["head_sha"] = pr_data.get("head", {}).get("sha", "")
+        provider = GitHubProvider({"github": {"repo": args.repo, "cache_ttl": 3600}})
 
         raw_signals = {
             "repo": args.repo,
@@ -112,6 +115,7 @@ def main() -> int:
             "linked_issue_ids": [],
             "author": pr_data.get("user", {}).get("login"),
             "branch": pr_data.get("head", {}).get("ref"),
+            "provider": provider
         }
 
         # Evaluate policies
@@ -137,6 +141,7 @@ def main() -> int:
             "decision": run_result.overall_status,
             "reasons": reasons,
             "evidence": run_result.metadata.get("phase3_findings", []),
+            "signals": run_result.metadata.get("phase3_signals", {}),
             "model_version": run_result.metadata.get("raw_features", {}).get("feature_version"),
         }
 

@@ -4,7 +4,7 @@ from releasegate.config import DB_PATH
 
 # Production Schema Version
 # Increment this if you change columns to force re-ingestion compatibility checks
-SCHEMA_VERSION = "v1"
+SCHEMA_VERSION = "v2"
 
 def init_db():
     """
