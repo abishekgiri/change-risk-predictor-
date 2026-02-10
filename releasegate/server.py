@@ -211,6 +211,10 @@ def ci_score(payload: CIScoreRequest):
         print("Warning: Could not fetch PR details")
 
     # 2. Extract Features (Phase 6 refined)
+    # Provider for approvals/license fetch (if needed)
+    from releasegate.ingestion.providers.github_provider import GitHubProvider
+    provider = GitHubProvider({"github": {"repo": repo_full_name, "cache_ttl": 3600}})
+
     raw_signals = {
         "repo_slug": repo_full_name,
         "entity_type": "pr",
@@ -224,13 +228,18 @@ def ci_score(payload: CIScoreRequest):
         "touched_services": [],  # Placeholder
         "linked_issue_ids": [],  # CI endpoint might skip issue parsing or add it if needed
         "author": pr_data.get("user", {}).get("login"),
-        "branch": pr_data.get("head", {}).get("ref")
+        "branch": pr_data.get("head", {}).get("ref"),
+        "provider": provider,
+        "repo": repo_full_name,
+        "pr_number": pr_number,
+        "diff": {}
     }
 
     # 3. Feature Engineering
     # Get Config used for RiskScorer/FeatureStore
     config = get_repo_config(
         repo_full_name, pr_data.get("base", {}).get("ref", "main"))
+    config["head_sha"] = pr_data.get("head", {}).get("sha", "")
 
     feature_store = FeatureStore(config)
     features, feature_explanations = feature_store.build_features(raw_signals)
@@ -319,6 +328,7 @@ async def github_webhook(
     # --- 4. Repo Config & Bypass Logic ---
     default_branch = repo.get("default_branch", "main")
     config = get_repo_config(repo_full_name, default_branch)
+    config["head_sha"] = head_sha
 
     # Thresholds
     high_threshold = config.get("high_threshold", 75)
@@ -339,6 +349,11 @@ async def github_webhook(
         is_bypassed = True
         bypass_reason = f"PR has bypass label."
 
+    # Instantiate Provider
+    from releasegate.ingestion.providers.github_provider import GitHubProvider
+    provider_config = {"github": {"repo": repo_full_name, "cache_ttl": 3600}}
+    provider = GitHubProvider(provider_config)
+
     # Construct Raw Signals for FeatureStore
     raw_signals = {
         "repo_slug": repo_full_name,
@@ -353,17 +368,15 @@ async def github_webhook(
         "touched_services": [],
         "linked_issue_ids": [],  # Populated below
         "author": author,
-        "branch": pr.get("head", {}).get("ref")
+        "branch": pr.get("head", {}).get("ref"),
+        "provider": provider,
+        "repo": repo_full_name,
+        "pr_number": pr_number,
+        "diff": {}
     }
 
     # --- 5. Evidence Collection (Phase 4) ---
     evidence = []
-
-    # Instantiate Provider
-    from releasegate.ingestion.providers.github_provider import GitHubProvider
-    # Minimal config for provider
-    provider_config = {"github": {"repo": repo_full_name, "cache_ttl": 3600}}
-    provider = GitHubProvider(provider_config)
 
     # Parse Links
     import re
