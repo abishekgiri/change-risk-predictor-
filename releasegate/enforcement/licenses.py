@@ -28,10 +28,14 @@ class LicensesControl(ControlBase):
         findings: List[Finding] = []
         all_packages: Dict[str, str] = {}
         
+        skipped_diff_only = False
         # Scan all changed dependency files
         for file_path, diff_content in ctx.diff.items():
             if self._is_dependency_file(file_path):
-                # Extract full file content from diff
+                # If we only have a diff, we cannot reliably parse full manifest
+                if self._looks_like_diff(diff_content):
+                    skipped_diff_only = True
+                    continue
                 packages = detect_licenses(file_path, diff_content)
                 all_packages.update(packages)
         
@@ -81,6 +85,7 @@ class LicensesControl(ControlBase):
             "licenses.forbidden_count": len(forbidden_packages),
             "licenses.unknown_count": len(unknown_packages),
             "licenses.allowed_count": len(allowed_packages),
+            "licenses.skipped_diff_only": skipped_diff_only
         }
         
         return ControlSignalSet(
@@ -102,3 +107,9 @@ class LicensesControl(ControlBase):
         ]
         return any(file_path.endswith(f) for f in dependency_files)
 
+    def _looks_like_diff(self, content: str) -> bool:
+        """Heuristic: detect if content is a diff, not full file text."""
+        if not isinstance(content, str):
+            return True
+        markers = ["diff --git", "\n@@", "\n+++", "\n---"]
+        return any(m in content for m in markers) or content.startswith("@@")

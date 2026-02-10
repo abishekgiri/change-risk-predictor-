@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from releasegate.config import DB_PATH
 from releasegate.ingestion.providers.base import GitProvider
+from releasegate.storage.schema import init_db
 
 class GitLabProvider(GitProvider):
     """
@@ -19,6 +20,7 @@ class GitLabProvider(GitProvider):
         self.token = self.gitlab_config.get("token", "")
         self.project_id = self.gitlab_config.get("project", "") # Can be "group/project" string or ID
         self.cache_ttl = self.gitlab_config.get("cache_ttl", 3600)
+        init_db()
         
         # Determine strict project ID format (URL encoding if it has slashes)
         if "/" in str(self.project_id):

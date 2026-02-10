@@ -62,32 +62,27 @@ def scan_diff(diff_text: str, file_path: str) -> List[SecretFinding]:
     
     current_hunk = None
     hunk_start_line = None
+    new_line = None
     
     for i, line in enumerate(lines):
         # Track diff hunks
         if line.startswith('@@'):
             current_hunk = line
-            # Parse line number from hunk header
+            # Parse line number from hunk header (new file start)
             try:
                 parts = line.split('+')[1].split(',')[0].strip()
                 hunk_start_line = int(parts)
+                new_line = hunk_start_line
             except (IndexError, ValueError):
                 hunk_start_line = None
+                new_line = None
         
         # Only scan added lines
         if line.startswith('+') and not line.startswith('+++'):
-            # Calculate actual line number
-            line_number = None
-            if hunk_start_line is not None:
-                # Count '+' lines since hunk start
-                # Need to be careful with indexing
-                # For simplicity, recalculate based on current index vs current_hunk index
-                hunk_idx = lines.index(current_hunk) if current_hunk in lines else 0
-                added_lines = sum(
-                    1 for l in lines[hunk_idx:i]
-                    if l.startswith('+') and not l.startswith('+++')
-                )
-                line_number = hunk_start_line + added_lines
+            # Calculate actual line number based on hunk cursor
+            line_number = new_line if new_line is not None else None
+            if new_line is not None:
+                new_line += 1
             
             # Scan the line (remove the '+' prefix)
             line_findings = scan_line(
@@ -98,6 +93,16 @@ def scan_diff(diff_text: str, file_path: str) -> List[SecretFinding]:
                 diff_line_index=i
             )
             findings.extend(line_findings)
+        elif line.startswith('-') and not line.startswith('---'):
+            # Deletions do not advance new file line counter
+            continue
+        elif line.startswith('+++') or line.startswith('---'):
+            # File header lines do not advance line counter
+            continue
+        else:
+            # Context line advances new file line counter
+            if new_line is not None:
+                new_line += 1
     
     return findings
 
@@ -112,4 +117,3 @@ def scan_pr_diff(pr_diff: dict) -> List[SecretFinding]:
         all_findings.extend(findings)
     
     return all_findings
-

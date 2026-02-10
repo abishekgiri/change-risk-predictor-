@@ -173,7 +173,6 @@ class RiskScorer:
                 reasons.append("Upgraded to WARN: High Criticality check")
         
         # 3. Generate reasons from components
-        reasons = []
         
         # Churn-based reasons (UX FIX)
         tc = components.get("total_churn", 0)
@@ -238,8 +237,6 @@ class RiskScorer:
         if features.get("commit_count", 0) > 0:
             evidence_items.append(f"Commits: {features.get('commit_count')}")
         
-        all_evidence = evidence_items + (evidence or [])
-        
         # 3.6. Determine data quality
         data_quality = "FULL"
         if raw_score <= 1 and len(reasons) == 0:
@@ -247,6 +244,8 @@ class RiskScorer:
         elif not features.get("files_changed") or len(features.get("files_changed", [])) == 0:
             data_quality = "PARTIAL"
             evidence_items.append("No files fetched (churn=0.0)")
+        
+        all_evidence = evidence_items + (evidence or [])
         
         # 4. Construct Result
         result: RiskResult = {
@@ -297,4 +296,3 @@ if __name__ == "__main__":
         "historical_risk_score": 0.4
     }
     print("Risky:", scorer.calculate_score(risky))
-
