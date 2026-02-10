@@ -15,7 +15,11 @@ import requests
 import yaml
 import base64
 import git
+from datetime import datetime
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import PlainTextResponse
+import csv
+import io
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
@@ -428,6 +432,26 @@ async def github_webhook(
             for v in p.violations:
                 score_data["reasons"].append(f"[{p.policy_id}] {v}")
 
+    # --- Attach Risk to Jira Issues (Minimal Integration) ---
+    try:
+        import re
+        from releasegate.integrations.jira.client import JiraClient
+        jira_keys = set(re.findall(r"\b[A-Z][A-Z0-9]+-\d+\b", f"{title}\n{pr.get('body') or ''}"))
+        if jira_keys:
+            jc = JiraClient()
+            risk_payload = {
+                "risk_score": score_data["risk_score"],
+                "risk_level": score_data["risk_level"],
+                "decision": run_result.overall_status,
+                "repo": repo_full_name,
+                "pr_number": pr_number,
+                "updated_at": datetime.utcnow().isoformat() + "Z"
+            }
+            for key in jira_keys:
+                jc.set_issue_property(key, "releasegate_risk", risk_payload)
+    except Exception as e:
+        print(f"Warning: Jira risk attach failed: {e}")
+
     # Save to DB
     # Use clean repo name for storage/analytics as requested
     repo_clean = repo_full_name.strip(
@@ -486,3 +510,32 @@ async def github_webhook(
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "RiskBot Webhook Listener"}
+
+
+@app.get("/audit/export")
+def audit_export(repo: str, format: str = "json", limit: int = 200, status: Optional[str] = None, pr: Optional[int] = None, include_overrides: bool = False):
+    """
+    Export audit decisions in JSON or CSV.
+    """
+    from releasegate.audit.reader import AuditReader
+    rows = AuditReader.list_decisions(repo=repo, limit=limit, status=status, pr=pr)
+    payload = {"decisions": rows}
+
+    if include_overrides:
+        try:
+            from releasegate.audit.overrides import list_overrides
+            payload["overrides"] = list_overrides(repo=repo, limit=limit, pr=pr)
+        except Exception:
+            payload["overrides"] = []
+
+    if format.lower() == "csv":
+        if not rows:
+            return PlainTextResponse("", media_type="text/csv")
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+        return PlainTextResponse(output.getvalue(), media_type="text/csv")
+
+    return payload
