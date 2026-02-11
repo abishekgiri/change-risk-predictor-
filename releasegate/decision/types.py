@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from releasegate.policy.types import Requirement
@@ -29,6 +29,17 @@ class EnforcementTargets(BaseModel):
     github_check_name: str = "ReleaseGate"
     external: ExternalKeys = Field(default_factory=ExternalKeys)
 
+
+class PolicyBinding(BaseModel):
+    """
+    Immutable binding to the exact policy material used to evaluate a decision.
+    """
+    policy_id: str
+    policy_version: str
+    policy_hash: str
+    policy: Dict[str, Any] = Field(default_factory=dict)
+
+
 class Decision(BaseModel):
     """
     The Single Source of Truth for an evaluation result.
@@ -54,6 +65,8 @@ class Decision(BaseModel):
     requirements: Optional[Requirement] = None # Structured data for machines
     unlock_conditions: List[str] = Field(default_factory=list) # Human readable strings
     inputs_present: Dict[str, bool] = Field(default_factory=dict)
+    input_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    policy_bindings: List[PolicyBinding] = Field(default_factory=list)
     
     # UX
     message: str

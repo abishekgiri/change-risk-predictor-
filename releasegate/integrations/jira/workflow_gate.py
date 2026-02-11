@@ -8,8 +8,9 @@ from typing import Optional, Dict, Any, List
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient
 from releasegate.audit.recorder import AuditRecorder
-from releasegate.decision.types import Decision, EnforcementTargets, DecisionType
+from releasegate.decision.types import Decision, EnforcementTargets, DecisionType, PolicyBinding
 from releasegate.policy.loader import PolicyLoader
+from releasegate.policy.policy_types import Policy
 from releasegate.observability.internal_metrics import incr
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class WorkflowGate:
         self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
         self._policy_map_cache: Optional[Dict[str, Any]] = None
         self._policy_hash_cache: Optional[str] = None
+        self._compiled_policy_cache: Optional[Dict[str, Policy]] = None
 
     def check_transition(self, request: TransitionCheckRequest) -> TransitionCheckResponse:
         """
@@ -34,16 +36,149 @@ class WorkflowGate:
 
         # Override path (fail-open with ledger)
         if request.context_overrides.get("override") is True:
-            override_reason = request.context_overrides.get("override_reason", "override")
+            override_reason = str(request.context_overrides.get("override_reason", "") or "").strip()
+            normalized_override_reason = override_reason or "override"
+            override_expires_at = self._parse_iso_datetime(request.context_overrides.get("override_expires_at"))
+            justification_required = bool(request.context_overrides.get("override_justification_required", False))
+            actor_principals = self._principal_set(
+                request.actor_account_id,
+                request.actor_email,
+            )
+            pr_author_principals = self._principal_set(
+                request.context_overrides.get("pr_author_account_id"),
+                request.context_overrides.get("pr_author_email"),
+                request.context_overrides.get("pr_author"),
+            )
+            override_requestor_principals = self._principal_set(
+                request.context_overrides.get("override_requested_by_account_id"),
+                request.context_overrides.get("override_requested_by_email"),
+                request.context_overrides.get("override_requested_by"),
+                request.context_overrides.get("override_created_by_account_id"),
+                request.context_overrides.get("override_created_by_email"),
+            )
+
+            if actor_principals and pr_author_principals and actor_principals.intersection(pr_author_principals):
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: separation-of-duties violation (PR author cannot approve override)",
+                    evaluation_key=f"{evaluation_key}:override-sod-pr-author",
+                    unlock_conditions=["Use an approver different from the PR author."],
+                    reason_code="SOD_PR_AUTHOR_CANNOT_OVERRIDE",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = AuditRecorder.record_with_context(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                incr("transitions_blocked")
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                )
+
+            if actor_principals and override_requestor_principals and actor_principals.intersection(override_requestor_principals):
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: separation-of-duties violation (override requestor cannot self-approve)",
+                    evaluation_key=f"{evaluation_key}:override-sod-requestor",
+                    unlock_conditions=["Use an approver different from the override requestor."],
+                    reason_code="SOD_REQUESTOR_CANNOT_SELF_APPROVE",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = AuditRecorder.record_with_context(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                incr("transitions_blocked")
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                )
+
+            if justification_required and not override_reason:
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: override justification is required",
+                    evaluation_key=f"{evaluation_key}:override-missing-justification",
+                    unlock_conditions=["Provide override_reason to apply an override."],
+                    reason_code="OVERRIDE_JUSTIFICATION_REQUIRED",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = AuditRecorder.record_with_context(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                incr("transitions_blocked")
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                )
+
+            if override_expires_at and datetime.now(timezone.utc) > override_expires_at:
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message=f"BLOCKED: override expired at {override_expires_at.isoformat()}",
+                    evaluation_key=f"{evaluation_key}:override-expired",
+                    unlock_conditions=["Request a new override with a future override_expires_at."],
+                    reason_code="OVERRIDE_EXPIRED",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = AuditRecorder.record_with_context(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                incr("transitions_blocked")
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                )
+
             decision = self._build_decision(
                 request,
                 release_status=DecisionType.ALLOWED,
-                message=f"Override applied: {override_reason}",
+                message=f"Override applied: {normalized_override_reason}",
                 evaluation_key=f"{evaluation_key}:override",
-                unlock_conditions=[override_reason],
+                unlock_conditions=[normalized_override_reason],
                 reason_code="OVERRIDE_APPLIED",
-                inputs_present={"releasegate_risk": True, "override_requested": True},
+                inputs_present={
+                    "releasegate_risk": True,
+                    "override_requested": True,
+                    "override_expiry_present": bool(override_expires_at),
+                },
                 policy_hash=self._current_policy_hash(),
+                input_snapshot={"request": request.model_dump(mode="json")},
             )
             final_decision = AuditRecorder.record_with_context(
                 decision,
@@ -52,13 +187,17 @@ class WorkflowGate:
             )
             try:
                 from releasegate.audit.overrides import record_override
+                override_idempotency_key = hashlib.sha256(
+                    f"{evaluation_key}:override-ledger:{request.issue_key}:{request.actor_account_id}".encode("utf-8")
+                ).hexdigest()
                 record_override(
                     repo=repo,
                     pr_number=pr_number,
                     issue_key=request.issue_key,
                     decision_id=final_decision.decision_id,
                     actor=request.actor_email or request.actor_account_id,
-                    reason=override_reason
+                    reason=normalized_override_reason,
+                    idempotency_key=override_idempotency_key,
                 )
             except Exception as e:
                 logger.warning(f"Override ledger write failed: {e}")
@@ -80,7 +219,19 @@ class WorkflowGate:
             )
 
         # Fail-open explicitly with an audited SKIPPED decision when Jira risk metadata is missing.
-        risk_meta = self.client.get_issue_property(request.issue_key, "releasegate_risk")
+        try:
+            risk_meta = self.client.get_issue_property(request.issue_key, "releasegate_risk")
+        except Exception as e:
+            logger.error("Failed to fetch Jira issue property `releasegate_risk`: %s", e, exc_info=True)
+            return self._error_response(
+                request,
+                evaluation_key=evaluation_key,
+                repo=repo,
+                pr_number=pr_number,
+                message=f"System Error: failed to fetch issue property `releasegate_risk` ({e})",
+                reason_code="RISK_METADATA_FETCH_ERROR",
+            )
+
         if self._is_missing_risk_metadata(risk_meta):
             missing_status = DecisionType.BLOCKED if self.strict_mode else DecisionType.SKIPPED
             missing_reason = (
@@ -99,6 +250,10 @@ class WorkflowGate:
                 reason_code="MISSING_RISK_METADATA_STRICT" if self.strict_mode else "MISSING_RISK_METADATA",
                 inputs_present={"releasegate_risk": False},
                 policy_hash=self._current_policy_hash(),
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "risk_meta": risk_meta,
+                },
             )
             final_skipped = AuditRecorder.record_with_context(
                 skipped,
@@ -138,16 +293,27 @@ class WorkflowGate:
             # 3. Policy Resolution
             policies = self._resolve_policies(request)
             if not policies:
-                # No policies mapped -> explicit audited skip (Fail Open, not silent)
+                # No policies mapped -> strict mode blocks, otherwise explicit audited skip.
+                no_policy_status = DecisionType.BLOCKED if self.strict_mode else DecisionType.SKIPPED
+                no_policy_reason = (
+                    "BLOCKED: no policies configured for this transition (strict mode)"
+                    if self.strict_mode
+                    else "SKIPPED: no policies configured for this transition"
+                )
                 skipped = self._build_decision(
                     request,
-                    release_status=DecisionType.SKIPPED,
-                    message="SKIPPED: no policies configured for this transition",
+                    release_status=no_policy_status,
+                    message=no_policy_reason,
                     evaluation_key=f"{evaluation_key}:no-policy",
                     unlock_conditions=["Map this transition to one or more policy IDs."],
-                    reason_code="NO_POLICIES_MAPPED",
+                    reason_code="NO_POLICIES_MAPPED_STRICT" if self.strict_mode else "NO_POLICIES_MAPPED",
                     inputs_present={"releasegate_risk": True},
                     policy_hash=self._current_policy_hash(),
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "policies_requested": [],
+                        "risk_meta": risk_meta,
+                    },
                 )
                 final_skipped = AuditRecorder.record_with_context(
                     skipped,
@@ -157,16 +323,19 @@ class WorkflowGate:
                 logger.info(
                     "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
                     "no-policy",
-                    "SKIPPED",
+                    final_skipped.release_status,
                     request.issue_key,
                     final_skipped.decision_id,
                 )
-                incr("skipped_count")
+                if final_skipped.release_status == DecisionType.SKIPPED:
+                    incr("skipped_count")
+                if final_skipped.release_status == DecisionType.BLOCKED:
+                    incr("transitions_blocked")
                 return TransitionCheckResponse(
-                    allow=True,
+                    allow=final_skipped.release_status != DecisionType.BLOCKED,
                     reason=final_skipped.message,
                     decision_id=final_skipped.decision_id,
-                    status="SKIPPED",
+                    status=final_skipped.release_status.value,
                     unlock_conditions=final_skipped.unlock_conditions,
                     policy_hash=final_skipped.policy_bundle_hash,
                 )
@@ -174,6 +343,9 @@ class WorkflowGate:
             # 4. Evaluation
             # We must convert the EvaluationContext to a signal dict that ComplianceEngine expects
             # Phase 10 MVP: we flatten context into a dict
+            risk_level = risk_meta.get("releasegate_risk") or risk_meta.get("risk_level") or risk_meta.get("severity_level")
+            risk_score = risk_meta.get("risk_score") or risk_meta.get("severity")
+            risk_metrics = risk_meta.get("metrics") if isinstance(risk_meta.get("metrics"), dict) else {}
             signal_map = {
                 "repo": context.change.repository,
                 "pr_number": int(context.change.change_id) if context.change.change_id.isdigit() else 0,
@@ -181,6 +353,21 @@ class WorkflowGate:
                 "labels": [],
                 "user": {"login": context.actor.login, "role": context.actor.role},
                 "environment": context.environment,
+                "transition": {
+                    "source_status": request.source_status,
+                    "target_status": request.target_status,
+                    "name": request.transition_name or ""
+                },
+                "risk": {
+                    "level": risk_level,
+                    "score": risk_score,
+                    "changed_files_count": risk_metrics.get("changed_files_count"),
+                    "additions": risk_metrics.get("additions"),
+                    "deletions": risk_metrics.get("deletions"),
+                    "total_churn": risk_metrics.get("total_churn"),
+                    "source": risk_meta.get("source"),
+                    "computed_at": risk_meta.get("computed_at"),
+                },
                 # Safe Defaults for missing PR signals
                 "files_changed": [],
                 "total_churn": 0,
@@ -193,28 +380,42 @@ class WorkflowGate:
             
             from releasegate.engine import ComplianceEngine
             engine = ComplianceEngine({})
+            compiled_policy_map = self._compiled_policy_map()
+            unresolved_policy_ids = sorted(set(policies) - set(compiled_policy_map.keys()))
+            policy_bindings = self._build_policy_bindings(policies, compiled_policy_map)
+            bindings_hash = self._policy_bindings_hash(policy_bindings)
             
             # Run ALL policies (Engine doesn't support filtering input yet)
             run_result = engine.evaluate(signal_map)
             
             # Filter results to ONLY the policies required by this Jira transition
             relevant_results = [r for r in run_result.results if r.policy_id in policies]
-            loaded_policy_ids = {r.policy_id for r in run_result.results}
-            unresolved_policy_ids = sorted(set(policies) - loaded_policy_ids)
-            meta = run_result.metadata if isinstance(run_result.metadata, dict) else {}
-            meta_policy_hash = meta.get("policy_hash")
-            policy_hash = meta_policy_hash if isinstance(meta_policy_hash, str) and meta_policy_hash else self._current_policy_hash()
+            policy_hash = bindings_hash or self._current_policy_hash()
 
             if unresolved_policy_ids:
+                invalid_status = DecisionType.BLOCKED if self.strict_mode else DecisionType.SKIPPED
+                invalid_message = (
+                    f"BLOCKED: invalid policy references: {', '.join(unresolved_policy_ids)} (strict mode)"
+                    if self.strict_mode
+                    else f"SKIPPED: invalid policy references: {', '.join(unresolved_policy_ids)}"
+                )
                 invalid = self._build_decision(
                     request,
-                    release_status=DecisionType.SKIPPED,
-                    message=f"SKIPPED: invalid policy references: {', '.join(unresolved_policy_ids)}",
+                    release_status=invalid_status,
+                    message=invalid_message,
                     evaluation_key=f"{evaluation_key}:invalid-policy",
                     unlock_conditions=["Fix Jira transition policy mapping to compiled policy IDs."],
-                    reason_code="INVALID_POLICY_REFERENCE",
+                    reason_code="INVALID_POLICY_REFERENCE_STRICT" if self.strict_mode else "INVALID_POLICY_REFERENCE",
                     inputs_present={"releasegate_risk": True},
                     policy_hash=policy_hash,
+                    policy_bindings=policy_bindings,
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "signal_map": signal_map,
+                        "policies_requested": policies,
+                        "strict_mode": self.strict_mode,
+                        "risk_meta": risk_meta,
+                    },
                 )
                 final_invalid = AuditRecorder.record_with_context(
                     invalid,
@@ -229,9 +430,12 @@ class WorkflowGate:
                     final_invalid.decision_id,
                     final_invalid.policy_bundle_hash,
                 )
-                incr("skipped_count")
+                if final_invalid.release_status == DecisionType.SKIPPED:
+                    incr("skipped_count")
+                if final_invalid.release_status == DecisionType.BLOCKED:
+                    incr("transitions_blocked")
                 return TransitionCheckResponse(
-                    allow=True,
+                    allow=final_invalid.release_status != DecisionType.BLOCKED,
                     reason=final_invalid.message,
                     decision_id=final_invalid.decision_id,
                     status=final_invalid.release_status.value,
@@ -252,6 +456,14 @@ class WorkflowGate:
                 reason_code=self._reason_code_for_status(status.value),
                 inputs_present={"releasegate_risk": True},
                 policy_hash=policy_hash,
+                policy_bindings=policy_bindings,
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "signal_map": signal_map,
+                    "policies_requested": policies,
+                    "strict_mode": self.strict_mode,
+                    "risk_meta": risk_meta,
+                },
             )
             
             # 6. Audit Recording
@@ -308,45 +520,24 @@ class WorkflowGate:
 
         except Exception as e:
             logger.error(f"Jira Gate Error: {e}", exc_info=True)
-            is_prod = request.environment.upper() == "PRODUCTION"
-            fallback_status = DecisionType.ERROR
-            fallback_decision = self._build_decision(
+            return self._error_response(
                 request,
-                release_status=fallback_status,
-                message=f"System Error: {str(e)}",
-                evaluation_key=f"{evaluation_key}:error",
-                unlock_conditions=["Retry transition after resolving ReleaseGate system errors."],
-                reason_code="SYSTEM_ERROR",
-                inputs_present={"releasegate_risk": False},
-                policy_hash=self._current_policy_hash(),
-            )
-            final_fallback = AuditRecorder.record_with_context(
-                fallback_decision,
+                evaluation_key=evaluation_key,
                 repo=repo,
                 pr_number=pr_number,
-            )
-            logger.info(
-                "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
-                "system-error",
-                fallback_status,
-                request.issue_key,
-                final_fallback.decision_id,
-            )
-            incr("transitions_error")
-            if is_prod:
-                incr("transitions_blocked")
-            return TransitionCheckResponse(
-                allow=not is_prod,
-                reason=final_fallback.message,
-                decision_id=final_fallback.decision_id,
-                status=fallback_status.value,
-                policy_hash=final_fallback.policy_bundle_hash,
+                message=f"System Error: {str(e)}",
+                reason_code="SYSTEM_ERROR",
             )
 
     def _compute_key(self, req: TransitionCheckRequest) -> str:
         """SHA256(issue + transition + status_change + env + actor)"""
+        request_id = (
+            req.context_overrides.get("transition_request_id")
+            or req.context_overrides.get("idempotency_key")
+            or ""
+        )
         # Include target_status as critical differentiator
-        raw = f"{req.issue_key}:{req.transition_id}:{req.source_status}:{req.target_status}:{req.environment}:{req.actor_account_id}"
+        raw = f"{req.issue_key}:{req.transition_id}:{req.source_status}:{req.target_status}:{req.environment}:{req.actor_account_id}:{request_id}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
     def _build_context(self, req: TransitionCheckRequest):
@@ -434,19 +625,151 @@ class WorkflowGate:
         if self._policy_hash_cache:
             return self._policy_hash_cache
 
+        compiled_map = self._compiled_policy_map()
+        bindings = self._build_policy_bindings(sorted(compiled_map.keys()), compiled_map)
+        self._policy_hash_cache = self._policy_bindings_hash(bindings)
+        return self._policy_hash_cache
+
+    def _compiled_policy_map(self) -> Dict[str, Policy]:
+        if self._compiled_policy_cache is not None:
+            return self._compiled_policy_cache
+
         loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled", strict=False)
         try:
             policies = loader.load_all()
         except Exception:
             policies = []
 
-        canonical = []
-        for policy in sorted(policies, key=lambda p: getattr(p, "policy_id", "")):
-            if hasattr(policy, "model_dump"):
-                canonical.append(policy.model_dump(mode="json", exclude_none=True))
-        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-        self._policy_hash_cache = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        return self._policy_hash_cache
+        compiled: Dict[str, Policy] = {}
+        for policy in policies:
+            if isinstance(policy, Policy):
+                compiled[policy.policy_id] = policy
+        self._compiled_policy_cache = compiled
+        return compiled
+
+    def _policy_hash_for_dict(self, policy_dict: Dict[str, Any]) -> str:
+        canonical = json.dumps(policy_dict, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _build_policy_bindings(self, policy_ids: List[str], policy_map: Dict[str, Policy]) -> List[PolicyBinding]:
+        bindings: List[PolicyBinding] = []
+        seen: set[str] = set()
+        for policy_id in policy_ids:
+            if policy_id in seen:
+                continue
+            seen.add(policy_id)
+            policy = policy_map.get(policy_id)
+            if not policy:
+                continue
+            policy_dict = policy.model_dump(mode="json", exclude_none=True)
+            policy_hash = self._policy_hash_for_dict(policy_dict)
+            bindings.append(
+                PolicyBinding(
+                    policy_id=policy.policy_id,
+                    policy_version=policy.version,
+                    policy_hash=policy_hash,
+                    policy=policy_dict,
+                )
+            )
+        return bindings
+
+    def _policy_bindings_hash(self, bindings: List[PolicyBinding]) -> str:
+        if not bindings:
+            return hashlib.sha256(b"[]").hexdigest()
+        material = []
+        for binding in sorted(bindings, key=lambda b: b.policy_id):
+            material.append(
+                {
+                    "policy_id": binding.policy_id,
+                    "policy_version": binding.policy_version,
+                    "policy_hash": binding.policy_hash,
+                }
+            )
+        payload = json.dumps(material, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _parse_iso_datetime(self, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            if raw.endswith("Z"):
+                raw = f"{raw[:-1]}+00:00"
+            try:
+                dt = datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+        else:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _principal_set(self, *values: Any) -> set[str]:
+        principals: set[str] = set()
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    normalized = str(item).strip().lower()
+                    if normalized:
+                        principals.add(normalized)
+                continue
+            normalized = str(value).strip().lower()
+            if normalized:
+                principals.add(normalized)
+        return principals
+
+    def _error_response(
+        self,
+        request: TransitionCheckRequest,
+        *,
+        evaluation_key: str,
+        repo: str,
+        pr_number: Optional[int],
+        message: str,
+        reason_code: str,
+    ) -> TransitionCheckResponse:
+        fallback_status = DecisionType.ERROR
+        fallback_decision = self._build_decision(
+            request,
+            release_status=fallback_status,
+            message=message,
+            evaluation_key=f"{evaluation_key}:error",
+            unlock_conditions=["Retry transition after resolving ReleaseGate system errors."],
+            reason_code=reason_code,
+            inputs_present={"releasegate_risk": False},
+            policy_hash=self._current_policy_hash(),
+            input_snapshot={"request": request.model_dump(mode="json")},
+        )
+        final_fallback = AuditRecorder.record_with_context(
+            fallback_decision,
+            repo=repo,
+            pr_number=pr_number,
+        )
+        logger.info(
+            "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+            "system-error",
+            fallback_status,
+            request.issue_key,
+            final_fallback.decision_id,
+        )
+        incr("transitions_error")
+        should_block = self.strict_mode or request.environment.upper() == "PRODUCTION"
+        if should_block:
+            incr("transitions_blocked")
+        return TransitionCheckResponse(
+            allow=not should_block,
+            reason=final_fallback.message,
+            decision_id=final_fallback.decision_id,
+            status=fallback_status.value,
+            policy_hash=final_fallback.policy_bundle_hash,
+        )
 
     def _resolve_role(self, identifier: Optional[str]) -> str:
         """Map user identifier to role using yaml map."""
@@ -475,6 +798,8 @@ class WorkflowGate:
         reason_code: Optional[str] = None,
         inputs_present: Optional[Dict[str, bool]] = None,
         policy_hash: Optional[str] = None,
+        policy_bindings: Optional[List[PolicyBinding]] = None,
+        input_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Decision:
         repo, pr_number = self._repo_and_pr(request)
         return Decision(
@@ -491,6 +816,8 @@ class WorkflowGate:
             actor_id=request.actor_account_id,
             reason_code=reason_code,
             inputs_present=inputs_present or {},
+            input_snapshot=input_snapshot or {},
+            policy_bindings=policy_bindings or [],
             enforcement_targets=EnforcementTargets(
                 repository=repo,
                 pr_number=pr_number,

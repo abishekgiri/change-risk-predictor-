@@ -27,6 +27,7 @@ def record_override(
     decision_id: Optional[str] = None,
     actor: Optional[str] = None,
     reason: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Append-only override ledger record with hash chaining.
@@ -45,37 +46,54 @@ def record_override(
         "previous_hash": prev_hash,
         "created_at": now,
     }
+    if idempotency_key is not None:
+        payload["idempotency_key"] = idempotency_key
     event_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
     override_id = hashlib.sha256(f"{repo}:{now}:{event_hash}".encode()).hexdigest()[:32]
 
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO audit_overrides (
-            override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            override_id,
-            decision_id,
-            repo,
-            pr_number,
-            issue_key,
-            actor,
-            reason,
-            prev_hash,
-            event_hash,
-            now,
-        ),
-    )
-    conn.commit()
-    conn.close()
-
-    payload["override_id"] = override_id
-    payload["event_hash"] = event_hash
-    return payload
+    try:
+        cursor.execute(
+            """
+            INSERT INTO audit_overrides (
+                override_id, decision_id, repo, pr_number, issue_key, actor, reason, idempotency_key, previous_hash, event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                override_id,
+                decision_id,
+                repo,
+                pr_number,
+                issue_key,
+                actor,
+                reason,
+                idempotency_key,
+                prev_hash,
+                event_hash,
+                now,
+            ),
+        )
+        conn.commit()
+        payload["override_id"] = override_id
+        payload["event_hash"] = event_hash
+        return payload
+    except sqlite3.IntegrityError as exc:
+        if idempotency_key and (
+            "idempotency_key" in str(exc).lower() or "idx_overrides_idempotency_key" in str(exc)
+        ):
+            cursor.execute(
+                "SELECT * FROM audit_overrides WHERE idempotency_key = ? LIMIT 1",
+                (idempotency_key,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+        raise
+    finally:
+        conn.close()
 
 
 def list_overrides(repo: str, limit: int = 200, pr: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -106,7 +124,7 @@ def verify_override_chain(repo: str, pr: Optional[int] = None) -> Dict[str, Any]
     cursor = conn.cursor()
 
     query = """
-        SELECT override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
+        SELECT override_id, decision_id, repo, pr_number, issue_key, actor, reason, idempotency_key, previous_hash, event_hash, created_at
         FROM audit_overrides
         WHERE repo = ?
     """
@@ -143,6 +161,8 @@ def verify_override_chain(repo: str, pr: Optional[int] = None) -> Dict[str, Any]
             "previous_hash": previous_hash,
             "created_at": row["created_at"],
         }
+        if row["idempotency_key"] is not None:
+            payload["idempotency_key"] = row["idempotency_key"]
         expected_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
         if expected_hash != row["event_hash"]:
             return {

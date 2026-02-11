@@ -241,13 +241,31 @@ def set_repo_policy(repo_id: int, policy: dict):
         db.close()
 
 @app.get("/repos/{repo_id}/policy/effective")
-def get_effective_policy(repo_id: int):
+def get_effective_policy(
+    repo_id: int,
+    environment: Optional[str] = None,
+    project_key: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    workflow_name: Optional[str] = None,
+    transition_id: Optional[str] = None,
+    transition_name: Optional[str] = None,
+    issue_type: Optional[str] = None,
+):
     """
     Get the effective (merged) policy for a repository.
     """
     db = SessionLocal()
     try:
-        effective = resolve_effective_policy(db, repo_id)
+        context = {
+            "environment": environment,
+            "project_key": project_key,
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "transition_id": transition_id,
+            "transition_name": transition_name,
+            "issue_type": issue_type,
+        }
+        effective = resolve_effective_policy(db, repo_id, context=context)
         return effective
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

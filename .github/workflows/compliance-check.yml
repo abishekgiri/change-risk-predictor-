@@ -35,6 +35,12 @@ jobs:
           which releasegate || echo "releasegate not in PATH"
           releasegate --help || echo "releasegate failed to run"
 
+      - name: Lint Compiled Policies
+        run: |
+          releasegate lint-policies \
+            --policy-dir "releasegate/policy/compiled" \
+            --format text
+
       - name: Run Policy Analysis
         env:
           # Use the built-in GITHUB_TOKEN for API access logic in cli.py

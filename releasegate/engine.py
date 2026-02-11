@@ -1,26 +1,17 @@
-from typing import Dict, Any, List, Optional
-import hashlib
-import json
-from releasegate.policy.policy_types import Policy, ControlSignal
+from typing import Dict, Any, List
+from releasegate.policy.policy_types import Policy
 from releasegate.policy.loader import PolicyLoader
 from releasegate.enforcement.core_risk import CoreRiskControl
 from releasegate.enforcement.registry import ControlRegistry
 from releasegate.enforcement.types import ControlContext
-from pydantic import BaseModel
-
-class PolicyResult(BaseModel):
-    policy_id: str
-    name: str
-    status: str # COMPLIANCE / WARN / BLOCK
-    triggered: bool
-    violations: List[str]
-    evidence: Dict[str, Any]
-    traceability: Optional[Dict[str, Any]] = None # Injected metadata
-
-class ComplianceRunResult(BaseModel):
-    overall_status: str # COMPLIANCE / WARN / BLOCK
-    results: List[PolicyResult]
-    metadata: Dict[str, Any]
+from releasegate.engine_core import (
+    ComplianceRunResult,
+    PolicyResult,
+    check_condition as check_signal_condition,
+    compute_policy_hash,
+    evaluate_policy,
+    flatten_signals,
+)
 
 class ComplianceEngine:
     """
@@ -127,80 +118,17 @@ class ComplianceEngine:
         )
 
     def _compute_policy_hash(self, policies: List[Policy]) -> str:
-        canonical = []
-        for policy in sorted(policies, key=lambda p: p.policy_id):
-            canonical.append(policy.model_dump(mode="json", exclude_none=True))
-        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return compute_policy_hash(policies)
 
     def _evaluate_policy(self, policy: Policy, signals: Dict[str, Any]) -> PolicyResult:
-        violations = []
-        triggered = False
-        
-        # AND Logic: All controls in a policy are evaluated
-        # If ANY control matches the trigger condition, the policy triggers? 
-        # Typically policies specify "violations".
-        # Let's assume: If ALL conditions match, then enforcement triggers?
-        # WAIT. "High Severity Changes Require Review". Signal: severity >= HIGH.
-        # This implies "Trigger if severity is HIGH".
-        # What if multiple signals? usually AND logic for the trigger.
-        
-        triggers = []
-        for ctrl in policy.controls:
-            actual_val = signals.get(ctrl.signal)
-            if self._check_condition(actual_val, ctrl.operator, ctrl.value):
-                triggers.append(f"{ctrl.signal} ({actual_val}) {ctrl.operator} {ctrl.value}")
-        
-        # Policy is "violated" (triggered) if ALL control conditions are met? 
-        # Or ANY? 
-        # For SEC-PR-004: "High Risk" AND "Churn > 500".
-        # Yes, usually composite trigger.
-        
-        if len(triggers) == len(policy.controls):
-            triggered = True
-            violations = triggers
-            status = policy.enforcement.result # BLOCK or WARN
-        else:
-            status = "COMPLIANT"
-        
-        return PolicyResult(
-            policy_id=policy.policy_id,
-            name=policy.name,
-            status=status,
-            triggered=triggered,
-            violations=violations,
-            evidence={}, # Todo: extract specific evidence
-            traceability=policy.metadata or {}
+        return evaluate_policy(
+            policy,
+            signals,
+            check_condition=self._check_condition,
         )
 
     def _check_condition(self, actual, operator, expected) -> bool:
-        if actual is None: return False
-        try:
-            if operator == "==": return actual == expected
-            if operator == "!=": return actual != expected
-            if operator == ">": return float(actual) > float(expected)
-            if operator == ">=": return float(actual) >= float(expected)
-            if operator == "<": return float(actual) < float(expected)
-            if operator == "<=": return float(actual) <= float(expected)
-            if operator == "in":
-                if isinstance(actual, (list, tuple, set)):
-                    return any(a in expected for a in actual)
-                return actual in expected
-            if operator == "not in":
-                if isinstance(actual, (list, tuple, set)):
-                    return all(a not in expected for a in actual)
-                return actual not in expected
-        except:
-            return False
-        return False
+        return check_signal_condition(actual, operator, expected)
 
     def _flatten_signals(self, data: Dict[str, Any], prefix="") -> Dict[str, Any]:
-        """Recursive flatten for dot notation."""
-        out = {}
-        for k, v in data.items():
-            key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict) and k != "files_changed": # Don't flatten lists of files
-                out.update(self._flatten_signals(v, key))
-            else:
-                out[key] = v
-        return out
+        return flatten_signals(data, prefix=prefix, preserve_keys={"files_changed"})
