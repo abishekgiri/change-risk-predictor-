@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 from releasegate.config import DB_PATH
 from releasegate.signals import normalize
@@ -21,7 +21,7 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
     cursor = conn.cursor()
     
     # Calculate cutoff for "recent"
-    cutoff_dt = datetime.now() - timedelta(days=window_days)
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=window_days)
     
     file_data = {}
     
@@ -49,6 +49,10 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
             if timestamp:
                 try:
                     ts_dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                    if ts_dt.tzinfo is None:
+                        ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                    else:
+                        ts_dt = ts_dt.astimezone(timezone.utc)
                 except Exception:
                     ts_dt = None
             

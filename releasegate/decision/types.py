@@ -1,9 +1,7 @@
 import uuid
 from datetime import datetime
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
-
-from releasegate.policy.types import Requirement
 
 from releasegate.policy.types import Requirement
 
@@ -30,7 +28,7 @@ class Decision(BaseModel):
     decision_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime
     
-    release_status: Literal["ALLOWED", "BLOCKED", "CONDITIONAL"]
+    release_status: Literal["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"]
     
     # Traceability
     matched_policies: List[str] = Field(default_factory=list)
@@ -41,10 +39,13 @@ class Decision(BaseModel):
     # Linkage
     context_id: str
     enforcement_targets: EnforcementTargets # Decouples enforcement from Context
+    actor_id: Optional[str] = None
     
     # Unlocking / Enforcement
     requirements: Optional[Requirement] = None # Structured data for machines
     unlock_conditions: List[str] = Field(default_factory=list) # Human readable strings
+    inputs_present: Dict[str, bool] = Field(default_factory=dict)
     
     # UX
     message: str
+    reason_code: Optional[str] = None

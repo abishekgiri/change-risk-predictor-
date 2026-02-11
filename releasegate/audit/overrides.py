@@ -94,3 +94,64 @@ def list_overrides(repo: str, limit: int = 200, pr: Optional[int] = None) -> Lis
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def verify_override_chain(repo: str, pr: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Verify override hash-chain integrity for a repo (optionally for one PR).
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    query = """
+        SELECT override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
+        FROM audit_overrides
+        WHERE repo = ?
+    """
+    params: List[Any] = [repo]
+    if pr is not None:
+        query += " AND pr_number = ?"
+        params.append(pr)
+    query += " ORDER BY created_at ASC"
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    expected_prev = "0" * 64
+    checked = 0
+    for row in rows:
+        checked += 1
+        previous_hash = row["previous_hash"] or ""
+        if previous_hash != expected_prev:
+            return {
+                "valid": False,
+                "checked": checked,
+                "reason": "previous_hash mismatch",
+                "override_id": row["override_id"],
+            }
+
+        payload = {
+            "repo": row["repo"],
+            "pr_number": row["pr_number"],
+            "issue_key": row["issue_key"],
+            "decision_id": row["decision_id"],
+            "actor": row["actor"],
+            "reason": row["reason"],
+            "previous_hash": previous_hash,
+            "created_at": row["created_at"],
+        }
+        expected_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        if expected_hash != row["event_hash"]:
+            return {
+                "valid": False,
+                "checked": checked,
+                "reason": "event_hash mismatch",
+                "override_id": row["override_id"],
+            }
+
+        expected_prev = row["event_hash"]
+
+    return {"valid": True, "checked": checked}

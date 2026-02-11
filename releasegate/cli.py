@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list = audit_sub.add_parser("list", help="List recent decisions")
     audit_list.add_argument("--repo", required=True)
     audit_list.add_argument("--limit", type=int, default=20)
-    audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL"])
+    audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"])
     audit_list.add_argument("--pr", type=int)
     
     # audit show
@@ -68,7 +68,7 @@ def main() -> int:
         if args.token:
             os.environ["GITHUB_TOKEN"] = args.token
 
-        # Load config (best-effort)
+        # Load config (optional thresholds)
         config = {}
         if args.config and os.path.exists(args.config):
             try:
@@ -77,72 +77,68 @@ def main() -> int:
             except Exception as e:
                 print(f"Warning: Failed to load config {args.config}: {e}", file=sys.stderr)
 
-        # Ensure repo is available to downstream config lookups
-        config.setdefault("github", {})
-        if isinstance(config.get("github"), dict):
-            config["github"].setdefault("repo", args.repo)
-        config.setdefault("repo_slug", args.repo)
-
-        # Fetch PR metadata and files
         try:
-            from releasegate.server import get_pr_details, get_pr_files, post_pr_comment, create_check_run
+            from releasegate.server import get_pr_details, get_pr_metrics, post_pr_comment, create_check_run
         except Exception as e:
             print(f"Error importing GitHub helpers: {e}", file=sys.stderr)
             return 1
 
-        from releasegate.ingestion.providers.github_provider import GitHubProvider
+        from releasegate.integrations.github_risk import (
+            build_issue_risk_property,
+            classify_pr_risk,
+            extract_jira_issue_keys,
+            score_for_risk_level,
+        )
 
         pr_number = int(args.pr)
         pr_data = get_pr_details(args.repo, pr_number)
-        filenames, diff_stats, per_file_churn = get_pr_files(args.repo, pr_number)
-        config["head_sha"] = pr_data.get("head", {}).get("sha", "")
-        provider = GitHubProvider({"github": {"repo": args.repo, "cache_ttl": 3600}})
+        metrics = get_pr_metrics(args.repo, pr_number)
+        github_risk = config.get("github_risk", {}) if isinstance(config, dict) else {}
+        risk_level = classify_pr_risk(
+            metrics,
+            high_changed_files=int(github_risk.get("high_changed_files", 20)),
+            medium_additions=int(github_risk.get("medium_additions", 300)),
+            high_total_churn=int(github_risk.get("high_total_churn", 800)),
+        )
+        risk_score = score_for_risk_level(risk_level)
+        decision = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
 
-        raw_signals = {
-            "repo": args.repo,
-            "pr_number": pr_number,
-            "diff": {},  # Diff content not available via this path (MVP)
-            "repo_slug": args.repo,
-            "entity_type": "pr",
-            "entity_id": str(pr_number),
-            "timestamp": pr_data.get("created_at", "unknown"),
-            "files_changed": filenames,
-            "lines_added": diff_stats.get("loc_added", 0),
-            "lines_deleted": diff_stats.get("loc_deleted", 0),
-            "total_churn": diff_stats.get("total_churn", 0),
-            "per_file_churn": per_file_churn,
-            "touched_services": [],
-            "linked_issue_ids": [],
-            "author": pr_data.get("user", {}).get("login"),
-            "branch": pr_data.get("head", {}).get("ref"),
-            "provider": provider
-        }
+        reasons = [f"Heuristic classification from GitHub metadata: {risk_level}"]
 
-        # Evaluate policies
-        from releasegate.engine import ComplianceEngine
-        engine = ComplianceEngine(config)
-        run_result = engine.evaluate(raw_signals)
+        issue_keys = sorted(extract_jira_issue_keys(pr_data.get("title"), pr_data.get("body")))
+        attached_issue_keys = []
+        if issue_keys:
+            try:
+                from releasegate.integrations.jira.client import JiraClient
 
-        risk_score = run_result.metadata.get("core_risk_score", 0) or 0
-        risk_level = run_result.metadata.get("core_risk_level", "UNKNOWN")
-
-        reasons = []
-        for p in run_result.results:
-            if p.status in ["BLOCK", "WARN"]:
-                for v in p.violations:
-                    reasons.append(f"[{p.policy_id}] {v}")
+                jc = JiraClient()
+                payload = build_issue_risk_property(
+                    repo=args.repo,
+                    pr_number=pr_number,
+                    risk_level=risk_level,
+                    metrics=metrics,
+                )
+                for key in issue_keys:
+                    if jc.set_issue_property(key, "releasegate_risk", payload):
+                        attached_issue_keys.append(key)
+            except Exception as e:
+                print(f"Warning: Failed to attach Jira risk property: {e}", file=sys.stderr)
 
         output = {
-            "control_result": run_result.overall_status,
+            "control_result": decision,
             "severity": risk_score,
             "severity_level": risk_level,
             "risk_score": risk_score,
             "risk_level": risk_level,
-            "decision": run_result.overall_status,
+            "decision": decision,
             "reasons": reasons,
-            "evidence": run_result.metadata.get("phase3_findings", []),
-            "signals": run_result.metadata.get("phase3_signals", {}),
-            "model_version": run_result.metadata.get("raw_features", {}).get("feature_version"),
+            "metrics": {
+                "changed_files_count": metrics.changed_files,
+                "additions": metrics.additions,
+                "deletions": metrics.deletions,
+                "total_churn": metrics.total_churn,
+            },
+            "attached_issue_keys": attached_issue_keys,
         }
 
         # Write JSON output if requested
@@ -157,7 +153,7 @@ def main() -> int:
         if args.format == "json":
             print(json.dumps(output, indent=2))
         else:
-            print(f"Decision: {run_result.overall_status}")
+            print(f"Decision: {decision}")
             print(f"Risk: {risk_level} ({risk_score})")
             if reasons:
                 print("Reasons:")
@@ -167,7 +163,7 @@ def main() -> int:
         # Optional PR comment/check
         if args.post_comment and args.repo and pr_number:
             comment_body = (
-                f"## {run_result.overall_status} Compliance Check\n\n"
+                f"## {decision} Compliance Check\n\n"
                 f"**Severity**: {risk_level} ({risk_score})\n\n"
                 + ("\n".join(f"- {r}" for r in reasons) if reasons else "_No policy violations found._")
             )
@@ -191,7 +187,7 @@ def main() -> int:
 
         # Enforcement mode
         mode = os.getenv("COMPLIANCEBOT_ENFORCEMENT", "report_only")
-        if mode == "block" and run_result.overall_status == "BLOCK":
+        if mode == "block" and decision == "BLOCK":
             return 1
         return 0
 
