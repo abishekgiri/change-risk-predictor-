@@ -90,6 +90,7 @@ class ComplianceEngine:
             "core_risk_score": core_output.get("violation_severity"),
             "core_risk_level": core_output.get("severity_level"),
             "raw_features": core_output.get("raw_features", {}),
+            "phase3_signals": phase3_signals,
             "phase3_findings_count": len(phase3_findings),
             "phase3_findings": [
                 {

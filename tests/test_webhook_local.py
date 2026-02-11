@@ -3,7 +3,6 @@ from fastapi.testclient import TestClient
 from releasegate.server import app
 from releasegate.config import DB_PATH
 import sqlite3
-import os
 import json
 import hmac
 import hashlib
@@ -19,12 +18,15 @@ def test_webhook_pr_opened():
         "action": "opened",
         "pull_request": {
             "number": 999,
-            "title": "Integration Test PR",
-            "body": "Testing the webhook",
+            "title": "Integration Test PR PROJ-123",
+            "body": "Testing the webhook for PROJ-123",
             "state": "open",
             "user": {"login": "test-bot"},
             "base": {"sha": "base123"},
             "head": {"sha": "head123"},
+            "changed_files": 25,
+            "additions": 20,
+            "deletions": 5,
             "merged": False
         },
         "repository": {
@@ -40,32 +42,11 @@ def test_webhook_pr_opened():
     mac = hmac.new(secret.encode(), msg=payload_bytes, digestmod=hashlib.sha256)
     signature = "sha256=" + mac.hexdigest()
 
-    # Mock external requests (GitHub API) so we don't hit real limits or need tokens
-    with unittest.mock.patch("requests.post") as mock_post, \
-         unittest.mock.patch("requests.get") as mock_get, \
-         unittest.mock.patch("releasegate.server.GITHUB_TOKEN", "mock_token"), \
-         unittest.mock.patch("releasegate.server.GITHUB_SECRET", secret):
-        
-        # Mock file fetch (files changed)
-        # We need check which URL it was called with to return different things
-        def mock_get_side_effect(url, headers):
-            mock_resp = unittest.mock.Mock()
-            mock_resp.status_code = 200
-            
-            if "/contents/releasegate.yaml" in url or "/contents/riskbot_config.yml" in url:
-                # Return empty config or mock config
-                mock_resp.json.return_value = {"content": ""} # defaulting to empty
-            elif "/files" in url:
-                mock_resp.json.return_value = [{"filename": "config.py", "additions": 10, "deletions": 5}]
-            else:
-                mock_resp.json.return_value = {}
-            return mock_resp
+    with unittest.mock.patch("releasegate.server.GITHUB_SECRET", secret), \
+         unittest.mock.patch("releasegate.integrations.jira.client.JiraClient") as jira_client_cls:
+        jira_client = jira_client_cls.return_value
+        jira_client.set_issue_property.return_value = True
 
-        mock_get.side_effect = mock_get_side_effect
-
-        # Mock comment & check run creation
-        mock_post.return_value.status_code = 201
-        
         response = client.post(
             "/webhooks/github",
             content=payload_bytes,
@@ -79,20 +60,10 @@ def test_webhook_pr_opened():
         assert response.status_code == 200, f"Response: {response.text}"
         data = response.json()
         assert data["status"] == "processed"
+        assert data["severity"] == "HIGH"
+        assert "PROJ-123" in data["attached_issue_keys"]
         assert "risk_score" in data
-
-        # Verify Check Run was called
-        # We expect 2 POST calls: one for comment, one for check run
-        # Let's inspect call args to find the Check Run
-        check_run_called = False
-        for call in mock_post.call_args_list:
-            if "/check-runs" in call[0][0]:
-                check_run_called = True
-                json_body = call[1]['json']
-                assert json_body['name'] == "ComplianceBot CI"
-                assert json_body['head_sha'] == "head123"
-        
-        assert check_run_called, "create_check_run was not called"
+        jira_client.set_issue_property.assert_called()
         
         # 3. Verify DB
         conn = sqlite3.connect(DB_PATH)
@@ -103,7 +74,7 @@ def test_webhook_pr_opened():
         conn.close()
         
         assert row is not None, "PR run not saved to DB"
-        print("Success: Webhook processed and Run saved to DB!")
+        print("Success: Webhook processed and minimal run saved to DB!")
 
 def test_webhook_ping():
     """Test GitHub Ping event."""

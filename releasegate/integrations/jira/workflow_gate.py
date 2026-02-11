@@ -1,12 +1,12 @@
 import hashlib
-import json
 import logging
-from typing import Optional, Dict, Any, List
+import uuid
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List, Literal
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets
-from releasegate.context.builder import ContextBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,87 @@ class WorkflowGate:
         Enforces idempotency, audit-on-error, and policy gates.
         """
         evaluation_key = self._compute_key(request)
+        repo, pr_number = self._repo_and_pr(request)
+
+        # Override path (fail-open with ledger)
+        if request.context_overrides.get("override") is True:
+            override_reason = request.context_overrides.get("override_reason", "override")
+            decision = self._build_decision(
+                request,
+                release_status="ALLOWED",
+                message=f"Override applied: {override_reason}",
+                evaluation_key=f"{evaluation_key}:override",
+                unlock_conditions=[override_reason],
+                reason_code="OVERRIDE_APPLIED",
+                inputs_present={"releasegate_risk": True},
+            )
+            final_decision = AuditRecorder.record_with_context(
+                decision,
+                repo=repo,
+                pr_number=pr_number,
+            )
+            try:
+                from releasegate.audit.overrides import record_override
+                record_override(
+                    repo=repo,
+                    pr_number=pr_number,
+                    issue_key=request.issue_key,
+                    decision_id=final_decision.decision_id,
+                    actor=request.actor_email or request.actor_account_id,
+                    reason=override_reason
+                )
+            except Exception as e:
+                logger.warning(f"Override ledger write failed: {e}")
+            logger.info(
+                "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+                "override",
+                "ALLOWED",
+                request.issue_key,
+                final_decision.decision_id,
+            )
+            return TransitionCheckResponse(
+                allow=True,
+                reason=final_decision.message,
+                decision_id=final_decision.decision_id,
+                status="ALLOWED",
+                unlock_conditions=final_decision.unlock_conditions
+            )
+
+        # Fail-open explicitly with an audited SKIPPED decision when Jira risk metadata is missing.
+        risk_meta = self.client.get_issue_property(request.issue_key, "releasegate_risk")
+        if self._is_missing_risk_metadata(risk_meta):
+            missing_reason = "SKIPPED: missing issue property `releasegate_risk`"
+            skipped = self._build_decision(
+                request,
+                release_status="SKIPPED",
+                message=missing_reason,
+                evaluation_key=f"{evaluation_key}:missing-risk",
+                unlock_conditions=[
+                    "Run GitHub PR classification to attach `releasegate_risk` on this issue."
+                ],
+                reason_code="MISSING_RISK_METADATA",
+                inputs_present={"releasegate_risk": False},
+            )
+            final_skipped = AuditRecorder.record_with_context(
+                skipped,
+                repo=repo,
+                pr_number=pr_number,
+            )
+            logger.info(
+                "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+                "missing-risk",
+                "SKIPPED",
+                request.issue_key,
+                final_skipped.decision_id,
+            )
+            return TransitionCheckResponse(
+                allow=True,
+                reason=final_skipped.message,
+                decision_id=final_skipped.decision_id,
+                status="SKIPPED",
+                requirements=["Missing `releasegate_risk` metadata"],
+                unlock_conditions=final_skipped.unlock_conditions,
+            )
         
         try:
             # 1. Idempotency Check
@@ -35,8 +116,35 @@ class WorkflowGate:
             # 3. Policy Resolution
             policies = self._resolve_policies(request)
             if not policies:
-                # No policies mapped -> ALLOW (Fail Open for unconfigured transitions)
-                return self._response(True, "No policies configured for this transition", "no-policy")
+                # No policies mapped -> explicit audited skip (Fail Open, not silent)
+                skipped = self._build_decision(
+                    request,
+                    release_status="SKIPPED",
+                    message="SKIPPED: no policies configured for this transition",
+                    evaluation_key=f"{evaluation_key}:no-policy",
+                    unlock_conditions=["Map this transition to one or more policy IDs."],
+                    reason_code="NO_POLICIES_MAPPED",
+                    inputs_present={"releasegate_risk": True},
+                )
+                final_skipped = AuditRecorder.record_with_context(
+                    skipped,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                logger.info(
+                    "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+                    "no-policy",
+                    "SKIPPED",
+                    request.issue_key,
+                    final_skipped.decision_id,
+                )
+                return TransitionCheckResponse(
+                    allow=True,
+                    reason=final_skipped.message,
+                    decision_id=final_skipped.decision_id,
+                    status="SKIPPED",
+                    unlock_conditions=final_skipped.unlock_conditions,
+                )
 
             # 4. Evaluation
             # We must convert the EvaluationContext to a signal dict that ComplianceEngine expects
@@ -82,33 +190,23 @@ class WorkflowGate:
                     requirements.extend(res.violations)
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
-            from releasegate.decision.types import Decision
-            from datetime import datetime, timezone
-            import uuid
-            
-            decision = Decision(
-                decision_id=str(uuid.uuid4()),
-                timestamp=datetime.now(timezone.utc),
+            decision = self._build_decision(
+                request,
                 release_status=status,
-                context_id=f"jira-{request.issue_key}",
                 message=f"Policy Check: {status}",
-                requirements={}, # Keep structured requirements empty for now to avoid validation issues
-                unlock_conditions=requirements or ["None"], # Store human-readable checks here
+                evaluation_key=f"{evaluation_key}:evaluated",
+                unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                policy_bundle_hash="local-hash",
-                enforcement_targets=EnforcementTargets(
-                    repository=request.context_overrides.get("repo", "unknown"),
-                    ref=request.context_overrides.get("ref", "HEAD"),
-                    external={"jira": [request.issue_key]}
-                )
+                reason_code=self._reason_code_for_status(status),
+                inputs_present={"releasegate_risk": True},
             )
             
             # 6. Audit Recording
             # This handles duplicate inserts (idempotency) by returning existing decision if present
             final_decision = AuditRecorder.record_with_context(
                 decision, 
-                repo=decision.enforcement_targets.repository, 
-                pr_number=request.context_overrides.get("pr_number", 0)
+                repo=repo, 
+                pr_number=pr_number
             )
             
             # 7. UX Logic
@@ -121,7 +219,7 @@ class WorkflowGate:
                 status = "BLOCKED"
                 final_decision.message = f"[Prod Gate] Conditional approval treated as BLOCK. Requirements: {final_decision.unlock_conditions}"
 
-            allow = (status == "ALLOWED")
+            allow = status in {"ALLOWED", "SKIPPED"}
             reason = final_decision.message
             
             if not allow:
@@ -133,6 +231,13 @@ class WorkflowGate:
             
             # Use unlock_conditions (list of strings) for the response requirement list
             resp_requirements = final_decision.unlock_conditions or []
+            logger.info(
+                "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+                "evaluated",
+                status,
+                request.issue_key,
+                final_decision.decision_id,
+            )
             
             return TransitionCheckResponse(
                 allow=allow,
@@ -145,18 +250,35 @@ class WorkflowGate:
 
         except Exception as e:
             logger.error(f"Jira Gate Error: {e}", exc_info=True)
-            import uuid
             is_prod = request.environment.upper() == "PRODUCTION"
             # In Prod, we Fail Closed (Block). In Non-Prod, Fail Open.
-            
-            # Try to record the FAILURE in audit if possible
-            # (Skipped for brevity/complexity, but highly recommended)
-            
+            fallback_status = "BLOCKED" if is_prod else "SKIPPED"
+            fallback_decision = self._build_decision(
+                request,
+                release_status=fallback_status,
+                message=f"System Error: {str(e)}",
+                evaluation_key=f"{evaluation_key}:error",
+                unlock_conditions=["Retry transition after resolving ReleaseGate system errors."],
+                reason_code="SYSTEM_ERROR",
+                inputs_present={"releasegate_risk": False},
+            )
+            final_fallback = AuditRecorder.record_with_context(
+                fallback_decision,
+                repo=repo,
+                pr_number=pr_number,
+            )
+            logger.info(
+                "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
+                "system-error",
+                fallback_status,
+                request.issue_key,
+                final_fallback.decision_id,
+            )
             return TransitionCheckResponse(
                 allow=not is_prod,
-                reason=f"System Error: {str(e)}",
-                decision_id=str(uuid.uuid4()),
-                status="BLOCKED" if is_prod else "ALLOWED"
+                reason=final_fallback.message,
+                decision_id=final_fallback.decision_id,
+                status=fallback_status
             )
 
     def _compute_key(self, req: TransitionCheckRequest) -> str:
@@ -241,3 +363,59 @@ class WorkflowGate:
         # In real life: fetch user groups from Jira -> check map
         return "Engineer" # Default safe assumption
 
+    def _repo_and_pr(self, request: TransitionCheckRequest) -> tuple[str, Optional[int]]:
+        repo = request.context_overrides.get("repo", "unknown")
+        pr_number = request.context_overrides.get("pr_number")
+        try:
+            pr = int(pr_number) if pr_number is not None else None
+        except Exception:
+            pr = None
+        return repo, pr
+
+    def _build_decision(
+        self,
+        request: TransitionCheckRequest,
+        *,
+        release_status: Literal["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"],
+        message: str,
+        evaluation_key: str,
+        unlock_conditions: Optional[List[str]] = None,
+        matched_policies: Optional[List[str]] = None,
+        reason_code: Optional[str] = None,
+        inputs_present: Optional[Dict[str, bool]] = None,
+    ) -> Decision:
+        repo, pr_number = self._repo_and_pr(request)
+        return Decision(
+            decision_id=str(uuid.uuid4()),
+            timestamp=datetime.now(timezone.utc),
+            release_status=release_status,
+            context_id=f"jira-{request.issue_key}",
+            message=message,
+            requirements=None,
+            unlock_conditions=unlock_conditions or [],
+            matched_policies=matched_policies or [],
+            policy_bundle_hash="local-hash",
+            evaluation_key=evaluation_key,
+            actor_id=request.actor_account_id,
+            reason_code=reason_code,
+            inputs_present=inputs_present or {},
+            enforcement_targets=EnforcementTargets(
+                repository=repo,
+                pr_number=pr_number,
+                ref=request.context_overrides.get("ref", "HEAD"),
+                external={"jira": [request.issue_key]},
+            ),
+        )
+
+    def _is_missing_risk_metadata(self, risk_meta: Dict[str, Any]) -> bool:
+        if not risk_meta:
+            return True
+        level = risk_meta.get("releasegate_risk") or risk_meta.get("risk_level")
+        return not bool(level)
+
+    def _reason_code_for_status(self, status: str) -> str:
+        if status == "BLOCKED":
+            return "POLICY_BLOCKED"
+        if status == "CONDITIONAL":
+            return "POLICY_CONDITIONAL"
+        return "POLICY_ALLOWED"

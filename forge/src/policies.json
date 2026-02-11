@@ -1,0 +1,788 @@
+{
+  "policies": [
+    {
+      "policy_id": "SEC-PR-TEST.R2",
+      "version": "1.0.0",
+      "name": "Test Policy - Rule R2",
+      "description": "",
+      "controls": [
+        {
+          "signal": "test.signal",
+          "operator": "==",
+          "value": false
+        }
+      ],
+      "enforcement": {
+        "result": "WARN",
+        "message": "Warn message"
+      },
+      "metadata": {
+        "parent_policy": "SEC-PR-TEST",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 109,
+        "compliance": {
+          "TEST": "T1"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SEC-PR-TEST.R1",
+      "version": "1.0.0",
+      "name": "Test Policy - Rule R1",
+      "description": "",
+      "controls": [
+        {
+          "signal": "test.signal",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Block message"
+      },
+      "metadata": {
+        "parent_policy": "SEC-PR-TEST",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "TEST": "T1"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "TEST.R1",
+      "name": "Mock Test Policy R1",
+      "description": "A mock policy for testing and demonstration purposes.",
+      "scope": "pull_request",
+      "enabled": true,
+      "controls": [
+        {
+          "signal": "features.lines_added",
+          "operator": "<",
+          "value": 1000000
+        }
+      ],
+      "enforcement": {
+        "result": "COMPLIANT",
+        "message": "Test policy always passes."
+      },
+      "metadata": {
+        "parent_policy": "TEST",
+        "version": "1.2.3",
+        "compliance": {
+          "SOC2": "CC1.1"
+        },
+        "source_file": "test.dsl"
+      }
+    },
+    {
+      "policy_id": "ENV-PR-001",
+      "name": "Environment Boundary Policy",
+      "description": "Prevents production config from leaking into non-production code",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "env_boundary.has_violations",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Production configuration detected in non-production code. Remove violations before merging."
+      }
+    },
+    {
+      "policy_id": "SEC-PR-001",
+      "name": "High Severity Changes Require Senior Review",
+      "description": "Changes identified as High Severity by the Core Risk Engine must be blocked until review.",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "core_risk.severity_level",
+          "operator": "in",
+          "value": [
+            "HIGH",
+            "CRITICAL"
+          ]
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Change requires Senior review due to High Severity."
+      },
+      "evidence": {
+        "include": [
+          "core_risk.violations",
+          "core_risk.evidence"
+        ]
+      }
+    },
+    {
+      "policy_id": "SEC-PR-004",
+      "name": "Approval Enforcement Policy",
+      "description": "Requires appropriate approvals before merging",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "approvals.required",
+          "operator": "==",
+          "value": true
+        },
+        {
+          "signal": "approvals.satisfied",
+          "operator": "==",
+          "value": false
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Required approvals missing. Cannot merge until approval requirements are met."
+      }
+    },
+    {
+      "policy_id": "OSS-PR-001",
+      "name": "Open Source License Policy",
+      "description": "Prevents introduction of forbidden or unknown licenses",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "licenses.forbidden_count",
+          "operator": ">",
+          "value": 0
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "PR contains forbidden open-source licenses. Remove or replace these dependencies."
+      }
+    },
+    {
+      "policy_id": "SEC-PR-002",
+      "name": "Secret Detection Policy",
+      "description": "Blocks PRs containing hardcoded secrets",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "secrets.detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "PR contains hardcoded secrets. Remove all secrets before merging."
+      }
+    },
+    {
+      "policy_id": "SEC-PR-003",
+      "name": "Privileged Code Change Policy",
+      "description": "Requires additional scrutiny for changes to sensitive code paths",
+      "scope": "pull_request",
+      "controls": [
+        {
+          "signal": "privileged.detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "WARN",
+        "message": "Privileged code path modified. Security team review recommended."
+      }
+    },
+    {
+      "policy_id": "TEST-Policy.R1",
+      "version": "2.0.0",
+      "name": "Test Policy V2 - Rule R1",
+      "description": "",
+      "controls": [
+        {
+          "signal": "test.signal",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": null
+      },
+      "metadata": {
+        "parent_policy": "TEST-Policy",
+        "rule_id": "R1",
+        "version": "2.0.0",
+        "priority": 120,
+        "compliance": {},
+        "effective_date": "2026-01-01",
+        "supersedes": "1.0.0"
+      }
+    },
+    {
+      "policy_id": "ACME-Sec-001.R1",
+      "version": "1.0.0",
+      "name": "Acme Corp Security Standard - Rule R1",
+      "description": "Company-specific overrides and stricter enforcement.",
+      "controls": [
+        {
+          "signal": "approvals.count",
+          "operator": "<",
+          "value": 2
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.count >= 2"
+      },
+      "metadata": {
+        "parent_policy": "ACME-Sec-001",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "Internal": "Sec-Std-01"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ACME-Sec-001.R3",
+      "version": "1.0.0",
+      "name": "Acme Corp Security Standard - Rule R3",
+      "description": "Company-specific overrides and stricter enforcement.",
+      "controls": [
+        {
+          "signal": "deployment.risk_score",
+          "operator": ">",
+          "value": 80
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "ACME Policy Violation: Deployment risk score too high (>80). Reduce risk before merging."
+      },
+      "metadata": {
+        "parent_policy": "ACME-Sec-001",
+        "rule_id": "R3",
+        "version": "1.0.0",
+        "priority": 118,
+        "compliance": {
+          "Internal": "Sec-Std-01"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ACME-Sec-001.R2",
+      "version": "1.0.0",
+      "name": "Acme Corp Security Standard - Rule R2",
+      "description": "Company-specific overrides and stricter enforcement.",
+      "controls": [
+        {
+          "signal": "licenses.id",
+          "operator": "==",
+          "value": "GPL-3.0"
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "ACME Policy Violation: GPL-3.0 is strictly banned for commercial distribution."
+      },
+      "metadata": {
+        "parent_policy": "ACME-Sec-001",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "Internal": "Sec-Std-01"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "HIPAA-164-312-c-Integrity.R2",
+      "version": "1.0.0",
+      "name": "HIPAA 164.312(c) - Integrity - Rule R2",
+      "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
+      "controls": [
+        {
+          "signal": "licenses.banned_detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "HIPAA 164.312(c) Integrity: Use of unauthorized/banned software components detected."
+      },
+      "metadata": {
+        "parent_policy": "HIPAA-164-312-c-Integrity",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "HIPAA": "164.312(c) - Integrity"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "HIPAA-164-312-a-AccessControl.R2",
+      "version": "1.0.0",
+      "name": "HIPAA 164.312(a) - Access Control - Rule R2",
+      "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
+      "controls": [
+        {
+          "signal": "approvals.security_review",
+          "operator": "<",
+          "value": 1
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.security_review >= 1"
+      },
+      "metadata": {
+        "parent_policy": "HIPAA-164-312-a-AccessControl",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "HIPAA": "164.312(a) - Access Control"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "HIPAA-164-312-b-AuditControls.R1",
+      "version": "1.0.0",
+      "name": "HIPAA 164.312(b) - Audit Controls - Rule R1",
+      "description": "Implement hardware, software, and/or procedural mechanisms that record and examine activity in information systems that contain or use electronic protected health information.",
+      "controls": [
+        {
+          "signal": "privileged.is_sensitive",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "WARN",
+        "message": "HIPAA 164.312(b): Sensitive system modification detected. Ensure this change is logged in the audit trail."
+      },
+      "metadata": {
+        "parent_policy": "HIPAA-164-312-b-AuditControls",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 110,
+        "compliance": {
+          "HIPAA": "164.312(b) - Audit Controls"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "HIPAA-164-312-a-AccessControl.R1",
+      "version": "1.0.0",
+      "name": "HIPAA 164.312(a) - Access Control - Rule R1",
+      "description": "Implement technical policies and procedures for electronic information systems that maintain electronic protected health information (ePHI) to allow access only to those persons or software programs that have been granted access rights.",
+      "controls": [
+        {
+          "signal": "secrets.detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "HIPAA 164.312(a)(2)(i) Violation: Hardcoded credentials detected. ePHI systems must enforce unique user identification."
+      },
+      "metadata": {
+        "parent_policy": "HIPAA-164-312-a-AccessControl",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "HIPAA": "164.312(a) - Access Control"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "HIPAA-164-312-c-Integrity.R1",
+      "version": "1.0.0",
+      "name": "HIPAA 164.312(c) - Integrity - Rule R1",
+      "description": "Implement policies and procedures to protect electronic protected health information from improper alteration or destruction.",
+      "controls": [
+        {
+          "signal": "env.production_violation",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "HIPAA 164.312(c) Integrity Violation: Production configuration in non-prod environment creates integrity risk."
+      },
+      "metadata": {
+        "parent_policy": "HIPAA-164-312-c-Integrity",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "HIPAA": "164.312(c) - Integrity"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A14-SecureDevelopment.R1",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.14 - System Acquisition, Development and Maintenance - Rule R1",
+      "description": "",
+      "controls": [
+        {
+          "signal": "privileged.is_sensitive",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "WARN",
+        "message": "ISO 27001 A.14.2.5: Sensitive code modification requires security review."
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A14-SecureDevelopment",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 110,
+        "compliance": {
+          "ISO27001": "A.14 - System Acquisition, Development and Maintenance"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A9-AccessControl.R2",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.9 - Access Control - Rule R2",
+      "description": "",
+      "controls": [
+        {
+          "signal": "approvals.security_review",
+          "operator": "<",
+          "value": 1
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.security_review >= 1"
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A9-AccessControl",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "ISO27001": "A.9 - Access Control"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A12-OperationsSecurity.R2",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.12 - Operations Security - Rule R2",
+      "description": "",
+      "controls": [
+        {
+          "signal": "env.production_violation",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "ISO 27001 A.12.1.4: Separation of environments violated. Production config found in non-prod code."
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A12-OperationsSecurity",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "ISO27001": "A.12 - Operations Security"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A12-OperationsSecurity.R1",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.12 - Operations Security - Rule R1",
+      "description": "",
+      "controls": [
+        {
+          "signal": "approvals.count",
+          "operator": "<",
+          "value": 1
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.count >= 1"
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A12-OperationsSecurity",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "ISO27001": "A.12 - Operations Security"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A9-AccessControl.R1",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.9 - Access Control - Rule R1",
+      "description": "",
+      "controls": [
+        {
+          "signal": "secrets.detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "ISO 27001 A.9.4.3: Interactive password management required. Hardcoded secrets prohibited."
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A9-AccessControl",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "ISO27001": "A.9 - Access Control"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "ISO27001-A14-SecureDevelopment.R2",
+      "version": "1.0.0",
+      "name": "ISO 27001 A.14 - System Acquisition, Development and Maintenance - Rule R2",
+      "description": "",
+      "controls": [
+        {
+          "signal": "licenses.banned_detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "ISO 27001 A.14.2.1: Use of banned software components (licenses) is prohibited."
+      },
+      "metadata": {
+        "parent_policy": "ISO27001-A14-SecureDevelopment",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "ISO27001": "A.14 - System Acquisition, Development and Maintenance"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC7.R2",
+      "version": "1.0.0",
+      "name": "SOC 2 CC7 - System Operations - Rule R2",
+      "description": "Monitors system operations for anomalies and boundary violations.",
+      "controls": [
+        {
+          "signal": "env.production_violation",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "SOC 2 CC7.1 Violation: Production configuration in non-prod environment detected."
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC7",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "SOC2": "CC7.2 - Security Event Monitoring"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC6.R2",
+      "version": "1.0.0",
+      "name": "SOC 2 CC6 - Logical and Physical Access Controls - Rule R2",
+      "description": "Ensures logical access is secured via secret scanning and approval workflows.",
+      "controls": [
+        {
+          "signal": "approvals.security_review",
+          "operator": "<",
+          "value": 1
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.security_review >= 1"
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC6",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "SOC2": "CC6.1 - Logical Access Security Software"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC8.R1",
+      "version": "1.0.0",
+      "name": "SOC 2 CC8 - Change Management - Rule R1",
+      "description": "Ensures changes are authorized and tested prior to deployment.",
+      "controls": [
+        {
+          "signal": "approvals.count",
+          "operator": "<",
+          "value": 1
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "Requirement failed: approvals.count >= 1"
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC8",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "SOC2": "CC8.1 - Authorization of Changes"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC8.R2",
+      "version": "1.0.0",
+      "name": "SOC 2 CC8 - Change Management - Rule R2",
+      "description": "Ensures changes are authorized and tested prior to deployment.",
+      "controls": [
+        {
+          "signal": "licenses.banned_detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "SOC 2 CC8.1 Violation: Unauthorized software license detected."
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC8",
+        "rule_id": "R2",
+        "version": "1.0.0",
+        "priority": 119,
+        "compliance": {
+          "SOC2": "CC8.1 - Authorization of Changes"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC6.R1",
+      "version": "1.0.0",
+      "name": "SOC 2 CC6 - Logical and Physical Access Controls - Rule R1",
+      "description": "Ensures logical access is secured via secret scanning and approval workflows.",
+      "controls": [
+        {
+          "signal": "secrets.detected",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "message": "SOC 2 CC6.1 Violation: Hardcoded credentials detected. This bypasses logical access controls."
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC6",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 120,
+        "compliance": {
+          "SOC2": "CC6.1 - Logical Access Security Software"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    },
+    {
+      "policy_id": "SOC2-CC7.R1",
+      "version": "1.0.0",
+      "name": "SOC 2 CC7 - System Operations - Rule R1",
+      "description": "Monitors system operations for anomalies and boundary violations.",
+      "controls": [
+        {
+          "signal": "privileged.is_sensitive",
+          "operator": "==",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "WARN",
+        "message": "SOC 2 CC7.2: Sensitive system code modified. Verify this is a planned system operation."
+      },
+      "metadata": {
+        "parent_policy": "SOC2-CC7",
+        "rule_id": "R1",
+        "version": "1.0.0",
+        "priority": 110,
+        "compliance": {
+          "SOC2": "CC7.2 - Security Event Monitoring"
+        },
+        "effective_date": null,
+        "supersedes": null
+      }
+    }
+  ]
+}

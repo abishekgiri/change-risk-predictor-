@@ -37,7 +37,7 @@ class TransitionCheckResponse(BaseModel):
     
     # Full Metadata
     decision_id: str = Field(..., description="ReleaseGate Decision UUID")
-    status: Literal["ALLOWED", "CONDITIONAL", "BLOCKED"] = Field(..., description="ReleaseGate Status")
+    status: Literal["ALLOWED", "CONDITIONAL", "BLOCKED", "SKIPPED"] = Field(..., description="ReleaseGate Status")
     
     requirements: List[str] = Field(default_factory=list, description="List of unsatisfied requirements")
     unlock_conditions: List[str] = Field(default_factory=list, description="Human readable unlock instructions")

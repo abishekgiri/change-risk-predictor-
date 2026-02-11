@@ -81,6 +81,7 @@ class ApprovalsControl(ControlBase):
             "approvals.satisfied": all_satisfied,
             "approvals.unsatisfied_count": unsatisfied_count,
             "approvals.total_requirements": len(requirements),
+            "approvals.data_available": True,
         }
         
         # Add per-role signals

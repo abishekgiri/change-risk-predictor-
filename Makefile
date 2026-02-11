@@ -1,4 +1,4 @@
-.PHONY: test verify phase6 clean
+.PHONY: test verify phase6 demo clean
 
 test:
 	pytest
@@ -9,6 +9,9 @@ verify:
 # Phase 6: Enterprise UX & Trust Verification
 phase6:
 	./scripts/run_phase6.sh
+
+demo:
+	python3 scripts/demo_block_override_export.py
 
 clean:
 	rm -rf __pycache__
