@@ -17,11 +17,11 @@ ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g.,
 
 But there is no native enforcement layer that:
 
-- ✅ Blocks risky releases based on policy
-- ✅ Requires structured, role-aware approvals
-- ✅ Prevents self-approval and override abuse
-- ✅ Produces tamper-evident, replayable decision records
-- ✅ Generates portable audit evidence bundles
+- Blocks risky releases based on policy
+- Requires structured, role-aware approvals
+- Prevents self-approval and override abuse
+- Produces tamper-evident, replayable decision records
+- Generates portable audit evidence bundles
 
 **ReleaseGate fills that enforcement gap.**
 
@@ -87,10 +87,10 @@ Each decision stores:
 
 ReleaseGate enforces governance constraints such as:
 
-- ❌ PR author cannot self-approve
-- ❌ Override requestor cannot self-approve
-- ✅ Role-based approval validation
-- ✅ Time-bound overrides with required justification
+- PR author cannot self-approve
+- Override requestor cannot self-approve
+- Role-based approval validation
+- Time-bound overrides with required justification
 
 Overrides include:
 
@@ -174,10 +174,10 @@ Metrics include:
 
 ReleaseGate:
 
-- ❌ Does **NOT** clone repositories
-- ❌ Does **NOT** store diffs
-- ❌ Does **NOT** store source code
-- ❌ Does **NOT** persist access tokens
+- Does **NOT** clone repositories
+- Does **NOT** store diffs
+- Does **NOT** store source code
+- Does **NOT** persist access tokens
 
 It consumes **PR metadata only**:
 
@@ -381,9 +381,9 @@ pytest
 
 **Current status:**
 
-✅ **98 tests passing**  
-✅ Policy lint integrated into CI  
-✅ Deterministic enforcement verified
+- 98 tests passing
+- Policy lint integrated into CI
+- Deterministic enforcement verified
 
 ---
 
@@ -397,12 +397,12 @@ v2.0.0-policy-control-plane
 
 This version establishes:
 
-- ✅ Governance control plane
-- ✅ Signed checkpoint system
-- ✅ Audit proof pack export
-- ✅ Policy simulation engine
-- ✅ Separation-of-duties enforcement
-- ✅ Idempotent override handling
+- Governance control plane
+- Signed checkpoint system
+- Audit proof pack export
+- Policy simulation engine
+- Separation-of-duties enforcement
+- Idempotent override handling
 
 **Previous milestone:**
 
@@ -414,13 +414,13 @@ v1.0.0-governance-core
 
 ## Security Model
 
-- ✅ Metadata-only ingestion
-- ✅ No source code storage
-- ✅ No diff retention
-- ✅ No token persistence
-- ✅ Hash-chained ledger
-- ✅ Signed checkpoint verification
-- ✅ Fail-closed configuration option
+- Metadata-only ingestion
+- No source code storage
+- No diff retention
+- No token persistence
+- Hash-chained ledger
+- Signed checkpoint verification
+- Fail-closed configuration option
 
 **ReleaseGate is designed to minimize data risk while maximizing governance integrity.**
 
@@ -428,19 +428,19 @@ v1.0.0-governance-core
 
 ## Positioning
 
-### ReleaseGate **is:**
+### ReleaseGate is:
 
-- ✅ Jira governance infrastructure
-- ✅ Workflow enforcement primitive
-- ✅ SDLC control layer
-- ✅ Audit-ready policy engine
+- Jira governance infrastructure
+- Workflow enforcement primitive
+- SDLC control layer
+- Audit-ready policy engine
 
-### ReleaseGate **is not:**
+### ReleaseGate is not:
 
-- ❌ A dashboard
-- ❌ An analytics tool
-- ❌ A developer scoring system
-- ❌ A source code scanner
+- A dashboard
+- An analytics tool
+- A developer scoring system
+- A source code scanner
 
 ---
 
