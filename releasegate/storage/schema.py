@@ -4,7 +4,7 @@ from releasegate.config import DB_PATH
 
 # Production Schema Version
 # Increment this if you change columns to force re-ingestion compatibility checks
-SCHEMA_VERSION = "v1"
+SCHEMA_VERSION = "v2"
 
 def init_db():
     """
@@ -173,6 +173,41 @@ def init_db():
         created_at TIMESTAMP NOT NULL, -- ISO UTC
         evaluation_key TEXT -- Idempotency key for the evaluation itself
     )
+    """)
+
+    # 10. Overrides Ledger (Immutable, Hashed)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS audit_overrides (
+        override_id TEXT PRIMARY KEY,
+        decision_id TEXT,
+        repo TEXT NOT NULL,
+        pr_number INTEGER,
+        issue_key TEXT,
+        actor TEXT,
+        reason TEXT,
+        previous_hash TEXT,
+        event_hash TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL
+    )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_overrides_repo_created ON audit_overrides(repo, created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_overrides_repo_pr ON audit_overrides(repo, pr_number, created_at)")
+
+    cursor.execute("""
+    CREATE TRIGGER IF NOT EXISTS prevent_override_update
+    BEFORE UPDATE ON audit_overrides
+    BEGIN
+        SELECT RAISE(FAIL, 'Override ledger is immutable: UPDATE not allowed');
+    END;
+    """)
+
+    cursor.execute("""
+    CREATE TRIGGER IF NOT EXISTS prevent_override_delete
+    BEFORE DELETE ON audit_overrides
+    BEGIN
+        SELECT RAISE(FAIL, 'Override ledger is immutable: DELETE not allowed');
+    END;
     """)
     
     # Audit Indexes for Reporting

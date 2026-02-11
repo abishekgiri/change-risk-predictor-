@@ -14,9 +14,8 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
     Main Worker Task:
     1. Auth with GitHub App
     2. Set Status = Pending
-    3. Clone Repo (securely)
-    4. Run ComplianceBot
-    5. Set Status = Success/Failure
+    3. Run metadata-only PR risk classification
+    4. Set Status = Success/Failure
     """
     print(f"WORKER: Starting analysis for {repo_slug} PR #{pr_number}")
     db = SessionLocal()
@@ -38,28 +37,16 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
         work_dir = tempfile.mkdtemp(prefix=f"saas_run_{pr_number}_")
         
         try:
-            # 3. Clone
-            clone_url = f"https://x-access-token:{token}@github.com/{repo_slug}.git"
-            subprocess.run(["git", "clone", clone_url, "."], cwd=work_dir, check=True, capture_output=True)
-            subprocess.run(["git", "checkout", commit_sha], cwd=work_dir, check=True, capture_output=True)
-            
-            # 4. Run Analysis (subprocess to CLI)
-            # We use the CLI directly since we are in the same environment (or container)
-            # Enforcing BLOCK mode effectively via check
-            
-            # Note: In real prod, this runs inside a Docker container.
-            # Here, we assume 'releasegate' is installed in the worker env.
-            
+            # 3. Run minimal GitHub metadata analysis (no repo clone, no diff storage)
             cmd = [
                 "releasegate", "analyze-pr",
                 "--repo", repo_slug,
                 "--pr", str(pr_number),
-                "--token", token, # Pass app token as GITHUB_TOKEN
+                "--token", token,
                 "--output", "result.json",
-                "--no-bundle" # MVP: don't store bundle yet
+                "--no-bundle"
             ]
             
-            # Run without environment variable enforcement to get raw result JSON
             env = os.environ.copy()
             env["COMPLIANCEBOT_ENFORCEMENT"] = "report_only" 
             
@@ -92,23 +79,23 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
                     sev = result.get("severity", 0)
                     risk_score = int(sev) if isinstance(sev, int) else 0
                 
-                # Phase 9: Apply strictness mapping ONLY if result is BLOCK/NON_COMPLIANT
+                # Phase 9: Apply strictness mapping
                 if verdict == "BLOCK":
                     if strictness == "block":
                         state = "failure"
-                        description = f"Blocked: Risk Level {result.get('severity')}"
+                        description = f"Blocked: Risk Level {result.get('severity_level')}"
                     elif strictness == "warn":
                         state = "success"  # Neutral not widely supported, use success with warning
-                        description = f"Warning (not blocking): Risk Level {result.get('severity')}"
+                        description = f"Warning (not blocking): Risk Level {result.get('severity_level')}"
                     else:  # "pass"
                         state = "success"
-                        description = f"Informational: Risk Level {result.get('severity')} (not enforced)"
+                        description = f"Informational: Risk Level {result.get('severity_level')} (not enforced)"
                 elif verdict == "WARN":
                     state = "success"
-                    description = f"Warning: Risk Level {result.get('severity')}"
-                else:  # COMPLIANT
+                    description = f"Warning: Risk Level {result.get('severity_level')}"
+                else:  # PASS
                     state = "success"
-                    description = "Compliance Checks Passed"
+                    description = "Risk classification completed"
             else:
                 print(f"CLI Failed: {proc.stderr}")
                 description = "Internal Analysis Error"

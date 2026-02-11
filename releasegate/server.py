@@ -1,23 +1,25 @@
-from releasegate.signals.feature_store import FeatureStore
 from releasegate.storage.sqlite import save_run
-from releasegate.scoring.calibration import Calibrator
-from releasegate.scoring.risk_score import RiskScorer
-from releasegate.ingestion.pr_parser import PRParser
 from releasegate.config import (
-    GITHUB_TOKEN, WEBHOOK_URL,
-    SEVERITY_THRESHOLD_HIGH
+    GITHUB_TOKEN, WEBHOOK_URL
+)
+from releasegate.integrations.github_risk import (
+    PRRiskInput,
+    build_issue_risk_property,
+    classify_pr_risk,
+    extract_jira_issue_keys,
+    score_for_risk_level,
 )
 import hmac
 import hashlib
 import json
 import os
 import requests
-import yaml
-import base64
-import git
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import PlainTextResponse
+import csv
+import io
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 
 # Load env vars
@@ -40,48 +42,6 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # For API calls
 
 
-def get_pr_files(repo_full_name: str, pr_number: int):
-    """Fetch files changed in PR using GitHub API."""
-    if not GITHUB_TOKEN:
-        print("Warning: No GITHUB_TOKEN, cannot fetch file details.")
-        return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
-
-    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/files"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    try:
-        resp = requests.get(url, headers=headers)
-        if resp.status_code != 200:
-            print(f"Failed to fetch files: {resp.status_code}")
-            return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
-
-        files_data = resp.json()
-        filenames = [f['filename'] for f in files_data]
-
-        # Calculate diff stats from file list
-        added = sum(f.get('additions', 0) for f in files_data)
-        deleted = sum(f.get('deletions', 0) for f in files_data)
-        total_churn = added + deleted
-
-        per_file = {
-            f['filename']: f.get('additions', 0) + f.get('deletions', 0)
-            for f in files_data
-        }
-
-        return filenames, {
-            "files_changed": len(files_data),
-            "loc_added": added,
-            "loc_deleted": deleted,
-            "total_churn": total_churn
-        }, per_file
-    except Exception as e:
-        print(f"Error fetching files: {e}")
-        return [], {"files_changed": 0, "loc_added": 0, "loc_deleted": 0, "total_churn": 0}, {}
-
-
 def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
     """Fetch PR details (title, author, labels) using GitHub API."""
     if not GITHUB_TOKEN:
@@ -102,6 +62,18 @@ def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
         print(f"Error fetching PR details: {e}")
 
     return {}
+
+
+def get_pr_metrics(repo_full_name: str, pr_number: int) -> PRRiskInput:
+    """
+    Fetch minimal PR counters from GitHub (no diff/file content).
+    """
+    pr_data = get_pr_details(repo_full_name, pr_number)
+    return PRRiskInput(
+        changed_files=int(pr_data.get("changed_files", 0) or 0),
+        additions=int(pr_data.get("additions", 0) or 0),
+        deletions=int(pr_data.get("deletions", 0) or 0),
+    )
 
 
 def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
@@ -167,94 +139,36 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
         print(f"Error creating check run: {e}")
 
 
-def get_repo_config(repo_full_name: str, default_branch: str = "main") -> Dict:
-    """Fetch and parse riskbot_config.yml from the repo."""
-    if not GITHUB_TOKEN:
-        return {}
-
-    url = f"https://api.github.com/repos/{repo_full_name}/contents/riskbot_config.yml?ref={default_branch}"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    try:
-        resp = requests.get(url, headers=headers)
-        if resp.status_code == 200:
-            content = resp.json().get("content", "")
-            if content:
-                decoded = base64.b64decode(content).decode("utf-8")
-                return yaml.safe_load(decoded) or {}
-    except Exception as e:
-        print(f"Config fetch failed: {e}")
-
-    return {}
-
-
 @app.post("/ci/score")
 def ci_score(payload: CIScoreRequest):
     """
-    CI Endpoint: Returns risk score and level for a given PR.
-    Used by GitHub Actions to block merges.
+    CI Endpoint: Returns metadata-only risk classification for a PR.
     """
     repo_full_name = payload.repo
     pr_number = payload.pr
     print(f"CI Analysis Request: {repo_full_name} #{pr_number}")
 
-    # 1. Fetch Data
     pr_data = get_pr_details(repo_full_name, pr_number)
-    filenames, diff_stats, per_file_churn = get_pr_files(
-        repo_full_name, pr_number)
+    metrics = PRRiskInput(
+        changed_files=int(pr_data.get("changed_files", 0) or 0),
+        additions=int(pr_data.get("additions", 0) or 0),
+        deletions=int(pr_data.get("deletions", 0) or 0),
+    )
 
-    if not pr_data:
-        # Fallback if API fails
-        print("Warning: Could not fetch PR details")
-
-    # 2. Extract Features (Phase 6 refined)
-    raw_signals = {
-        "repo_slug": repo_full_name,
-        "entity_type": "pr",
-        "entity_id": str(pr_number),
-        "timestamp": pr_data.get("created_at", "unknown"),
-        "files_changed": filenames,
-        "lines_added": diff_stats.get("loc_added", 0),
-        "lines_deleted": diff_stats.get("loc_deleted", 0),
-        "total_churn": diff_stats.get("total_churn", 0),
-        "per_file_churn": per_file_churn,
-        "touched_services": [],  # Placeholder
-        "linked_issue_ids": [],  # CI endpoint might skip issue parsing or add it if needed
-        "author": pr_data.get("user", {}).get("login"),
-        "branch": pr_data.get("head", {}).get("ref")
-    }
-
-    # 3. Feature Engineering
-    # Get Config used for RiskScorer/FeatureStore
-    config = get_repo_config(
-        repo_full_name, pr_data.get("base", {}).get("ref", "main"))
-
-    feature_store = FeatureStore(config)
-    features, feature_explanations = feature_store.build_features(raw_signals)
-
-    # 4. Calculate Score (V2 Engine)
-    scorer = RiskScorer(config)
-    calibrator = Calibrator()  # Uses default curve if no DB
-
-    score_result = scorer.calculate_score(
-        features, evidence=feature_explanations)
-    risk_score = score_result["risk_score"]
-    risk_level = score_result["risk_level"]
-    risk_prob = score_result["risk_prob"]
-    reasons = score_result["reasons"]
-    decision = score_result["decision"]
+    risk_level = classify_pr_risk(metrics)
+    risk_score = score_for_risk_level(risk_level)
+    decision = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
 
     return {
         "score": risk_score,
         "level": risk_level,
-        "probability": risk_prob,
         "decision": decision,
-        "reasons": reasons,
-        "model_version": score_result.get("model_version"),
-        "feature_version": score_result.get("feature_version")
+        "metrics": {
+            "changed_files_count": metrics.changed_files,
+            "additions": metrics.additions,
+            "deletions": metrics.deletions,
+            "total_churn": metrics.total_churn,
+        },
     }
 
 
@@ -306,170 +220,198 @@ async def github_webhook(
 
     print(f"Processing PR #{pr_number} for {repo_full_name} ({action})")
 
-    # Fetch Extra Features (Diff Stats)
-    filenames, diff_stats, per_file_churn = get_pr_files(
-        repo_full_name, pr_number)
-
-    # Basic Metadata
     base_sha = pr.get("base", {}).get("sha", "unknown")
     head_sha = pr.get("head", {}).get("sha", "unknown")
     title = pr.get("title", "")
-    author = pr.get("user", {}).get("login", "unknown")
+    metrics = PRRiskInput(
+        changed_files=int(pr.get("changed_files", 0) or 0),
+        additions=int(pr.get("additions", 0) or 0),
+        deletions=int(pr.get("deletions", 0) or 0),
+    )
+    if metrics.changed_files == 0 and metrics.additions == 0 and metrics.deletions == 0:
+        metrics = get_pr_metrics(repo_full_name, int(pr_number))
 
-    # --- 4. Repo Config & Bypass Logic ---
-    default_branch = repo.get("default_branch", "main")
-    config = get_repo_config(repo_full_name, default_branch)
+    risk_level = classify_pr_risk(metrics)
+    risk_score = score_for_risk_level(risk_level)
+    decision = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
 
-    # Thresholds
-    high_threshold = config.get("high_threshold", 75)
+    issue_keys = sorted(extract_jira_issue_keys(title, pr.get("body") or ""))
+    attached_issue_keys = []
+    if issue_keys:
+        try:
+            from releasegate.integrations.jira.client import JiraClient
 
-    # Bypass logic
-    bypass_users = config.get("bypass_users", [])
-    bypass_labels = config.get("bypass_labels", [])
-    pr_labels = [l["name"] for l in pr.get("labels", [])]
+            client = JiraClient()
+            payload = build_issue_risk_property(
+                repo=repo_full_name,
+                pr_number=int(pr_number),
+                risk_level=risk_level,
+                metrics=metrics,
+            )
+            for issue_key in issue_keys:
+                if client.set_issue_property(issue_key, "releasegate_risk", payload):
+                    attached_issue_keys.append(issue_key)
+        except Exception as e:
+            print(f"Warning: Jira risk attach failed: {e}")
 
-    is_bypassed = False
-    bypass_reason = ""
-
-    if author in bypass_users:
-        is_bypassed = True
-        bypass_reason = f"Author '{author}' is on bypass list."
-
-    if any(l in bypass_labels for l in pr_labels):
-        is_bypassed = True
-        bypass_reason = f"PR has bypass label."
-
-    # Construct Raw Signals for FeatureStore
-    raw_signals = {
-        "repo_slug": repo_full_name,
-        "entity_type": "pr",
-        "entity_id": str(pr_number),
-        "timestamp": pr.get("created_at"),
-        "files_changed": filenames,
-        "lines_added": diff_stats.get("loc_added", 0),
-        "lines_deleted": diff_stats.get("loc_deleted", 0),
-        "total_churn": diff_stats.get("total_churn", 0),
-        "per_file_churn": per_file_churn,
-        "touched_services": [],
-        "linked_issue_ids": [],  # Populated below
-        "author": author,
-        "branch": pr.get("head", {}).get("ref")
-    }
-
-    # --- 5. Evidence Collection (Phase 4) ---
-    evidence = []
-
-    # Instantiate Provider
-    from releasegate.ingestion.providers.github_provider import GitHubProvider
-    # Minimal config for provider
-    provider_config = {"github": {"repo": repo_full_name, "cache_ttl": 3600}}
-    provider = GitHubProvider(provider_config)
-
-    # Parse Links
-    import re
-    pr_body = pr.get("body") or ""
-    # Matches #123, owner/repo#123
-    # Use simple #123 for MVP within same repo
-    linked_issues = re.findall(r"#(\d+)", pr_body)
-
-    # Fetch Labels for Linked Issues
-    if linked_issues:
-        print(f"Checking linked issues: {linked_issues}")
-        for issue_num in linked_issues:
-            labels = provider.fetch_issue_labels(issue_num)
-            risky_labels = config.get("labels", {}).get(
-                "risky_any_of", ["bug", "incident", "sev1"])
-
-            found_risky = [l for l in labels if l in risky_labels]
-            if found_risky:
-                evidence.append(
-                    f" Linked Issue #{issue_num} labeled **{' '.join(found_risky)}** (High Confidence)")
-            # Boost core features? Or just rely on evidence display?
-            # Ideally, this should impact the score. For V1, we just display it.
-
-    # Check for Revert
-    if "revert" in title.lower():
-        evidence.append("PR Title indicates a **Revert** operation.")
-
-    # Update Raw Signals with linked issues
-    raw_signals["linked_issue_ids"] = linked_issues
-
-    # Calculate Score & Evaluate Policies
-    from releasegate.engine import ComplianceEngine
-    engine = ComplianceEngine(config)
-    run_result = engine.evaluate(raw_signals)
-
-    # Map to legacy score_data format for save_run/comments (or update those too)
-    # We'll construct a hybrid object to satisfy existing helpers
     score_data = {
-        "risk_score": run_result.metadata.get("core_risk_score", 0),
-        "risk_level": run_result.metadata.get("core_risk_level", "UNKNOWN"),
-        "decision": run_result.overall_status,  # BLOCK/WARN/COMPLIANT
-        "reasons": [],
-        "evidence": []
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "decision": decision,
+        "reasons": [f"Heuristic classification from GitHub metadata: {risk_level}"],
+    }
+    features = {
+        "source": "github_metadata",
+        "changed_files_count": metrics.changed_files,
+        "additions": metrics.additions,
+        "deletions": metrics.deletions,
+        "total_churn": metrics.total_churn,
+        "attached_issue_keys": attached_issue_keys,
     }
 
-    # Extract reasons/evidence from Policy Results
-    for p in run_result.results:
-        if p.status in ["BLOCK", "WARN"]:
-            for v in p.violations:
-                score_data["reasons"].append(f"[{p.policy_id}] {v}")
-
-    # Save to DB
-    # Use clean repo name for storage/analytics as requested
-    repo_clean = repo_full_name.strip(
-        "-") if repo_full_name else repo_full_name
-
-    # Note: save_run expects specific schema. We might keep using it or update it.
-    # For now, we pass the mapped score_data.
-    features = run_result.metadata.get("raw_features", {})
     save_run(
-        repo=repo_clean,
-        pr_number=pr_number,
+        repo=repo_full_name,
+        pr_number=int(pr_number),
         base_sha=base_sha,
         head_sha=head_sha,
         score_data=score_data,
-        features=features
-    )
-
-    # Post Comment (Feedback Loop)
-    emoji = "COMPLIANT" if run_result.overall_status == "COMPLIANT" else "BLOCK" if run_result.overall_status == "BLOCK" else "WARN"
-
-    comment_body = (
-        f"## {emoji} Compliance Check — {run_result.overall_status}\n\n"
-        f"**Severity**: {score_data['risk_level']} ({score_data['risk_score']})\n"
-        f"**Control Result**: {run_result.overall_status}\n\n"
-        f"### Violations\n"
-        + ("\n".join(f"- {r}" for r in score_data.get("reasons", []))
-           if score_data["reasons"] else "_No policy violations found._")
-    )
-    # Use original repo_full_name for API calls
-    post_pr_comment(repo_full_name, pr_number, comment_body)
-
-    # Create Check Run (Enforcement)
-    # Update title format as requested
-    check_title = f"Compliance Check — {run_result.overall_status}"
-    # WARN is success? or neutral? GitHub only has success/failure/neutral/cancelled...
-    conclusion = "failure" if run_result.overall_status == "BLOCK" else "success"
-    # Usually WARN -> success with annotation, or neutral. Let's stick to success for non-blocking.
-
-    create_check_run(
-        repo_full_name,
-        head_sha,
-        score_data["risk_score"],
-        score_data["risk_level"],
-        score_data["reasons"],
-        evidence=evidence
+        features=features,
     )
 
     return {
         "status": "processed",
-        "result": run_result.overall_status,
-        "risk_score": score_data["risk_score"],
-        "severity": score_data["risk_level"]
+        "result": decision,
+        "risk_score": risk_score,
+        "severity": risk_level,
+        "attached_issue_keys": attached_issue_keys,
+        "metrics": features,
     }
 
 
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "RiskBot Webhook Listener"}
+
+
+def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = None) -> str:
+    if explicit:
+        return explicit
+    msg = (message or "").lower()
+    if "override" in msg:
+        return "OVERRIDE_APPLIED"
+    if "missing issue property `releasegate_risk`" in msg or "missing risk" in msg:
+        return "MISSING_RISK_METADATA"
+    if "no policies configured" in msg:
+        return "NO_POLICIES_MAPPED"
+    if "system error" in msg:
+        return "SYSTEM_ERROR"
+    if decision == "BLOCKED":
+        return "POLICY_BLOCKED"
+    if decision == "CONDITIONAL":
+        return "POLICY_CONDITIONAL"
+    if decision == "SKIPPED":
+        return "POLICY_SKIPPED"
+    return "POLICY_ALLOWED"
+
+
+def _soc2_records(
+    rows: list,
+    overrides: Optional[list] = None,
+    chain_verified: Optional[bool] = None,
+) -> list:
+    override_map = {}
+    if overrides:
+        for ov in overrides:
+            d_id = ov.get("decision_id")
+            if d_id and d_id not in override_map:
+                override_map[d_id] = ov
+
+    records = []
+    for r in rows:
+        full = {}
+        raw_full = r.get("full_decision_json")
+        if raw_full:
+            try:
+                full = json.loads(raw_full) if isinstance(raw_full, str) else (raw_full or {})
+            except Exception:
+                full = {}
+
+        decision = full.get("release_status") or r.get("release_status") or "UNKNOWN"
+        message = full.get("message") or ""
+        explicit_reason = full.get("reason_code")
+        ov = override_map.get(r.get("decision_id"))
+
+        records.append({
+            "decision_id": r.get("decision_id"),
+            "decision": decision,
+            "reason_code": _derive_reason_code(decision, message, explicit_reason),
+            "human_message": message,
+            "actor": full.get("actor_id") or (ov.get("actor") if ov else None),
+            "policy_version": full.get("policy_bundle_hash") or r.get("policy_bundle_hash"),
+            "inputs_present": full.get("inputs_present") or {},
+            "override_id": ov.get("override_id") if ov else None,
+            "chain_verified": chain_verified if chain_verified is not None else None,
+            "repo": r.get("repo"),
+            "pr_number": r.get("pr_number"),
+            "created_at": r.get("created_at"),
+        })
+    return records
+
+
+@app.get("/audit/export")
+def audit_export(
+    repo: str,
+    format: str = "json",
+    limit: int = 200,
+    status: Optional[str] = None,
+    pr: Optional[int] = None,
+    include_overrides: bool = False,
+    verify_chain: bool = False,
+    contract: str = "soc2_v1",
+):
+    """
+    Export audit decisions in JSON or CSV.
+    """
+    from releasegate.audit.reader import AuditReader
+    rows = AuditReader.list_decisions(repo=repo, limit=limit, status=status, pr=pr)
+    payload = {"decisions": rows}
+    overrides = []
+    chain_result = None
+
+    include_override_data = include_overrides or contract == "soc2_v1"
+
+    if include_override_data:
+        try:
+            from releasegate.audit.overrides import list_overrides, verify_override_chain
+            overrides = list_overrides(repo=repo, limit=limit, pr=pr)
+            payload["overrides"] = overrides if include_overrides else []
+            if verify_chain:
+                chain_result = verify_override_chain(repo=repo, pr=pr)
+                payload["override_chain"] = chain_result
+        except Exception:
+            payload["overrides"] = []
+
+    export_rows = rows
+    if contract == "soc2_v1":
+        chain_flag = bool(chain_result.get("valid")) if (verify_chain and chain_result is not None) else (False if verify_chain else None)
+        export_rows = _soc2_records(rows, overrides=overrides, chain_verified=chain_flag)
+        payload = {
+            "contract": "soc2_v1",
+            "repo": repo,
+            "records": export_rows,
+        }
+        if verify_chain:
+            payload["override_chain"] = chain_result if chain_result is not None else {"valid": False, "checked": 0}
+
+    if format.lower() == "csv":
+        if not export_rows:
+            return PlainTextResponse("", media_type="text/csv")
+        output = io.StringIO()
+        fieldnames = list(export_rows[0].keys())
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in export_rows:
+            writer.writerow(r)
+        return PlainTextResponse(output.getvalue(), media_type="text/csv")
+
+    return payload

@@ -7,6 +7,7 @@ from github import Github, Auth
 from releasegate.config import GITHUB_TOKEN, DB_PATH
 from releasegate.ingestion.providers.base import GitProvider
 from releasegate.storage.schema import init_db
+from releasegate.signals.approvals.types import Review
 
 class GitHubProvider(GitProvider):
     """
@@ -129,3 +130,44 @@ class GitHubProvider(GitProvider):
         labels = self.fetch_issue_labels(str(pr_number))
         # We could return more here if needed, but labels are primary for now
         return {"labels": labels}
+
+    def get_reviews(self, repo_full_name: str, pr_number: int):
+        """
+        Fetch PR reviews and return normalized Review objects.
+        Returns None on error or if client/repo is not configured.
+        """
+        if not self.client or not repo_full_name:
+            return None
+
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            pr = repo.get_pull(int(pr_number))
+            reviews = []
+            for r in pr.get_reviews():
+                reviews.append(Review(
+                    reviewer=r.user.login if r.user else "unknown",
+                    state=r.state,
+                    submitted_at=r.submitted_at,
+                    commit_id=getattr(r, "commit_id", "") or ""
+                ))
+            return reviews
+        except Exception as e:
+            print(f"Error fetching GitHub reviews for PR {pr_number}: {e}")
+            return None
+
+    def get_file_content(self, repo_full_name: str, path: str, ref: str = None):
+        """
+        Fetch file content from GitHub. Returns decoded text or None.
+        """
+        if not self.client or not repo_full_name:
+            return None
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            contents = repo.get_contents(path, ref=ref) if ref else repo.get_contents(path)
+            if isinstance(contents, list):
+                return None
+            data = contents.decoded_content
+            return data.decode("utf-8", errors="replace") if data is not None else None
+        except Exception as e:
+            print(f"Error fetching file content {path}: {e}")
+            return None

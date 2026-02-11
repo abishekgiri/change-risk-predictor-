@@ -122,3 +122,35 @@ class JiraClient:
         except Exception:
             return False
 
+    def set_issue_property(self, issue_key: str, prop_key: str, value: Dict[str, Any]) -> bool:
+        """
+        Set a Jira issue property (JSON). Returns True on success.
+        """
+        try:
+            resp = requests.put(
+                self._url(f"/rest/api/3/issue/{issue_key}/properties/{prop_key}"),
+                json=value,
+                auth=self.auth,
+                headers=self.headers,
+                timeout=10
+            )
+            return resp.status_code in (200, 201, 204)
+        except Exception:
+            return False
+
+    def get_issue_property(self, issue_key: str, prop_key: str) -> Dict[str, Any]:
+        """
+        Get a Jira issue property (JSON). Returns {} if missing.
+        """
+        try:
+            resp = requests.get(
+                self._url(f"/rest/api/3/issue/{issue_key}/properties/{prop_key}"),
+                auth=self.auth,
+                headers=self.headers,
+                timeout=10
+            )
+            if resp.status_code == 200:
+                return resp.json().get("value", {}) or {}
+        except Exception:
+            return {}
+        return {}

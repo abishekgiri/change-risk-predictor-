@@ -34,10 +34,22 @@ class LicensesControl(ControlBase):
             if self._is_dependency_file(file_path):
                 # If we only have a diff, we cannot reliably parse full manifest
                 if self._looks_like_diff(diff_content):
-                    skipped_diff_only = True
-                    continue
-                packages = detect_licenses(file_path, diff_content)
-                all_packages.update(packages)
+                    # Try to fetch full file content from provider if available
+                    full_content = None
+                    if ctx.provider is not None:
+                        get_file_content = getattr(ctx.provider, "get_file_content", None)
+                        if callable(get_file_content):
+                            ref = ctx.config.get("head_sha") or ctx.config.get("ref")
+                            full_content = get_file_content(ctx.repo, file_path, ref)
+                    if full_content:
+                        packages = detect_licenses(file_path, full_content)
+                        all_packages.update(packages)
+                    else:
+                        skipped_diff_only = True
+                        continue
+                else:
+                    packages = detect_licenses(file_path, diff_content)
+                    all_packages.update(packages)
         
         # Classify licenses
         forbidden_packages = []
