@@ -57,6 +57,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow invalid policy files to be skipped (lint still runs on valid files).",
     )
 
+    checkpoint_p = sub.add_parser("checkpoint-override", help="Create signed override-ledger root checkpoint.")
+    checkpoint_p.add_argument("--repo", required=True)
+    checkpoint_p.add_argument("--cadence", default="daily", choices=["daily", "weekly"])
+    checkpoint_p.add_argument("--pr", type=int)
+    checkpoint_p.add_argument("--at", help="ISO timestamp for checkpoint cutoff (default: now)")
+    checkpoint_p.add_argument("--format", default="text", choices=["text", "json"])
+
+    simulate_p = sub.add_parser("simulate-policies", help="Run what-if simulation over recent decisions.")
+    simulate_p.add_argument("--repo", required=True)
+    simulate_p.add_argument("--limit", type=int, default=100)
+    simulate_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
+    simulate_p.add_argument("--format", default="text", choices=["text", "json"])
+
+    proof_p = sub.add_parser("proof-pack", help="Export audit evidence bundle for a decision.")
+    proof_p.add_argument("--decision-id", required=True)
+    proof_p.add_argument("--format", default="json", choices=["json", "zip"])
+    proof_p.add_argument("--checkpoint-cadence", default="daily", choices=["daily", "weekly"])
+    proof_p.add_argument("--output", help="Output file path (required for zip)")
+
     sub.add_parser("version", help="Print version.")
     return p
 
@@ -408,6 +427,125 @@ def main() -> int:
         else:
             print(format_lint_report(report))
         return 0 if report.get("ok") else 1
+
+    if args.cmd == "checkpoint-override":
+        from releasegate.audit.checkpoints import create_override_checkpoint
+
+        result = create_override_checkpoint(
+            repo=args.repo,
+            cadence=args.cadence,
+            pr=args.pr,
+            at=args.at,
+        )
+        if args.format == "json":
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            payload = result.get("payload", {})
+            print(f"Checkpoint created: {result.get('path')}")
+            print(f"Repo: {payload.get('repo')}")
+            print(f"Cadence: {payload.get('cadence')}")
+            print(f"Period: {payload.get('period_id')}")
+            print(f"Root Hash: {payload.get('root_hash')}")
+            print(f"Events: {payload.get('event_count')}")
+        return 0
+
+    if args.cmd == "simulate-policies":
+        from releasegate.policy.simulation import simulate_policy_impact
+
+        report = simulate_policy_impact(
+            repo=args.repo,
+            limit=args.limit,
+            policy_dir=args.policy_dir,
+        )
+        if args.format == "json":
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(f"Repo: {report.get('repo')}")
+            print(f"Policy Dir: {report.get('policy_dir')}")
+            print(f"Policy Hash: {report.get('policy_hash')}")
+            print(f"Total Decisions: {report.get('total_rows')}")
+            print(f"Simulated: {report.get('simulated_rows')}  Unsimulated: {report.get('unsimulated_rows')}")
+            print(f"Changed: {report.get('changed_count')}")
+            print(f"Would Newly Block: {report.get('would_newly_block')}")
+            print(f"Would Unblock: {report.get('would_unblock')}")
+        return 0
+
+    if args.cmd == "proof-pack":
+        from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
+        from releasegate.audit.overrides import list_overrides, verify_override_chain
+        from releasegate.audit.reader import AuditReader
+
+        row = AuditReader.get_decision(args.decision_id)
+        if not row:
+            print("Decision not found.", file=sys.stderr)
+            return 1
+
+        raw = row.get("full_decision_json")
+        if not raw:
+            print("Decision payload missing full_decision_json.", file=sys.stderr)
+            return 1
+
+        decision_snapshot = json.loads(raw) if isinstance(raw, str) else raw
+        repo = row.get("repo")
+        pr_number = row.get("pr_number")
+        created_at = row.get("created_at")
+
+        override_snapshot = None
+        chain_proof = None
+        checkpoint_proof = None
+        if repo:
+            overrides = list_overrides(repo=repo, limit=500, pr=pr_number)
+            override_snapshot = next((o for o in overrides if o.get("decision_id") == args.decision_id), None)
+            chain_proof = verify_override_chain(repo=repo, pr=pr_number)
+            period_id = period_id_for_timestamp(created_at, cadence=args.checkpoint_cadence)
+            checkpoint_proof = verify_override_checkpoint(
+                repo=repo,
+                cadence=args.checkpoint_cadence,
+                period_id=period_id,
+                pr=pr_number,
+            )
+
+        bundle = {
+            "bundle_version": "audit_proof_v1",
+            "decision_id": args.decision_id,
+            "repo": repo,
+            "pr_number": pr_number,
+            "decision_snapshot": decision_snapshot,
+            "policy_snapshot": decision_snapshot.get("policy_bindings", []),
+            "input_snapshot": decision_snapshot.get("input_snapshot", {}),
+            "override_snapshot": override_snapshot,
+            "chain_proof": chain_proof,
+            "checkpoint_proof": checkpoint_proof,
+        }
+
+        if args.format == "json":
+            if args.output:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    json.dump(bundle, f, indent=2, default=str)
+            print(json.dumps(bundle, indent=2, default=str))
+            return 0
+
+        if not args.output:
+            print("--output is required for zip format", file=sys.stderr)
+            return 1
+
+        import io
+        import zipfile
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("bundle.json", json.dumps(bundle, indent=2, default=str))
+            zf.writestr("decision_snapshot.json", json.dumps(bundle["decision_snapshot"], indent=2, default=str))
+            zf.writestr("policy_snapshot.json", json.dumps(bundle["policy_snapshot"], indent=2, default=str))
+            zf.writestr("input_snapshot.json", json.dumps(bundle["input_snapshot"], indent=2, default=str))
+            zf.writestr("override_snapshot.json", json.dumps(bundle["override_snapshot"], indent=2, default=str))
+            zf.writestr("chain_proof.json", json.dumps(bundle["chain_proof"], indent=2, default=str))
+            zf.writestr("checkpoint_proof.json", json.dumps(bundle["checkpoint_proof"], indent=2, default=str))
+        memory.seek(0)
+        with open(args.output, "wb") as f:
+            f.write(memory.getvalue())
+        print(f"Wrote proof pack: {args.output}")
+        return 0
 
     return 2
 

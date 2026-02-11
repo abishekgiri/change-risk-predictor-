@@ -14,11 +14,13 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 import csv
 import io
+import zipfile
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
@@ -447,6 +449,153 @@ def audit_export(
         return PlainTextResponse(output.getvalue(), media_type="text/csv")
 
     return payload
+
+
+@app.post("/audit/checkpoints/override")
+def create_override_checkpoint(
+    repo: str,
+    cadence: str = "daily",
+    pr: Optional[int] = None,
+    at: Optional[str] = None,
+):
+    from releasegate.audit.checkpoints import create_override_checkpoint as create_checkpoint
+
+    try:
+        result = create_checkpoint(
+            repo=repo,
+            cadence=cadence,
+            pr=pr,
+            at=at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@app.get("/audit/checkpoints/override/verify")
+def verify_override_checkpoint(
+    repo: str,
+    period_id: str,
+    cadence: str = "daily",
+    pr: Optional[int] = None,
+):
+    from releasegate.audit.checkpoints import verify_override_checkpoint as verify_checkpoint
+
+    try:
+        result = verify_checkpoint(
+            repo=repo,
+            cadence=cadence,
+            period_id=period_id,
+            pr=pr,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("exists", False):
+        raise HTTPException(status_code=404, detail=result.get("reason", "Checkpoint not found"))
+    return result
+
+
+@app.get("/policy/simulate")
+def simulate_policy_impact(
+    repo: str,
+    limit: int = 100,
+    policy_dir: str = "releasegate/policy/compiled",
+):
+    from releasegate.policy.simulation import simulate_policy_impact as run_simulation
+
+    try:
+        return run_simulation(
+            repo=repo,
+            limit=limit,
+            policy_dir=policy_dir,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Policy simulation failed: {exc}") from exc
+
+
+@app.get("/audit/proof-pack/{decision_id}")
+def audit_proof_pack(
+    decision_id: str,
+    format: str = "json",
+    checkpoint_cadence: str = "daily",
+):
+    from releasegate.audit.reader import AuditReader
+    from releasegate.audit.overrides import list_overrides, verify_override_chain
+    from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
+
+    row = AuditReader.get_decision(decision_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Decision not found")
+
+    raw = row.get("full_decision_json")
+    if not raw:
+        raise HTTPException(status_code=422, detail="Decision payload missing full_decision_json")
+
+    try:
+        decision_snapshot = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Stored decision payload is invalid: {exc}") from exc
+
+    if not isinstance(decision_snapshot, dict):
+        raise HTTPException(status_code=422, detail="Stored decision payload is invalid")
+
+    repo = row.get("repo")
+    pr_number = row.get("pr_number")
+    created_at = row.get("created_at")
+
+    override_snapshot = None
+    chain_proof = None
+    checkpoint_proof = None
+
+    if repo:
+        overrides = list_overrides(repo=repo, limit=500, pr=pr_number)
+        override_snapshot = next((o for o in overrides if o.get("decision_id") == decision_id), None)
+        chain_proof = verify_override_chain(repo=repo, pr=pr_number)
+        try:
+            period_id = period_id_for_timestamp(created_at, cadence=checkpoint_cadence)
+            checkpoint_proof = verify_override_checkpoint(
+                repo=repo,
+                cadence=checkpoint_cadence,
+                period_id=period_id,
+                pr=pr_number,
+            )
+        except Exception as exc:
+            checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
+
+    bundle = {
+        "bundle_version": "audit_proof_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "decision_id": decision_id,
+        "repo": repo,
+        "pr_number": pr_number,
+        "decision_snapshot": decision_snapshot,
+        "policy_snapshot": decision_snapshot.get("policy_bindings", []),
+        "input_snapshot": decision_snapshot.get("input_snapshot", {}),
+        "override_snapshot": override_snapshot,
+        "chain_proof": chain_proof,
+        "checkpoint_proof": checkpoint_proof,
+    }
+
+    if format.lower() == "json":
+        return bundle
+    if format.lower() != "zip":
+        raise HTTPException(status_code=400, detail="Unsupported format (expected json or zip)")
+
+    memory = io.BytesIO()
+    with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("bundle.json", json.dumps(bundle, indent=2, default=str))
+        zf.writestr("decision_snapshot.json", json.dumps(bundle["decision_snapshot"], indent=2, default=str))
+        zf.writestr("policy_snapshot.json", json.dumps(bundle["policy_snapshot"], indent=2, default=str))
+        zf.writestr("input_snapshot.json", json.dumps(bundle["input_snapshot"], indent=2, default=str))
+        zf.writestr("override_snapshot.json", json.dumps(bundle["override_snapshot"], indent=2, default=str))
+        zf.writestr("chain_proof.json", json.dumps(bundle["chain_proof"], indent=2, default=str))
+        zf.writestr("checkpoint_proof.json", json.dumps(bundle["checkpoint_proof"], indent=2, default=str))
+    memory.seek(0)
+    return Response(
+        content=memory.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="proof-pack-{decision_id}.zip"'},
+    )
 
 
 @app.post("/decisions/{decision_id}/replay")
