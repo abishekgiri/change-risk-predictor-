@@ -50,3 +50,40 @@ def test_override_chain_verification_detects_bad_previous_hash():
     result = verify_override_chain(repo=repo)
     assert result["valid"] is False
     assert result["reason"] in {"previous_hash mismatch", "event_hash mismatch"}
+
+
+def test_override_record_is_idempotent_with_idempotency_key():
+    repo = f"chain-idempotent-{uuid.uuid4().hex[:8]}"
+    key = f"idem-{uuid.uuid4().hex}"
+
+    first = record_override(
+        repo=repo,
+        pr_number=3,
+        issue_key="T-3",
+        decision_id="d1",
+        actor="u1",
+        reason="r1",
+        idempotency_key=key,
+    )
+    second = record_override(
+        repo=repo,
+        pr_number=3,
+        issue_key="T-3",
+        decision_id="d1",
+        actor="u1",
+        reason="r1",
+        idempotency_key=key,
+    )
+
+    assert first["override_id"] == second["override_id"]
+
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM audit_overrides WHERE idempotency_key = ?", (key,))
+        count = cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+    assert count == 1

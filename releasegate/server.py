@@ -447,3 +447,37 @@ def audit_export(
         return PlainTextResponse(output.getvalue(), media_type="text/csv")
 
     return payload
+
+
+@app.post("/decisions/{decision_id}/replay")
+def replay_stored_decision(decision_id: str):
+    """
+    Deterministically replay a stored decision using saved input snapshot + policy bindings.
+    """
+    from releasegate.audit.reader import AuditReader
+    from releasegate.decision.types import Decision
+    from releasegate.replay.decision_replay import replay_decision
+
+    row = AuditReader.get_decision(decision_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Decision not found")
+
+    raw = row.get("full_decision_json")
+    if not raw:
+        raise HTTPException(status_code=422, detail="Decision payload missing full_decision_json")
+
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        decision = Decision.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Stored decision payload is invalid: {exc}") from exc
+
+    try:
+        report = replay_decision(decision)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    report["created_at"] = row.get("created_at")
+    report["repo"] = row.get("repo")
+    report["pr_number"] = row.get("pr_number")
+    return report

@@ -185,14 +185,22 @@ def init_db():
         issue_key TEXT,
         actor TEXT,
         reason TEXT,
+        idempotency_key TEXT,
         previous_hash TEXT,
         event_hash TEXT NOT NULL,
         created_at TIMESTAMP NOT NULL
     )
     """)
 
+    # Backward-compatible migration for databases created before idempotency_key existed.
+    cursor.execute("PRAGMA table_info(audit_overrides)")
+    override_columns = {row[1] for row in cursor.fetchall()}
+    if "idempotency_key" not in override_columns:
+        cursor.execute("ALTER TABLE audit_overrides ADD COLUMN idempotency_key TEXT")
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_overrides_repo_created ON audit_overrides(repo, created_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_overrides_repo_pr ON audit_overrides(repo, pr_number, created_at)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_idempotency_key ON audit_overrides(idempotency_key)")
 
     cursor.execute("""
     CREATE TRIGGER IF NOT EXISTS prevent_override_update

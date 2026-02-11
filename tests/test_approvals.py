@@ -165,8 +165,7 @@ def test_approvals_control_with_requirements():
  """Test ApprovalsControl with configured requirements."""
  control = ApprovalsControl()
  
- # Mock provider would normally fetch reviews
- # For this test, we'll test the no-provider case
+ # No provider => fail-open skip for missing approval data.
  context = ControlContext(
  repo="test/repo",
  pr_number=123,
@@ -182,9 +181,11 @@ def test_approvals_control_with_requirements():
  
  result = control.execute(context)
  
- assert result.signals["approvals.required"] is True
- assert result.signals["approvals.satisfied"] is False
- assert result.signals["approvals.unsatisfied_count"] == 1
+ assert result.signals["approvals.required"] is False
+ assert result.signals["approvals.satisfied"] is True
+ assert result.signals["approvals.skipped"] is True
+ assert result.signals["approvals.data_available"] is False
+ assert len(result.findings) == 0
 
 if __name__ == "__main__":
  pytest.main([__file__, "-v"])

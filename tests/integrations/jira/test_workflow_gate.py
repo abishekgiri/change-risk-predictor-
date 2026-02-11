@@ -39,6 +39,13 @@ def test_compute_key_stability(base_request):
     k3 = gate._compute_key(base_request)
     assert k1 != k3
 
+    # Caller-provided idempotency key should affect the hash deterministically.
+    base_request.context_overrides = {"idempotency_key": "req-1"}
+    k4 = gate._compute_key(base_request)
+    base_request.context_overrides = {"idempotency_key": "req-2"}
+    k5 = gate._compute_key(base_request)
+    assert k4 != k5
+
 @patch("releasegate.engine.ComplianceEngine")
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):
@@ -49,7 +56,7 @@ def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):
     # Mock Engine Result (ComplianceRunResult structure)
     mock_run_result = MagicMock()
     mock_policy_result = MagicMock()
-    mock_policy_result.policy_id = "p1"
+    mock_policy_result.policy_id = "SEC-PR-001"
     mock_policy_result.status = "COMPLIANT" # or allowed
     mock_run_result.results = [mock_policy_result]
     
@@ -68,7 +75,7 @@ def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):
     MockRecorder.record_with_context.return_value = mock_decision
 
     # Mock Policy Resolve
-    with patch.object(gate, '_resolve_policies', return_value=["p1"]):
+    with patch.object(gate, '_resolve_policies', return_value=["SEC-PR-001"]):
         resp = gate.check_transition(base_request)
         
     assert resp.allow is True
@@ -84,7 +91,7 @@ def test_gate_prod_conditional_block(MockRecorder, MockEngine, base_request):
     # Mock Engine Result
     mock_run_result = MagicMock()
     mock_policy_result = MagicMock()
-    mock_policy_result.policy_id = "p1"
+    mock_policy_result.policy_id = "SEC-PR-001"
     mock_policy_result.status = "WARN" # maps to CONDITIONAL
     mock_policy_result.violations = ["Need approval"]
     mock_run_result.results = [mock_policy_result]
@@ -108,7 +115,7 @@ def test_gate_prod_conditional_block(MockRecorder, MockEngine, base_request):
     # Mock Client
     gate.client.post_comment_deduped = MagicMock()
 
-    with patch.object(gate, '_resolve_policies', return_value=["p1"]):
+    with patch.object(gate, '_resolve_policies', return_value=["SEC-PR-001"]):
         resp = gate.check_transition(base_request)
         
     # Should upgrade to BLOCKED
@@ -226,11 +233,11 @@ def test_gate_multiple_policies_block_wins(MockRecorder, MockEngine, base_reques
 
     mock_run_result = MagicMock()
     warn_policy = MagicMock()
-    warn_policy.policy_id = "P-WARN"
+    warn_policy.policy_id = "SEC-PR-003"
     warn_policy.status = "WARN"
     warn_policy.violations = ["Need one approval"]
     block_policy = MagicMock()
-    block_policy.policy_id = "P-BLOCK"
+    block_policy.policy_id = "SEC-PR-001"
     block_policy.status = "BLOCK"
     block_policy.violations = ["Need security approval"]
     mock_run_result.results = [warn_policy, block_policy]
@@ -249,7 +256,7 @@ def test_gate_multiple_policies_block_wins(MockRecorder, MockEngine, base_reques
     )
     MockRecorder.record_with_context.return_value = mock_decision
 
-    with patch.object(gate, "_resolve_policies", return_value=["P-WARN", "P-BLOCK"]):
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-003", "SEC-PR-001"]):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
@@ -277,3 +284,194 @@ def test_gate_override_present_allows(MockRecorder, base_request):
     assert resp.allow is True
     assert resp.status == "ALLOWED"
     mock_record_override.assert_called_once()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_override_requires_justification(MockRecorder, base_request):
+    gate = WorkflowGate()
+    base_request.context_overrides = {
+        "override": True,
+        "override_justification_required": True,
+    }
+
+    mock_decision = Decision(
+        decision_id="uuid-override-missing-justification",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-override-missing-justification",
+        message="BLOCKED: override justification is required",
+        policy_bundle_hash="hash-o",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch("releasegate.audit.overrides.record_override") as mock_record_override:
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "justification is required" in resp.reason
+    mock_record_override.assert_not_called()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_override_expired_blocks(MockRecorder, base_request):
+    gate = WorkflowGate()
+    base_request.context_overrides = {
+        "override": True,
+        "override_reason": "Expired emergency approval",
+        "override_expires_at": "2000-01-01T00:00:00Z",
+    }
+
+    mock_decision = Decision(
+        decision_id="uuid-override-expired",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-override-expired",
+        message="BLOCKED: override expired at 2000-01-01T00:00:00+00:00",
+        policy_bundle_hash="hash-o",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch("releasegate.audit.overrides.record_override") as mock_record_override:
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "override expired at" in resp.reason
+    mock_record_override.assert_not_called()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_override_pr_author_cannot_self_approve(MockRecorder, base_request):
+    gate = WorkflowGate()
+    base_request.context_overrides = {
+        "override": True,
+        "override_reason": "Emergency approved",
+        "pr_author_account_id": base_request.actor_account_id,
+    }
+
+    mock_decision = Decision(
+        decision_id="uuid-override-sod-pr-author",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-override-sod-pr-author",
+        message="BLOCKED: separation-of-duties violation (PR author cannot approve override)",
+        policy_bundle_hash="hash-o",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch("releasegate.audit.overrides.record_override") as mock_record_override:
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "PR author cannot approve override" in resp.reason
+    mock_record_override.assert_not_called()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_override_requestor_cannot_self_approve(MockRecorder, base_request):
+    gate = WorkflowGate()
+    base_request.context_overrides = {
+        "override": True,
+        "override_reason": "Emergency approved",
+        "override_requested_by_account_id": base_request.actor_account_id,
+    }
+
+    mock_decision = Decision(
+        decision_id="uuid-override-sod-requestor",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-override-sod-requestor",
+        message="BLOCKED: separation-of-duties violation (override requestor cannot self-approve)",
+        policy_bundle_hash="hash-o",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch("releasegate.audit.overrides.record_override") as mock_record_override:
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "override requestor cannot self-approve" in resp.reason
+    mock_record_override.assert_not_called()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_strict_mode_blocks_when_no_policies_mapped(MockRecorder, base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
+
+    mock_decision = Decision(
+        decision_id="uuid-nopol-strict",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-nopol-strict",
+        message="BLOCKED: no policies configured for this transition (strict mode)",
+        policy_bundle_hash="abc",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch.object(gate, "_resolve_policies", return_value=[]):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+
+
+@patch("releasegate.engine.ComplianceEngine")
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_strict_mode_blocks_invalid_policy_mapping(MockRecorder, MockEngine, base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
+
+    mock_run_result = MagicMock()
+    mock_run_result.results = []
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    mock_decision = Decision(
+        decision_id="uuid-invalid-map-strict",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-invalid-map-strict",
+        message="BLOCKED: invalid policy references: UNKNOWN-STRICT (strict mode)",
+        policy_bundle_hash="hash-1",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch.object(gate, "_resolve_policies", return_value=["UNKNOWN-STRICT"]):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "invalid policy references" in resp.reason
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_strict_mode_blocks_on_risk_fetch_error(MockRecorder, base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    gate.client.get_issue_property = MagicMock(side_effect=RuntimeError("jira unavailable"))
+
+    mock_decision = Decision(
+        decision_id="uuid-error-strict",
+        timestamp=datetime.now(timezone.utc),
+        release_status="ERROR",
+        context_id="ctx-error-strict",
+        message="System Error: failed to fetch issue property `releasegate_risk` (jira unavailable)",
+        policy_bundle_hash="abc",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "ERROR"
+    assert "failed to fetch issue property" in resp.reason

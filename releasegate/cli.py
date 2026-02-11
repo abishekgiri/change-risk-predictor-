@@ -48,6 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     audit_show = audit_sub.add_parser("show", help="Show full decision details")
     audit_show.add_argument("--decision-id", required=True)
 
+    lint_p = sub.add_parser("lint-policies", help="Validate compiled policy schema and lint policy logic.")
+    lint_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
+    lint_p.add_argument("--format", default="text", choices=["text", "json"])
+    lint_p.add_argument(
+        "--no-schema-strict",
+        action="store_true",
+        help="Allow invalid policy files to be skipped (lint still runs on valid files).",
+    )
+
     sub.add_parser("version", help="Print version.")
     return p
 
@@ -386,6 +395,19 @@ def main() -> int:
                 print("Decision not found.", file=sys.stderr)
                 return 1
         return 0
+
+    if args.cmd == "lint-policies":
+        from releasegate.policy.lint import lint_compiled_policies, format_lint_report
+
+        report = lint_compiled_policies(
+            policy_dir=args.policy_dir,
+            strict_schema=not args.no_schema_strict,
+        )
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_lint_report(report))
+        return 0 if report.get("ok") else 1
 
     return 2
 
