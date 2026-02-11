@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list = audit_sub.add_parser("list", help="List recent decisions")
     audit_list.add_argument("--repo", required=True)
     audit_list.add_argument("--limit", type=int, default=20)
-    audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"])
+    audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
     audit_list.add_argument("--pr", type=int)
     
     # audit show

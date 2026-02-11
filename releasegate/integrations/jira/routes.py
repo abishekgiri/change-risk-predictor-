@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Header
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
 from releasegate.integrations.jira.client import JiraClient
+from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
 
 router = APIRouter()
 
@@ -25,3 +26,7 @@ async def health_check():
         return {"status": "ok", "service": "jira"}
     raise HTTPException(status_code=503, detail="Jira connectivity failed")
 
+
+@router.get("/metrics/internal")
+async def internal_metrics():
+    return metrics_snapshot()

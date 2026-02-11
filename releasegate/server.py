@@ -12,6 +12,7 @@ from releasegate.integrations.github_risk import (
 import hmac
 import hashlib
 import json
+import logging
 import os
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -28,6 +29,7 @@ load_dotenv()
 
 # Initialize App
 app = FastAPI(title="ComplianceBot Webhook Listener")
+logger = logging.getLogger(__name__)
 
 
 class CIScoreRequest(BaseModel):
@@ -40,6 +42,8 @@ class CIScoreRequest(BaseModel):
 # Use user's preferred default
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # For API calls
+LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}
+LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
@@ -293,6 +297,32 @@ def health_check():
     return {"status": "ok", "service": "RiskBot Webhook Listener"}
 
 
+@app.on_event("startup")
+def verify_ledger_on_startup():
+    if not LEDGER_VERIFY_ON_STARTUP:
+        return
+    from releasegate.audit.overrides import verify_all_override_chains
+
+    result = verify_all_override_chains()
+    app.state.override_chain_last_verification = result
+    if not result.get("valid", True):
+        logger.error("Override ledger corruption detected at startup: %s", result)
+        if LEDGER_FAIL_ON_CORRUPTION:
+            raise RuntimeError("Override ledger corruption detected")
+    else:
+        logger.info("Override ledger verified at startup: checked_repos=%s", result.get("checked_repos", 0))
+
+
+@app.get("/audit/ledger/verify")
+def verify_ledger(repo: Optional[str] = None, pr: Optional[int] = None):
+    from releasegate.audit.overrides import verify_all_override_chains, verify_override_chain
+
+    if repo:
+        result = verify_override_chain(repo=repo, pr=pr)
+        return {"repo": repo, **result}
+    return verify_all_override_chains()
+
+
 def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = None) -> str:
     if explicit:
         return explicit
@@ -309,6 +339,8 @@ def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = N
         return "POLICY_BLOCKED"
     if decision == "CONDITIONAL":
         return "POLICY_CONDITIONAL"
+    if decision == "ERROR":
+        return "SYSTEM_ERROR"
     if decision == "SKIPPED":
         return "POLICY_SKIPPED"
     return "POLICY_ALLOWED"

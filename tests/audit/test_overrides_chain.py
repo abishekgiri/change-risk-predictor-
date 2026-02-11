@@ -22,28 +22,30 @@ def test_override_chain_verification_detects_bad_previous_hash():
 
     init_db()
     conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO audit_overrides (
-            override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            f"badrow-{uuid.uuid4().hex[:8]}",
-            "d2",
-            repo,
-            2,
-            "T-2",
-            "u2",
-            "tampered",
-            "x" * 64,
-            "y" * 64,
-            "2030-01-01T00:00:00+00:00",
-        ),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO audit_overrides (
+                override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"badrow-{uuid.uuid4().hex[:8]}",
+                "d2",
+                repo,
+                2,
+                "T-2",
+                "u2",
+                "tampered",
+                "x" * 64,
+                "y" * 64,
+                "2030-01-01T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     result = verify_override_chain(repo=repo)
     assert result["valid"] is False
