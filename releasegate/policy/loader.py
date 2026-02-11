@@ -5,9 +5,10 @@ from .types import PolicyDef
 from .policy_types import Policy
 
 class PolicyLoader:
-    def __init__(self, policy_dir: Optional[str] = None, schema: str = "def"):
+    def __init__(self, policy_dir: Optional[str] = None, schema: str = "def", strict: bool = True):
         # schema: "def" (PolicyDef), "compiled" (Policy), or "auto"
         self.schema = schema
+        self.strict = strict
         if policy_dir:
             self.policy_dir = policy_dir
         else:
@@ -21,6 +22,8 @@ class PolicyLoader:
         policies = []
         
         if not os.path.exists(self.policy_dir):
+            if self.strict:
+                raise FileNotFoundError(f"Policy directory not found: {self.policy_dir}")
             return []
 
         for root, _, files in os.walk(self.policy_dir):
@@ -43,12 +46,19 @@ class PolicyLoader:
                                 policy.source_file = full_path
                             policies.append(policy)
                     except Exception as e:
+                        if self.strict:
+                            raise ValueError(f"Failed to load policy {full_path}: {e}") from e
                         import sys
                         print(f"WARN: Failed to load policy {full_path}: {e}", file=sys.stderr)
         
         # Sort deterministic
         if self.schema == "compiled" or (self.schema == "auto" and policies and isinstance(policies[0], Policy)):
-            return sorted(policies, key=lambda p: p.policy_id)
+            sorted_policies = sorted(policies, key=lambda p: p.policy_id)
+            if self.strict and not sorted_policies:
+                raise ValueError(f"No compiled policies loaded from {self.policy_dir}")
+            return sorted_policies
+        if self.strict and not policies:
+            raise ValueError(f"No policies loaded from {self.policy_dir}")
         return sorted(policies, key=lambda p: (p.priority, p.id))
 
     def load_all(self) -> List[Union[PolicyDef, Policy]]:

@@ -155,3 +155,30 @@ def verify_override_chain(repo: str, pr: Optional[int] = None) -> Dict[str, Any]
         expected_prev = row["event_hash"]
 
     return {"valid": True, "checked": checked}
+
+
+def verify_all_override_chains() -> Dict[str, Any]:
+    """
+    Verify all override chains grouped by repo.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT repo FROM audit_overrides ORDER BY repo ASC")
+    repos = [r[0] for r in cursor.fetchall()]
+    conn.close()
+
+    results = []
+    all_valid = True
+    for repo in repos:
+        res = verify_override_chain(repo=repo)
+        result = {"repo": repo, **res}
+        results.append(result)
+        if not res.get("valid", False):
+            all_valid = False
+
+    return {
+        "valid": all_valid,
+        "checked_repos": len(repos),
+        "results": results,
+    }

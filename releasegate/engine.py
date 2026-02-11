@@ -1,4 +1,6 @@
 from typing import Dict, Any, List, Optional
+import hashlib
+import json
 from releasegate.policy.policy_types import Policy, ControlSignal
 from releasegate.policy.loader import PolicyLoader
 from releasegate.enforcement.core_risk import CoreRiskControl
@@ -28,6 +30,7 @@ class ComplianceEngine:
         self.config = config
         self.loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled")
         self.policies = self.loader.load_all()
+        self.policy_hash = self._compute_policy_hash(self.policies)
         
         # Instantiate Controls
         self.core_risk = CoreRiskControl(config)
@@ -90,6 +93,8 @@ class ComplianceEngine:
             "core_risk_score": core_output.get("violation_severity"),
             "core_risk_level": core_output.get("severity_level"),
             "raw_features": core_output.get("raw_features", {}),
+            "policy_hash": self.policy_hash,
+            "policy_count": len(self.policies),
             "phase3_signals": phase3_signals,
             "phase3_findings_count": len(phase3_findings),
             "phase3_findings": [
@@ -120,6 +125,13 @@ class ComplianceEngine:
             results=policy_results,
             metadata=metadata
         )
+
+    def _compute_policy_hash(self, policies: List[Policy]) -> str:
+        canonical = []
+        for policy in sorted(policies, key=lambda p: p.policy_id):
+            canonical.append(policy.model_dump(mode="json", exclude_none=True))
+        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _evaluate_policy(self, policy: Policy, signals: Dict[str, Any]) -> PolicyResult:
         violations = []
