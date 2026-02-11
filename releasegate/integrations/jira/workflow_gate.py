@@ -1,12 +1,16 @@
 import hashlib
+import json
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient
 from releasegate.audit.recorder import AuditRecorder
-from releasegate.decision.types import Decision, EnforcementTargets
+from releasegate.decision.types import Decision, EnforcementTargets, DecisionType
+from releasegate.policy.loader import PolicyLoader
+from releasegate.observability.internal_metrics import incr
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +19,9 @@ class WorkflowGate:
         self.client = JiraClient()
         self.policy_map_path = "releasegate/integrations/jira/jira_transition_map.yaml"
         self.role_map_path = "releasegate/integrations/jira/jira_role_map.yaml"
+        self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self._policy_map_cache: Optional[Dict[str, Any]] = None
+        self._policy_hash_cache: Optional[str] = None
 
     def check_transition(self, request: TransitionCheckRequest) -> TransitionCheckResponse:
         """
@@ -23,18 +30,20 @@ class WorkflowGate:
         """
         evaluation_key = self._compute_key(request)
         repo, pr_number = self._repo_and_pr(request)
+        incr("transitions_evaluated")
 
         # Override path (fail-open with ledger)
         if request.context_overrides.get("override") is True:
             override_reason = request.context_overrides.get("override_reason", "override")
             decision = self._build_decision(
                 request,
-                release_status="ALLOWED",
+                release_status=DecisionType.ALLOWED,
                 message=f"Override applied: {override_reason}",
                 evaluation_key=f"{evaluation_key}:override",
                 unlock_conditions=[override_reason],
                 reason_code="OVERRIDE_APPLIED",
-                inputs_present={"releasegate_risk": True},
+                inputs_present={"releasegate_risk": True, "override_requested": True},
+                policy_hash=self._current_policy_hash(),
             )
             final_decision = AuditRecorder.record_with_context(
                 decision,
@@ -60,28 +69,36 @@ class WorkflowGate:
                 request.issue_key,
                 final_decision.decision_id,
             )
+            incr("overrides_used")
             return TransitionCheckResponse(
                 allow=True,
                 reason=final_decision.message,
                 decision_id=final_decision.decision_id,
                 status="ALLOWED",
-                unlock_conditions=final_decision.unlock_conditions
+                unlock_conditions=final_decision.unlock_conditions,
+                policy_hash=final_decision.policy_bundle_hash,
             )
 
         # Fail-open explicitly with an audited SKIPPED decision when Jira risk metadata is missing.
         risk_meta = self.client.get_issue_property(request.issue_key, "releasegate_risk")
         if self._is_missing_risk_metadata(risk_meta):
-            missing_reason = "SKIPPED: missing issue property `releasegate_risk`"
+            missing_status = DecisionType.BLOCKED if self.strict_mode else DecisionType.SKIPPED
+            missing_reason = (
+                "BLOCKED: missing issue property `releasegate_risk` (strict mode)"
+                if self.strict_mode
+                else "SKIPPED: missing issue property `releasegate_risk`"
+            )
             skipped = self._build_decision(
                 request,
-                release_status="SKIPPED",
+                release_status=missing_status,
                 message=missing_reason,
                 evaluation_key=f"{evaluation_key}:missing-risk",
                 unlock_conditions=[
                     "Run GitHub PR classification to attach `releasegate_risk` on this issue."
                 ],
-                reason_code="MISSING_RISK_METADATA",
+                reason_code="MISSING_RISK_METADATA_STRICT" if self.strict_mode else "MISSING_RISK_METADATA",
                 inputs_present={"releasegate_risk": False},
+                policy_hash=self._current_policy_hash(),
             )
             final_skipped = AuditRecorder.record_with_context(
                 skipped,
@@ -91,17 +108,22 @@ class WorkflowGate:
             logger.info(
                 "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
                 "missing-risk",
-                "SKIPPED",
+                final_skipped.release_status,
                 request.issue_key,
                 final_skipped.decision_id,
             )
+            if final_skipped.release_status == DecisionType.SKIPPED:
+                incr("skipped_count")
+            if final_skipped.release_status == DecisionType.BLOCKED:
+                incr("transitions_blocked")
             return TransitionCheckResponse(
-                allow=True,
+                allow=final_skipped.release_status != DecisionType.BLOCKED,
                 reason=final_skipped.message,
                 decision_id=final_skipped.decision_id,
-                status="SKIPPED",
+                status=final_skipped.release_status.value,
                 requirements=["Missing `releasegate_risk` metadata"],
                 unlock_conditions=final_skipped.unlock_conditions,
+                policy_hash=final_skipped.policy_bundle_hash,
             )
         
         try:
@@ -119,12 +141,13 @@ class WorkflowGate:
                 # No policies mapped -> explicit audited skip (Fail Open, not silent)
                 skipped = self._build_decision(
                     request,
-                    release_status="SKIPPED",
+                    release_status=DecisionType.SKIPPED,
                     message="SKIPPED: no policies configured for this transition",
                     evaluation_key=f"{evaluation_key}:no-policy",
                     unlock_conditions=["Map this transition to one or more policy IDs."],
                     reason_code="NO_POLICIES_MAPPED",
                     inputs_present={"releasegate_risk": True},
+                    policy_hash=self._current_policy_hash(),
                 )
                 final_skipped = AuditRecorder.record_with_context(
                     skipped,
@@ -138,12 +161,14 @@ class WorkflowGate:
                     request.issue_key,
                     final_skipped.decision_id,
                 )
+                incr("skipped_count")
                 return TransitionCheckResponse(
                     allow=True,
                     reason=final_skipped.message,
                     decision_id=final_skipped.decision_id,
                     status="SKIPPED",
                     unlock_conditions=final_skipped.unlock_conditions,
+                    policy_hash=final_skipped.policy_bundle_hash,
                 )
 
             # 4. Evaluation
@@ -174,31 +199,59 @@ class WorkflowGate:
             
             # Filter results to ONLY the policies required by this Jira transition
             relevant_results = [r for r in run_result.results if r.policy_id in policies]
+            loaded_policy_ids = {r.policy_id for r in run_result.results}
+            unresolved_policy_ids = sorted(set(policies) - loaded_policy_ids)
+            meta = run_result.metadata if isinstance(run_result.metadata, dict) else {}
+            meta_policy_hash = meta.get("policy_hash")
+            policy_hash = meta_policy_hash if isinstance(meta_policy_hash, str) and meta_policy_hash else self._current_policy_hash()
+
+            if unresolved_policy_ids:
+                invalid = self._build_decision(
+                    request,
+                    release_status=DecisionType.SKIPPED,
+                    message=f"SKIPPED: invalid policy references: {', '.join(unresolved_policy_ids)}",
+                    evaluation_key=f"{evaluation_key}:invalid-policy",
+                    unlock_conditions=["Fix Jira transition policy mapping to compiled policy IDs."],
+                    reason_code="INVALID_POLICY_REFERENCE",
+                    inputs_present={"releasegate_risk": True},
+                    policy_hash=policy_hash,
+                )
+                final_invalid = AuditRecorder.record_with_context(
+                    invalid,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
+                logger.info(
+                    "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s policy_hash=%s",
+                    "invalid-policy",
+                    final_invalid.release_status,
+                    request.issue_key,
+                    final_invalid.decision_id,
+                    final_invalid.policy_bundle_hash,
+                )
+                incr("skipped_count")
+                return TransitionCheckResponse(
+                    allow=True,
+                    reason=final_invalid.message,
+                    decision_id=final_invalid.decision_id,
+                    status=final_invalid.release_status.value,
+                    unlock_conditions=final_invalid.unlock_conditions,
+                    policy_hash=final_invalid.policy_bundle_hash,
+                )
             
-            # Determine Status based on Filtered Results
-            status = "ALLOWED"
-            blocking_policies = []
-            requirements = []
-            
-            for res in relevant_results:
-                if res.status == "BLOCK":
-                    status = "BLOCKED"
-                    blocking_policies.append(res.policy_id)
-                    requirements.extend(res.violations)
-                elif res.status == "WARN" and status != "BLOCKED":
-                    status = "CONDITIONAL" # Map WARN to CONDITIONAL
-                    requirements.extend(res.violations)
+            status, blocking_policies, requirements = self._evaluate_policy_results(relevant_results)
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
                 request,
                 release_status=status,
-                message=f"Policy Check: {status}",
+                message=f"Policy Check ({request.source_status} -> {request.target_status}): {status.value}",
                 evaluation_key=f"{evaluation_key}:evaluated",
                 unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                reason_code=self._reason_code_for_status(status),
+                reason_code=self._reason_code_for_status(status.value),
                 inputs_present={"releasegate_risk": True},
+                policy_hash=policy_hash,
             )
             
             # 6. Audit Recording
@@ -215,11 +268,11 @@ class WorkflowGate:
             is_prod = request.environment.upper() == "PRODUCTION"
             status = final_decision.release_status
             
-            if is_prod and status == "CONDITIONAL":
-                status = "BLOCKED"
+            if is_prod and status == DecisionType.CONDITIONAL:
+                status = DecisionType.BLOCKED
                 final_decision.message = f"[Prod Gate] Conditional approval treated as BLOCK. Requirements: {final_decision.unlock_conditions}"
 
-            allow = status in {"ALLOWED", "SKIPPED"}
+            allow = status in {DecisionType.ALLOWED, DecisionType.SKIPPED}
             reason = final_decision.message
             
             if not allow:
@@ -238,21 +291,25 @@ class WorkflowGate:
                 request.issue_key,
                 final_decision.decision_id,
             )
+            if status == DecisionType.BLOCKED:
+                incr("transitions_blocked")
+            if status == DecisionType.SKIPPED:
+                incr("skipped_count")
             
             return TransitionCheckResponse(
                 allow=allow,
                 reason=reason,
                 decision_id=final_decision.decision_id,
-                status=status,
+                status=status.value,
                 requirements=resp_requirements,
-                unlock_conditions=final_decision.unlock_conditions
+                unlock_conditions=final_decision.unlock_conditions,
+                policy_hash=final_decision.policy_bundle_hash,
             )
 
         except Exception as e:
             logger.error(f"Jira Gate Error: {e}", exc_info=True)
             is_prod = request.environment.upper() == "PRODUCTION"
-            # In Prod, we Fail Closed (Block). In Non-Prod, Fail Open.
-            fallback_status = "BLOCKED" if is_prod else "SKIPPED"
+            fallback_status = DecisionType.ERROR
             fallback_decision = self._build_decision(
                 request,
                 release_status=fallback_status,
@@ -261,6 +318,7 @@ class WorkflowGate:
                 unlock_conditions=["Retry transition after resolving ReleaseGate system errors."],
                 reason_code="SYSTEM_ERROR",
                 inputs_present={"releasegate_risk": False},
+                policy_hash=self._current_policy_hash(),
             )
             final_fallback = AuditRecorder.record_with_context(
                 fallback_decision,
@@ -274,11 +332,15 @@ class WorkflowGate:
                 request.issue_key,
                 final_fallback.decision_id,
             )
+            incr("transitions_error")
+            if is_prod:
+                incr("transitions_blocked")
             return TransitionCheckResponse(
                 allow=not is_prod,
                 reason=final_fallback.message,
                 decision_id=final_fallback.decision_id,
-                status=fallback_status
+                status=fallback_status.value,
+                policy_hash=final_fallback.policy_bundle_hash,
             )
 
     def _compute_key(self, req: TransitionCheckRequest) -> str:
@@ -329,13 +391,10 @@ class WorkflowGate:
         )
 
     def _resolve_policies(self, req: TransitionCheckRequest) -> List[str]:
-        """Load YAML and resolve based on Env -> Project -> Transition."""
-        import yaml
-        try:
-            with open(self.policy_map_path, 'r') as f:
-                data = yaml.safe_load(f)
-        except FileNotFoundError:
-            logger.warning("Policy map not found, allowing all.")
+        """Resolve policies based on Env -> Project -> Transition."""
+        data = self._load_policy_map()
+        if not data:
+            logger.warning("Policy map not found or empty, allowing all.")
             return []
 
         # 1. Environment
@@ -357,6 +416,38 @@ class WorkflowGate:
             
         return []
 
+    def _load_policy_map(self) -> Dict[str, Any]:
+        import yaml
+
+        if self._policy_map_cache is not None:
+            return self._policy_map_cache
+
+        try:
+            with open(self.policy_map_path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+                self._policy_map_cache = data
+                return data
+        except FileNotFoundError:
+            return {}
+
+    def _current_policy_hash(self) -> str:
+        if self._policy_hash_cache:
+            return self._policy_hash_cache
+
+        loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled", strict=False)
+        try:
+            policies = loader.load_all()
+        except Exception:
+            policies = []
+
+        canonical = []
+        for policy in sorted(policies, key=lambda p: getattr(p, "policy_id", "")):
+            if hasattr(policy, "model_dump"):
+                canonical.append(policy.model_dump(mode="json", exclude_none=True))
+        payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        self._policy_hash_cache = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return self._policy_hash_cache
+
     def _resolve_role(self, identifier: Optional[str]) -> str:
         """Map user identifier to role using yaml map."""
         # For Phase 10 MVP, we return a default or use map
@@ -376,13 +467,14 @@ class WorkflowGate:
         self,
         request: TransitionCheckRequest,
         *,
-        release_status: Literal["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"],
+        release_status: DecisionType,
         message: str,
         evaluation_key: str,
         unlock_conditions: Optional[List[str]] = None,
         matched_policies: Optional[List[str]] = None,
         reason_code: Optional[str] = None,
         inputs_present: Optional[Dict[str, bool]] = None,
+        policy_hash: Optional[str] = None,
     ) -> Decision:
         repo, pr_number = self._repo_and_pr(request)
         return Decision(
@@ -394,7 +486,7 @@ class WorkflowGate:
             requirements=None,
             unlock_conditions=unlock_conditions or [],
             matched_policies=matched_policies or [],
-            policy_bundle_hash="local-hash",
+            policy_bundle_hash=policy_hash or self._current_policy_hash(),
             evaluation_key=evaluation_key,
             actor_id=request.actor_account_id,
             reason_code=reason_code,
@@ -419,3 +511,22 @@ class WorkflowGate:
         if status == "CONDITIONAL":
             return "POLICY_CONDITIONAL"
         return "POLICY_ALLOWED"
+
+    def _evaluate_policy_results(self, relevant_results: List[Any]) -> tuple[DecisionType, List[str], List[str]]:
+        """
+        Pure decision reduction: policy results -> (status, blocking_policy_ids, requirements)
+        """
+        status = DecisionType.ALLOWED
+        blocking_policies: List[str] = []
+        requirements: List[str] = []
+
+        for res in relevant_results:
+            if res.status == "BLOCK":
+                status = DecisionType.BLOCKED
+                blocking_policies.append(res.policy_id)
+                requirements.extend(res.violations)
+            elif res.status == "WARN" and status != DecisionType.BLOCKED:
+                status = DecisionType.CONDITIONAL
+                requirements.extend(res.violations)
+
+        return status, blocking_policies, requirements

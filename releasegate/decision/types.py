@@ -1,9 +1,18 @@
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional, Literal
+from enum import Enum
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from releasegate.policy.types import Requirement
+
+
+class DecisionType(str, Enum):
+    BLOCKED = "BLOCKED"
+    ALLOWED = "ALLOWED"
+    SKIPPED = "SKIPPED"
+    ERROR = "ERROR"
+    CONDITIONAL = "CONDITIONAL"
 
 class ExternalKeys(BaseModel):
     """External system references."""
@@ -28,7 +37,7 @@ class Decision(BaseModel):
     decision_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime
     
-    release_status: Literal["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED"]
+    release_status: DecisionType
     
     # Traceability
     matched_policies: List[str] = Field(default_factory=list)

@@ -21,6 +21,7 @@ from releasegate.audit.overrides import list_overrides, record_override, verify_
 from releasegate.audit.reader import AuditReader
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets
+from releasegate.policy.loader import PolicyLoader
 
 
 def _build_decision(
@@ -31,13 +32,14 @@ def _build_decision(
     pr_number: int,
     issue_key: str,
     evaluation_key: str,
+    policy_hash: str,
 ) -> Decision:
     return Decision(
         timestamp=datetime.now(timezone.utc),
         release_status=release_status,
         context_id=f"jira-{issue_key}",
         message=message,
-        policy_bundle_hash="demo-bundle",
+        policy_bundle_hash=policy_hash,
         evaluation_key=evaluation_key,
         enforcement_targets=EnforcementTargets(
             repository=repo,
@@ -46,6 +48,16 @@ def _build_decision(
             external={"jira": [issue_key]},
         ),
     )
+
+
+def _current_policy_hash() -> str:
+    loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled", strict=False)
+    policies = loader.load_all()
+    canonical = []
+    for policy in sorted(policies, key=lambda p: getattr(p, "policy_id", "")):
+        canonical.append(policy.model_dump(mode="json", exclude_none=True))
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -77,6 +89,7 @@ def main() -> int:
     args = parser.parse_args()
 
     run_nonce = uuid.uuid4().hex
+    policy_hash = _current_policy_hash()
     base_eval = hashlib.sha256(
         f"{args.repo}:{args.pr}:{args.issue}:{run_nonce}".encode("utf-8")
     ).hexdigest()
@@ -88,6 +101,7 @@ def main() -> int:
         pr_number=args.pr,
         issue_key=args.issue,
         evaluation_key=f"{base_eval}:blocked",
+        policy_hash=policy_hash,
     )
     blocked_decision = AuditRecorder.record_with_context(
         blocked_decision,
@@ -102,6 +116,7 @@ def main() -> int:
         pr_number=args.pr,
         issue_key=args.issue,
         evaluation_key=f"{base_eval}:override",
+        policy_hash=policy_hash,
     )
     override_decision = AuditRecorder.record_with_context(
         override_decision,
@@ -137,6 +152,7 @@ def main() -> int:
         "blocked_decision_id": blocked_decision.decision_id,
         "override_decision_id": override_decision.decision_id,
         "override_event_id": override_event.get("override_id"),
+        "policy_hash": policy_hash,
         "override_chain": chain,
         "decisions": decisions,
         "overrides": overrides,
