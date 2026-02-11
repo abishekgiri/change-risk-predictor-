@@ -43,6 +43,7 @@ def test_compute_key_stability(base_request):
 def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):
     """Test full allowed flow."""
     gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
     
     # Mock Engine Result (ComplianceRunResult structure)
     mock_run_result = MagicMock()
@@ -77,6 +78,7 @@ def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):
 def test_gate_prod_conditional_block(MockRecorder, MockEngine, base_request):
     """Test that CONDITIONAL becomes BLOCKED in PROD."""
     gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "HIGH"})
     
     # Mock Engine Result
     mock_run_result = MagicMock()
@@ -113,3 +115,26 @@ def test_gate_prod_conditional_block(MockRecorder, MockEngine, base_request):
     assert resp.status == "BLOCKED" 
     # Should have posted comment
     gate.client.post_comment_deduped.assert_called_once()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_skips_when_risk_metadata_missing(MockRecorder, base_request):
+    gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value={})
+
+    mock_decision = Decision(
+        decision_id="uuid-skip",
+        timestamp=datetime.now(timezone.utc),
+        release_status="SKIPPED",
+        context_id="ctx-skip",
+        message="SKIPPED: missing issue property `releasegate_risk`",
+        policy_bundle_hash="abc",
+        unlock_conditions=["Run GitHub PR classification to attach `releasegate_risk` on this issue."],
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    resp = gate.check_transition(base_request)
+    assert resp.allow is True
+    assert resp.status == "SKIPPED"
+    assert "missing issue property" in resp.reason
