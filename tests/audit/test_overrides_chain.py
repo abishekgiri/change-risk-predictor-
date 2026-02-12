@@ -3,6 +3,7 @@ import uuid
 
 from releasegate.audit.overrides import record_override, verify_override_chain
 from releasegate.config import DB_PATH
+from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
 
 
@@ -18,6 +19,7 @@ def test_override_chain_verification_valid():
 
 def test_override_chain_verification_detects_bad_previous_hash():
     repo = f"chain-bad-{uuid.uuid4().hex[:8]}"
+    tenant_id = resolve_tenant_id(None)
     record_override(repo=repo, pr_number=2, issue_key="T-2", decision_id="d1", actor="u1", reason="r1")
 
     init_db()
@@ -27,11 +29,12 @@ def test_override_chain_verification_detects_bad_previous_hash():
         cursor.execute(
             """
             INSERT INTO audit_overrides (
-                override_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, previous_hash, event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"badrow-{uuid.uuid4().hex[:8]}",
+                tenant_id,
                 "d2",
                 repo,
                 2,

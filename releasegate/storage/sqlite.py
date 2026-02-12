@@ -24,7 +24,7 @@ def save_run(repo, pr_number, base_sha, head_sha, score_data, features):
         cursor.execute("""
         INSERT OR IGNORE INTO pr_runs 
         (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt, schema_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
         """, (repo, pr_number, base_sha, head_sha, risk_score, risk_level, reasons_json, features_json, github_run_id, github_run_attempt))
         
         conn.commit()

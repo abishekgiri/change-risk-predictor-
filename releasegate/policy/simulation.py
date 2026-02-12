@@ -7,6 +7,7 @@ from releasegate.engine import ComplianceEngine
 from releasegate.engine_core.policy_parser import compute_policy_hash
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
+from releasegate.storage.base import resolve_tenant_id
 
 
 def _normalized_status(overall_status: str) -> str:
@@ -37,7 +38,9 @@ def simulate_policy_impact(
     repo: str,
     limit: int = 100,
     policy_dir: str = "releasegate/policy/compiled",
+    tenant_id: str | None = None,
 ) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
     loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=True)
     loaded = loader.load_all()
     policies = [p for p in loaded if isinstance(p, Policy)]
@@ -46,7 +49,7 @@ def simulate_policy_impact(
     engine.policies = policies
     engine.policy_hash = compute_policy_hash(policies)
 
-    rows = AuditReader.list_decisions(repo=repo, limit=limit)
+    rows = AuditReader.list_decisions(repo=repo, limit=limit, tenant_id=effective_tenant)
     records: List[Dict[str, Any]] = []
     original_counts: Dict[str, int] = {}
     simulated_counts: Dict[str, int] = {}
@@ -113,6 +116,7 @@ def simulate_policy_impact(
         )
 
     return {
+        "tenant_id": effective_tenant,
         "repo": repo,
         "policy_dir": policy_dir,
         "policy_hash": engine.policy_hash,

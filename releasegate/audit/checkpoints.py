@@ -8,9 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import sqlite3
-
-from releasegate.config import DB_PATH
+from releasegate.storage import get_storage_backend
+from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
 
 
@@ -53,8 +52,8 @@ def period_id_for_timestamp(timestamp: Any, cadence: str = DEFAULT_CADENCE) -> s
     return f"{iso.year}-W{iso.week:02d}"
 
 
-def _sanitize_repo(repo: str) -> str:
-    return repo.replace("/", "__").replace("..", "_")
+def _sanitize_path_part(value: str) -> str:
+    return value.replace("/", "__").replace("..", "_")
 
 
 def _checkpoint_store_dir(store_dir: Optional[str] = None) -> Path:
@@ -71,37 +70,42 @@ def _checkpoint_signing_key(signing_key: Optional[str] = None) -> bytes:
     return key.encode("utf-8")
 
 
-def _checkpoint_path(repo: str, cadence: str, period_id: str, store_dir: Optional[str] = None) -> Path:
+def _checkpoint_path(
+    repo: str,
+    cadence: str,
+    period_id: str,
+    *,
+    tenant_id: str,
+    store_dir: Optional[str] = None,
+) -> Path:
     root = _checkpoint_store_dir(store_dir)
-    repo_dir = _sanitize_repo(repo)
-    path = root / repo_dir / cadence
+    tenant_dir = _sanitize_path_part(tenant_id)
+    repo_dir = _sanitize_path_part(repo)
+    path = root / tenant_dir / repo_dir / cadence
     path.mkdir(parents=True, exist_ok=True)
     return path / f"{period_id}.json"
 
 
-def _load_rows(repo: str, pr: Optional[int] = None) -> List[Dict[str, Any]]:
+def _load_rows(repo: str, pr: Optional[int] = None, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     init_db()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    storage = get_storage_backend()
     query = """
-        SELECT override_id, decision_id, repo, pr_number, issue_key, actor, reason, idempotency_key, previous_hash, event_hash, created_at
+        SELECT override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
         FROM audit_overrides
-        WHERE repo = ?
+        WHERE tenant_id = ? AND repo = ?
     """
-    params: List[Any] = [repo]
+    params: List[Any] = [effective_tenant, repo]
     if pr is not None:
         query += " AND pr_number = ?"
         params.append(pr)
     query += " ORDER BY created_at ASC"
-    cursor.execute(query, params)
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    return storage.fetchall(query, params)
 
 
 def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     payload = {
+        "tenant_id": row["tenant_id"],
         "repo": row["repo"],
         "pr_number": row["pr_number"],
         "issue_key": row["issue_key"],
@@ -111,6 +115,10 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         "previous_hash": row["previous_hash"],
         "created_at": row["created_at"],
     }
+    if row.get("target_type") is not None:
+        payload["target_type"] = row["target_type"]
+    if row.get("target_id") is not None:
+        payload["target_id"] = row["target_id"]
     if row.get("idempotency_key") is not None:
         payload["idempotency_key"] = row["idempotency_key"]
     return payload
@@ -121,8 +129,10 @@ def compute_override_chain_root(
     *,
     pr: Optional[int] = None,
     up_to: Optional[Any] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    rows = _load_rows(repo=repo, pr=pr)
+    effective_tenant = resolve_tenant_id(tenant_id)
+    rows = _load_rows(repo=repo, pr=pr, tenant_id=effective_tenant)
     cutoff = parse_utc_datetime(up_to) if up_to is not None else None
     if cutoff is not None:
         rows = [r for r in rows if parse_utc_datetime(r["created_at"]) <= cutoff]
@@ -144,6 +154,7 @@ def compute_override_chain_root(
                 "root_hash": EMPTY_ROOT_HASH,
                 "first_event_at": first_event_at,
                 "last_event_at": last_event_at,
+                "tenant_id": effective_tenant,
             }
 
         payload = _event_payload(row)
@@ -158,6 +169,7 @@ def compute_override_chain_root(
                 "root_hash": EMPTY_ROOT_HASH,
                 "first_event_at": first_event_at,
                 "last_event_at": last_event_at,
+                "tenant_id": effective_tenant,
             }
 
         if first_event_at is None:
@@ -173,6 +185,7 @@ def compute_override_chain_root(
         "root_hash": rolling_root if rows else EMPTY_ROOT_HASH,
         "first_event_at": first_event_at,
         "last_event_at": last_event_at,
+        "tenant_id": effective_tenant,
     }
 
 
@@ -191,6 +204,43 @@ def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optiona
     return hmac.compare_digest(expected, signature)
 
 
+def _record_checkpoint_metadata(checkpoint: Dict[str, Any], path: str) -> None:
+    payload = checkpoint.get("payload", {})
+    signature = checkpoint.get("signature", {})
+    checkpoint_id = hashlib.sha256(
+        f"{payload.get('tenant_id')}:{payload.get('repo')}:{payload.get('cadence')}:{payload.get('period_id')}:{payload.get('pr_number')}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+
+    init_db()
+    storage = get_storage_backend()
+    storage.execute(
+        """
+        INSERT INTO audit_checkpoints (
+            checkpoint_id, tenant_id, repo, pr_number, cadence, period_id, period_end, root_hash, event_count,
+            signature_algorithm, signature_value, path, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, checkpoint_id) DO NOTHING
+        """,
+        (
+            checkpoint_id,
+            payload.get("tenant_id"),
+            payload.get("repo"),
+            payload.get("pr_number"),
+            payload.get("cadence"),
+            payload.get("period_id"),
+            payload.get("period_end"),
+            payload.get("root_hash"),
+            int(payload.get("event_count", 0)),
+            signature.get("algorithm") or "HMAC-SHA256",
+            signature.get("value") or "",
+            path,
+            payload.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
 def create_override_checkpoint(
     repo: str,
     *,
@@ -199,16 +249,19 @@ def create_override_checkpoint(
     at: Optional[Any] = None,
     store_dir: Optional[str] = None,
     signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     cadence = _resolve_cadence(cadence)
+    effective_tenant = resolve_tenant_id(tenant_id)
     generated_at = parse_utc_datetime(at) if at is not None else datetime.now(timezone.utc)
     period_id = period_id_for_timestamp(generated_at, cadence=cadence)
 
-    chain = compute_override_chain_root(repo=repo, pr=pr, up_to=generated_at)
+    chain = compute_override_chain_root(repo=repo, pr=pr, up_to=generated_at, tenant_id=effective_tenant)
     if not chain.get("valid_chain", False):
         raise ValueError(f"Cannot checkpoint invalid chain: {chain.get('reason')}")
 
     payload = {
+        "tenant_id": effective_tenant,
         "repo": repo,
         "pr_number": pr,
         "cadence": cadence,
@@ -230,16 +283,24 @@ def create_override_checkpoint(
         },
     }
 
-    path = _checkpoint_path(repo, cadence, period_id, store_dir=store_dir)
+    path = _checkpoint_path(
+        repo,
+        cadence,
+        period_id,
+        tenant_id=effective_tenant,
+        store_dir=store_dir,
+    )
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
         existing["path"] = str(path)
         existing["created"] = False
+        _record_checkpoint_metadata(existing, str(path))
         return existing
 
     path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True), encoding="utf-8")
     checkpoint["path"] = str(path)
     checkpoint["created"] = True
+    _record_checkpoint_metadata(checkpoint, str(path))
     return checkpoint
 
 
@@ -249,9 +310,11 @@ def load_override_checkpoint(
     cadence: str = DEFAULT_CADENCE,
     period_id: str,
     store_dir: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     cadence = _resolve_cadence(cadence)
-    path = _checkpoint_path(repo, cadence, period_id, store_dir=store_dir)
+    effective_tenant = resolve_tenant_id(tenant_id)
+    path = _checkpoint_path(repo, cadence, period_id, tenant_id=effective_tenant, store_dir=store_dir)
     if not path.exists():
         return None
     checkpoint = json.loads(path.read_text(encoding="utf-8"))
@@ -264,9 +327,11 @@ def latest_override_checkpoint(
     *,
     cadence: str = DEFAULT_CADENCE,
     store_dir: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     cadence = _resolve_cadence(cadence)
-    dir_path = _checkpoint_path(repo, cadence, "tmp", store_dir=store_dir).parent
+    effective_tenant = resolve_tenant_id(tenant_id)
+    dir_path = _checkpoint_path(repo, cadence, "tmp", tenant_id=effective_tenant, store_dir=store_dir).parent
     if not dir_path.exists():
         return None
     files = [p for p in dir_path.glob("*.json") if p.is_file()]
@@ -286,17 +351,21 @@ def verify_override_checkpoint(
     pr: Optional[int] = None,
     store_dir: Optional[str] = None,
     signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
     checkpoint = load_override_checkpoint(
         repo=repo,
         cadence=cadence,
         period_id=period_id,
         store_dir=store_dir,
+        tenant_id=effective_tenant,
     )
     if checkpoint is None:
         return {
             "exists": False,
             "valid": False,
+            "tenant_id": effective_tenant,
             "repo": repo,
             "cadence": cadence,
             "period_id": period_id,
@@ -304,6 +373,7 @@ def verify_override_checkpoint(
         }
 
     payload = checkpoint.get("payload", {})
+    payload_tenant = payload.get("tenant_id") or effective_tenant
     payload_repo = payload.get("repo") or repo
     payload_pr = payload.get("pr_number") if pr is None else pr
     period_end = payload.get("period_end")
@@ -319,6 +389,7 @@ def verify_override_checkpoint(
         repo=payload_repo,
         pr=payload_pr,
         up_to=period_end,
+        tenant_id=payload_tenant,
     )
     root_hash_match = chain.get("root_hash") == payload.get("root_hash")
     event_count_match = int(chain.get("event_count", -1)) == int(payload.get("event_count", -2))
@@ -327,6 +398,7 @@ def verify_override_checkpoint(
     result = {
         "exists": True,
         "valid": valid,
+        "tenant_id": payload_tenant,
         "repo": payload_repo,
         "cadence": payload.get("cadence", cadence),
         "period_id": payload.get("period_id", period_id),

@@ -12,6 +12,7 @@ from releasegate.decision.types import Decision, EnforcementTargets, DecisionTyp
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
 from releasegate.observability.internal_metrics import incr
+from releasegate.storage.base import resolve_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,10 @@ class WorkflowGate:
         Evaluate if a Jira transition is allowed.
         Enforces idempotency, audit-on-error, and policy gates.
         """
-        evaluation_key = self._compute_key(request)
+        tenant_id = self._tenant_id(request)
+        evaluation_key = self._compute_key(request, tenant_id=tenant_id)
         repo, pr_number = self._repo_and_pr(request)
-        incr("transitions_evaluated")
+        incr("transitions_evaluated", tenant_id=tenant_id)
 
         # Override path (fail-open with ledger)
         if request.context_overrides.get("override") is True:
@@ -73,8 +75,9 @@ class WorkflowGate:
                     blocked,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=False,
                     reason=final_blocked.message,
@@ -82,6 +85,7 @@ class WorkflowGate:
                     status=final_blocked.release_status.value,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
 
             if actor_principals and override_requestor_principals and actor_principals.intersection(override_requestor_principals):
@@ -100,8 +104,9 @@ class WorkflowGate:
                     blocked,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=False,
                     reason=final_blocked.message,
@@ -109,6 +114,7 @@ class WorkflowGate:
                     status=final_blocked.release_status.value,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
 
             if justification_required and not override_reason:
@@ -127,8 +133,9 @@ class WorkflowGate:
                     blocked,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=False,
                     reason=final_blocked.message,
@@ -136,6 +143,7 @@ class WorkflowGate:
                     status=final_blocked.release_status.value,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
 
             if override_expires_at and datetime.now(timezone.utc) > override_expires_at:
@@ -154,8 +162,9 @@ class WorkflowGate:
                     blocked,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=False,
                     reason=final_blocked.message,
@@ -163,6 +172,7 @@ class WorkflowGate:
                     status=final_blocked.release_status.value,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
 
             decision = self._build_decision(
@@ -184,6 +194,7 @@ class WorkflowGate:
                 decision,
                 repo=repo,
                 pr_number=pr_number,
+                tenant_id=tenant_id,
             )
             try:
                 from releasegate.audit.overrides import record_override
@@ -198,6 +209,7 @@ class WorkflowGate:
                     actor=request.actor_email or request.actor_account_id,
                     reason=normalized_override_reason,
                     idempotency_key=override_idempotency_key,
+                    tenant_id=tenant_id,
                 )
             except Exception as e:
                 logger.warning(f"Override ledger write failed: {e}")
@@ -208,7 +220,7 @@ class WorkflowGate:
                 request.issue_key,
                 final_decision.decision_id,
             )
-            incr("overrides_used")
+            incr("overrides_used", tenant_id=tenant_id)
             return TransitionCheckResponse(
                 allow=True,
                 reason=final_decision.message,
@@ -216,6 +228,7 @@ class WorkflowGate:
                 status="ALLOWED",
                 unlock_conditions=final_decision.unlock_conditions,
                 policy_hash=final_decision.policy_bundle_hash,
+                tenant_id=tenant_id,
             )
 
         # Fail-open explicitly with an audited SKIPPED decision when Jira risk metadata is missing.
@@ -228,6 +241,7 @@ class WorkflowGate:
                 evaluation_key=evaluation_key,
                 repo=repo,
                 pr_number=pr_number,
+                tenant_id=tenant_id,
                 message=f"System Error: failed to fetch issue property `releasegate_risk` ({e})",
                 reason_code="RISK_METADATA_FETCH_ERROR",
             )
@@ -259,6 +273,7 @@ class WorkflowGate:
                 skipped,
                 repo=repo,
                 pr_number=pr_number,
+                tenant_id=tenant_id,
             )
             logger.info(
                 "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
@@ -268,9 +283,9 @@ class WorkflowGate:
                 final_skipped.decision_id,
             )
             if final_skipped.release_status == DecisionType.SKIPPED:
-                incr("skipped_count")
+                incr("skipped_count", tenant_id=tenant_id)
             if final_skipped.release_status == DecisionType.BLOCKED:
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
             return TransitionCheckResponse(
                 allow=final_skipped.release_status != DecisionType.BLOCKED,
                 reason=final_skipped.message,
@@ -279,6 +294,7 @@ class WorkflowGate:
                 requirements=["Missing `releasegate_risk` metadata"],
                 unlock_conditions=final_skipped.unlock_conditions,
                 policy_hash=final_skipped.policy_bundle_hash,
+                tenant_id=tenant_id,
             )
         
         try:
@@ -319,6 +335,7 @@ class WorkflowGate:
                     skipped,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
                 logger.info(
                     "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
@@ -328,9 +345,9 @@ class WorkflowGate:
                     final_skipped.decision_id,
                 )
                 if final_skipped.release_status == DecisionType.SKIPPED:
-                    incr("skipped_count")
+                    incr("skipped_count", tenant_id=tenant_id)
                 if final_skipped.release_status == DecisionType.BLOCKED:
-                    incr("transitions_blocked")
+                    incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=final_skipped.release_status != DecisionType.BLOCKED,
                     reason=final_skipped.message,
@@ -338,6 +355,7 @@ class WorkflowGate:
                     status=final_skipped.release_status.value,
                     unlock_conditions=final_skipped.unlock_conditions,
                     policy_hash=final_skipped.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
 
             # 4. Evaluation
@@ -382,7 +400,7 @@ class WorkflowGate:
             engine = ComplianceEngine({})
             compiled_policy_map = self._compiled_policy_map()
             unresolved_policy_ids = sorted(set(policies) - set(compiled_policy_map.keys()))
-            policy_bindings = self._build_policy_bindings(policies, compiled_policy_map)
+            policy_bindings = self._build_policy_bindings(policies, compiled_policy_map, tenant_id=tenant_id)
             bindings_hash = self._policy_bindings_hash(policy_bindings)
             
             # Run ALL policies (Engine doesn't support filtering input yet)
@@ -421,6 +439,7 @@ class WorkflowGate:
                     invalid,
                     repo=repo,
                     pr_number=pr_number,
+                    tenant_id=tenant_id,
                 )
                 logger.info(
                     "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s policy_hash=%s",
@@ -431,9 +450,9 @@ class WorkflowGate:
                     final_invalid.policy_bundle_hash,
                 )
                 if final_invalid.release_status == DecisionType.SKIPPED:
-                    incr("skipped_count")
+                    incr("skipped_count", tenant_id=tenant_id)
                 if final_invalid.release_status == DecisionType.BLOCKED:
-                    incr("transitions_blocked")
+                    incr("transitions_blocked", tenant_id=tenant_id)
                 return TransitionCheckResponse(
                     allow=final_invalid.release_status != DecisionType.BLOCKED,
                     reason=final_invalid.message,
@@ -441,6 +460,7 @@ class WorkflowGate:
                     status=final_invalid.release_status.value,
                     unlock_conditions=final_invalid.unlock_conditions,
                     policy_hash=final_invalid.policy_bundle_hash,
+                    tenant_id=tenant_id,
                 )
             
             status, blocking_policies, requirements = self._evaluate_policy_results(relevant_results)
@@ -469,9 +489,10 @@ class WorkflowGate:
             # 6. Audit Recording
             # This handles duplicate inserts (idempotency) by returning existing decision if present
             final_decision = AuditRecorder.record_with_context(
-                decision, 
-                repo=repo, 
-                pr_number=pr_number
+                decision,
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
             )
             
             # 7. UX Logic
@@ -504,9 +525,9 @@ class WorkflowGate:
                 final_decision.decision_id,
             )
             if status == DecisionType.BLOCKED:
-                incr("transitions_blocked")
+                incr("transitions_blocked", tenant_id=tenant_id)
             if status == DecisionType.SKIPPED:
-                incr("skipped_count")
+                incr("skipped_count", tenant_id=tenant_id)
             
             return TransitionCheckResponse(
                 allow=allow,
@@ -516,6 +537,7 @@ class WorkflowGate:
                 requirements=resp_requirements,
                 unlock_conditions=final_decision.unlock_conditions,
                 policy_hash=final_decision.policy_bundle_hash,
+                tenant_id=tenant_id,
             )
 
         except Exception as e:
@@ -525,20 +547,25 @@ class WorkflowGate:
                 evaluation_key=evaluation_key,
                 repo=repo,
                 pr_number=pr_number,
+                tenant_id=tenant_id,
                 message=f"System Error: {str(e)}",
                 reason_code="SYSTEM_ERROR",
             )
 
-    def _compute_key(self, req: TransitionCheckRequest) -> str:
+    def _compute_key(self, req: TransitionCheckRequest, tenant_id: Optional[str] = None) -> str:
         """SHA256(issue + transition + status_change + env + actor)"""
         request_id = (
             req.context_overrides.get("transition_request_id")
             or req.context_overrides.get("idempotency_key")
             or ""
         )
+        effective_tenant = resolve_tenant_id(tenant_id or req.tenant_id or req.context_overrides.get("tenant_id"))
         # Include target_status as critical differentiator
-        raw = f"{req.issue_key}:{req.transition_id}:{req.source_status}:{req.target_status}:{req.environment}:{req.actor_account_id}:{request_id}"
+        raw = f"{effective_tenant}:{req.issue_key}:{req.transition_id}:{req.source_status}:{req.target_status}:{req.environment}:{req.actor_account_id}:{request_id}"
         return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _tenant_id(self, req: TransitionCheckRequest) -> str:
+        return resolve_tenant_id(req.tenant_id or req.context_overrides.get("tenant_id"))
 
     def _build_context(self, req: TransitionCheckRequest):
         """Construct the EvaluationContext from Jira request + Jira API data."""
@@ -626,7 +653,8 @@ class WorkflowGate:
             return self._policy_hash_cache
 
         compiled_map = self._compiled_policy_map()
-        bindings = self._build_policy_bindings(sorted(compiled_map.keys()), compiled_map)
+        default_tenant = resolve_tenant_id(allow_none=True) or "system"
+        bindings = self._build_policy_bindings(sorted(compiled_map.keys()), compiled_map, tenant_id=default_tenant)
         self._policy_hash_cache = self._policy_bindings_hash(bindings)
         return self._policy_hash_cache
 
@@ -651,8 +679,14 @@ class WorkflowGate:
         canonical = json.dumps(policy_dict, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def _build_policy_bindings(self, policy_ids: List[str], policy_map: Dict[str, Policy]) -> List[PolicyBinding]:
+    def _build_policy_bindings(
+        self,
+        policy_ids: List[str],
+        policy_map: Dict[str, Policy],
+        tenant_id: Optional[str] = None,
+    ) -> List[PolicyBinding]:
         bindings: List[PolicyBinding] = []
+        effective_tenant = resolve_tenant_id(tenant_id)
         seen: set[str] = set()
         for policy_id in policy_ids:
             if policy_id in seen:
@@ -668,6 +702,7 @@ class WorkflowGate:
                     policy_id=policy.policy_id,
                     policy_version=policy.version,
                     policy_hash=policy_hash,
+                    tenant_id=effective_tenant,
                     policy=policy_dict,
                 )
             )
@@ -732,6 +767,7 @@ class WorkflowGate:
         evaluation_key: str,
         repo: str,
         pr_number: Optional[int],
+        tenant_id: str,
         message: str,
         reason_code: str,
     ) -> TransitionCheckResponse:
@@ -751,6 +787,7 @@ class WorkflowGate:
             fallback_decision,
             repo=repo,
             pr_number=pr_number,
+            tenant_id=tenant_id,
         )
         logger.info(
             "ReleaseGate transition decision=%s status=%s issue=%s decision_id=%s",
@@ -759,16 +796,17 @@ class WorkflowGate:
             request.issue_key,
             final_fallback.decision_id,
         )
-        incr("transitions_error")
+        incr("transitions_error", tenant_id=tenant_id)
         should_block = self.strict_mode or request.environment.upper() == "PRODUCTION"
         if should_block:
-            incr("transitions_blocked")
+            incr("transitions_blocked", tenant_id=tenant_id)
         return TransitionCheckResponse(
             allow=not should_block,
             reason=final_fallback.message,
             decision_id=final_fallback.decision_id,
             status=fallback_status.value,
             policy_hash=final_fallback.policy_bundle_hash,
+            tenant_id=tenant_id,
         )
 
     def _resolve_role(self, identifier: Optional[str]) -> str:
@@ -802,8 +840,14 @@ class WorkflowGate:
         input_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Decision:
         repo, pr_number = self._repo_and_pr(request)
+        tenant_id = self._tenant_id(request)
+        effective_policy_bindings = list(policy_bindings or [])
+        for binding in effective_policy_bindings:
+            if not binding.tenant_id:
+                binding.tenant_id = tenant_id
         return Decision(
             decision_id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
             timestamp=datetime.now(timezone.utc),
             release_status=release_status,
             context_id=f"jira-{request.issue_key}",
@@ -817,7 +861,7 @@ class WorkflowGate:
             reason_code=reason_code,
             inputs_present=inputs_present or {},
             input_snapshot=input_snapshot or {},
-            policy_bindings=policy_bindings or [],
+            policy_bindings=effective_policy_bindings,
             enforcement_targets=EnforcementTargets(
                 repository=repo,
                 pr_number=pr_number,

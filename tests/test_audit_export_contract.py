@@ -51,6 +51,7 @@ def test_audit_export_soc2_contract_has_required_fields():
         params={
             "repo": repo,
             "pr": pr_number,
+            "tenant_id": "tenant-test",
             "contract": "soc2_v1",
             "include_overrides": "true",
             "verify_chain": "true",
@@ -84,6 +85,7 @@ def test_audit_export_soc2_csv_contains_contract_columns():
         params={
             "repo": repo,
             "pr": pr_number,
+            "tenant_id": "tenant-test",
             "contract": "soc2_v1",
             "format": "csv",
         },
