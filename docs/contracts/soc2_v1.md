@@ -16,6 +16,9 @@ Decision record fields:
 - `decision_id`: string
 - `decision`: enum (`ALLOWED`, `BLOCKED`, `CONDITIONAL`, `SKIPPED`, `ERROR`, `UNKNOWN`)
 - `reason_code`: string
+
+Decision semantics reference:
+- `reason_code` semantics and strict/permissive interpretation are defined in `docs/decision-model.md`.
 - `human_message`: string
 - `actor`: string or `null`
 - `policy_version`: string or `null`

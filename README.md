@@ -31,6 +31,11 @@ It is a **governance control plane**.
 
 ---
 
+## Decision Semantics Source of Truth
+
+Decision output fields, `reason_code` meanings, and strict/permissive behavior are defined only in `docs/decision-model.md`.
+Other docs (including this README) are descriptive and defer to that spec.
+
 ## Core Capabilities
 
 ### 1. Transition-Level Hard Enforcement

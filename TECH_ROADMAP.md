@@ -3,6 +3,10 @@
 ## Scope Freeze
 ReleaseGate is a Jira-native release governance and enforcement engine.
 
+## Spec Ownership
+- Decision output semantics are owned by `docs/decision-model.md` only.
+- Policy DSL semantics are owned by `docs/policy-dsl.md` only.
+
 ## Done
 - Transition-level Jira workflow enforcement is implemented (allow/block/skipped/error).
 - Declarative policy engine is implemented with strict schema validation.
