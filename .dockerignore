@@ -7,6 +7,11 @@ venv/
 .venv/
 env/
 
+# Exclude local environment files (never bake secrets)
+.env
+.env.*
+deploy/compose/.env
+
 # Exclude python artifacts
 __pycache__/
 *.pyc

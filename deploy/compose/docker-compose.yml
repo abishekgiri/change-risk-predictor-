@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-releasegate}
       POSTGRES_USER: ${POSTGRES_USER:-releasegate}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-releasegate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-prod}
     volumes:
       - releasegate_postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
       - .env
     environment:
       RELEASEGATE_STORAGE_BACKEND: ${RELEASEGATE_STORAGE_BACKEND:-postgres}
-      RELEASEGATE_POSTGRES_DSN: ${RELEASEGATE_POSTGRES_DSN:-postgresql://releasegate:releasegate@postgres:5432/releasegate}
+      RELEASEGATE_POSTGRES_DSN: ${RELEASEGATE_POSTGRES_DSN:-postgresql://releasegate:change-me-in-prod@postgres:5432/releasegate}
       RELEASEGATE_AUTO_MIGRATE: ${RELEASEGATE_AUTO_MIGRATE:-true}
       RELEASEGATE_JWT_ISSUER: ${RELEASEGATE_JWT_ISSUER:-releasegate}
       RELEASEGATE_JWT_AUDIENCE: ${RELEASEGATE_JWT_AUDIENCE:-releasegate-api}
