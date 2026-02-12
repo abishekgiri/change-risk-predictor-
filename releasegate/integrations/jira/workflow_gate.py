@@ -569,7 +569,9 @@ class WorkflowGate:
     def _compute_key(self, req: TransitionCheckRequest, tenant_id: Optional[str] = None) -> str:
         """SHA256(issue + transition + status_change + env + actor)"""
         request_id = (
-            req.context_overrides.get("transition_request_id")
+            req.context_overrides.get("delivery_id")
+            or req.context_overrides.get("webhook_delivery_id")
+            or req.context_overrides.get("transition_request_id")
             or req.context_overrides.get("idempotency_key")
             or ""
         )

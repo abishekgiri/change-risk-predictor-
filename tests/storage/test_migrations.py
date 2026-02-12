@@ -26,12 +26,16 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260212_007_tenant_composite_primary_keys" in migration_ids
         assert "20260212_008_security_auth_tables" in migration_ids
         assert "20260212_009_security_hardening" in migration_ids
+        assert "20260212_010_phase4_idempotency_and_hashes" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
         decision_cols = {row[1] for row in decision_info}
         decision_pk = [row[1] for row in sorted((r for r in decision_info if r[5] > 0), key=lambda r: r[5])]
         assert "tenant_id" in decision_cols
+        assert "input_hash" in decision_cols
+        assert "policy_hash" in decision_cols
+        assert "replay_hash" in decision_cols
         assert decision_pk == ["tenant_id", "decision_id"]
 
         cur.execute("PRAGMA table_info(audit_overrides)")
@@ -76,11 +80,16 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         webhook_keys_pk = [row[1] for row in sorted((r for r in webhook_keys_info if r[5] > 0), key=lambda r: r[5])]
         assert webhook_keys_pk == ["tenant_id", "integration_id", "key_id"]
 
+        cur.execute("PRAGMA table_info(idempotency_keys)")
+        idem_info = cur.fetchall()
+        idem_pk = [row[1] for row in sorted((r for r in idem_info if r[5] > 0), key=lambda r: r[5])]
+        assert idem_pk == ["tenant_id", "operation", "idem_key"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260212_009_security_hardening"
-        assert state[1] == "20260212_009_security_hardening"
+        assert state[0] == "20260212_010_phase4_idempotency_and_hashes"
+        assert state[1] == "20260212_010_phase4_idempotency_and_hashes"
     finally:
         conn.close()
 

@@ -30,6 +30,13 @@ from releasegate.security.api_keys import create_api_key, list_api_keys, revoke_
 from releasegate.security.checkpoint_keys import list_checkpoint_signing_keys, rotate_checkpoint_signing_key
 from releasegate.security.webhook_keys import create_webhook_key, list_webhook_keys
 from releasegate.security.types import AuthContext
+from releasegate.audit.idempotency import (
+    claim_idempotency,
+    complete_idempotency,
+    derive_system_idempotency_key,
+    wait_for_idempotency_response,
+)
+from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 
 # Load env vars
@@ -511,6 +518,39 @@ def _soc2_records(
     return records
 
 
+def _proof_pack_export_key(
+    *,
+    tenant_id: str,
+    decision_id: str,
+    output_format: str,
+    checkpoint_cadence: str,
+) -> str:
+    return derive_system_idempotency_key(
+        tenant_id=tenant_id,
+        operation="proof_pack_export",
+        identity={
+            "decision_id": decision_id,
+            "format": output_format.lower(),
+            "checkpoint_cadence": checkpoint_cadence.lower(),
+            "bundle_version": "audit_proof_v1",
+        },
+    )
+
+
+def _deterministic_zip_payload(entries: Dict[str, Any]) -> bytes:
+    memory = io.BytesIO()
+    with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        for filename in sorted(entries.keys()):
+            payload = entries[filename]
+            serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            info = zipfile.ZipInfo(filename=filename, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
+            zf.writestr(info, serialized.encode("utf-8"))
+    memory.seek(0)
+    return memory.getvalue()
+
+
 @app.get("/audit/export")
 def audit_export(
     repo: str,
@@ -708,6 +748,38 @@ def audit_proof_pack(
     from releasegate.audit.proof_packs import record_proof_pack_generation
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    export_key = _proof_pack_export_key(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        output_format=format,
+        checkpoint_cadence=checkpoint_cadence,
+    )
+    claim = claim_idempotency(
+        tenant_id=effective_tenant,
+        operation="proof_pack_export",
+        idem_key=export_key,
+        request_payload={
+            "decision_id": decision_id,
+            "format": format.lower(),
+            "checkpoint_cadence": checkpoint_cadence,
+        },
+    )
+    if format.lower() == "json" and claim.state == "replay" and claim.response is not None:
+        return claim.response
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=effective_tenant,
+            operation="proof_pack_export",
+            idem_key=export_key,
+        )
+        if replayed is not None and format.lower() == "json":
+            return replayed
+        if replayed is not None and format.lower() == "zip":
+            # Keep zip deterministic; we can regenerate bytes for the same export key.
+            pass
+        else:
+            raise HTTPException(status_code=409, detail="Proof pack export is already in progress")
+
     row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -762,15 +834,17 @@ def audit_proof_pack(
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
     }
+    export_checksum = sha256_json(bundle)
 
     if format.lower() == "json":
-        record_proof_pack_generation(
+        proof_pack_id = record_proof_pack_generation(
             decision_id=decision_id,
             output_format="json",
             bundle_version=bundle["bundle_version"],
             repo=repo,
             pr_number=pr_number,
             tenant_id=effective_tenant,
+            export_key=export_key,
         )
         log_security_event(
             tenant_id=effective_tenant,
@@ -781,27 +855,42 @@ def audit_proof_pack(
             target_id=decision_id,
             metadata={"format": "json"},
         )
-        return bundle
+        payload = {
+            **bundle,
+            "export_checksum": export_checksum,
+            "proof_pack_id": proof_pack_id,
+        }
+        complete_idempotency(
+            tenant_id=effective_tenant,
+            operation="proof_pack_export",
+            idem_key=export_key,
+            response_payload=payload,
+            resource_type="proof_pack",
+            resource_id=proof_pack_id,
+        )
+        return payload
     if format.lower() != "zip":
         raise HTTPException(status_code=400, detail="Unsupported format (expected json or zip)")
 
-    memory = io.BytesIO()
-    with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("bundle.json", json.dumps(bundle, indent=2, default=str))
-        zf.writestr("decision_snapshot.json", json.dumps(bundle["decision_snapshot"], indent=2, default=str))
-        zf.writestr("policy_snapshot.json", json.dumps(bundle["policy_snapshot"], indent=2, default=str))
-        zf.writestr("input_snapshot.json", json.dumps(bundle["input_snapshot"], indent=2, default=str))
-        zf.writestr("override_snapshot.json", json.dumps(bundle["override_snapshot"], indent=2, default=str))
-        zf.writestr("chain_proof.json", json.dumps(bundle["chain_proof"], indent=2, default=str))
-        zf.writestr("checkpoint_proof.json", json.dumps(bundle["checkpoint_proof"], indent=2, default=str))
-    memory.seek(0)
-    record_proof_pack_generation(
+    zip_bytes = _deterministic_zip_payload(
+        {
+            "bundle.json": bundle,
+            "chain_proof.json": bundle["chain_proof"],
+            "checkpoint_proof.json": bundle["checkpoint_proof"],
+            "decision_snapshot.json": bundle["decision_snapshot"],
+            "input_snapshot.json": bundle["input_snapshot"],
+            "override_snapshot.json": bundle["override_snapshot"],
+            "policy_snapshot.json": bundle["policy_snapshot"],
+        }
+    )
+    proof_pack_id = record_proof_pack_generation(
         decision_id=decision_id,
         output_format="zip",
         bundle_version=bundle["bundle_version"],
         repo=repo,
         pr_number=pr_number,
         tenant_id=effective_tenant,
+        export_key=export_key,
     )
     log_security_event(
         tenant_id=effective_tenant,
@@ -812,16 +901,29 @@ def audit_proof_pack(
         target_id=decision_id,
         metadata={"format": "zip"},
     )
+    complete_idempotency(
+        tenant_id=effective_tenant,
+        operation="proof_pack_export",
+        idem_key=export_key,
+        response_payload={"proof_pack_id": proof_pack_id, "export_checksum": export_checksum, "format": "zip"},
+        resource_type="proof_pack",
+        resource_id=proof_pack_id,
+    )
     return Response(
-        content=memory.getvalue(),
+        content=zip_bytes,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="proof-pack-{decision_id}.zip"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="proof-pack-{decision_id}.zip"',
+            "X-Export-Checksum": export_checksum,
+            "X-Export-Id": proof_pack_id,
+        },
     )
 
 
 @app.post("/audit/overrides")
 def create_manual_override(
     payload: ManualOverrideRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
@@ -829,9 +931,66 @@ def create_manual_override(
         rate_profile="default",
     ),
 ):
-    from releasegate.audit.overrides import record_override
+    from releasegate.audit.overrides import get_active_override, record_override
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    operation = "manual_override_create"
+    claim = claim_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idempotency_key,
+        request_payload={
+            **payload.model_dump(mode="json"),
+            "tenant_id": effective_tenant,
+        },
+    )
+    if claim.state == "replay" and claim.response is not None:
+        return claim.response
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idempotency_key,
+        )
+        if replayed is not None:
+            return replayed
+        raise HTTPException(status_code=409, detail="Override request is already in progress")
+
+    effective_target_type = payload.target_type or "pr"
+    effective_target_id = payload.target_id or (
+        f"{payload.repo}#{payload.pr_number}" if payload.pr_number is not None else payload.repo
+    )
+    existing = get_active_override(
+        tenant_id=effective_tenant,
+        target_type=effective_target_type,
+        target_id=effective_target_id,
+    )
+    if existing is not None:
+        same_payload = (
+            str(existing.get("reason") or "") == str(payload.reason or "")
+            and str(existing.get("actor") or "") == str(auth.principal_id or "")
+            and str(existing.get("decision_id") or "") == str(payload.decision_id or "")
+        )
+        if not same_payload:
+            raise HTTPException(
+                status_code=409,
+                detail="Active override already exists for this target",
+            )
+        response_payload = {
+            **existing,
+            "target_type": existing.get("target_type") or effective_target_type,
+            "target_id": existing.get("target_id") or effective_target_id,
+        }
+        complete_idempotency(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idempotency_key,
+            response_payload=response_payload,
+            resource_type="override",
+            resource_id=str(response_payload.get("override_id") or ""),
+        )
+        return response_payload
+
     override = record_override(
         repo=payload.repo,
         pr_number=payload.pr_number,
@@ -839,10 +998,10 @@ def create_manual_override(
         decision_id=payload.decision_id,
         actor=auth.principal_id,
         reason=payload.reason,
-        idempotency_key=payload.idempotency_key,
+        idempotency_key=idempotency_key,
         tenant_id=effective_tenant,
-        target_type=payload.target_type,
-        target_id=payload.target_id,
+        target_type=effective_target_type,
+        target_id=effective_target_id,
     )
     log_security_event(
         tenant_id=effective_tenant,
@@ -853,7 +1012,16 @@ def create_manual_override(
         target_id=payload.target_id or payload.repo,
         metadata={"repo": payload.repo, "pr_number": payload.pr_number, "decision_id": payload.decision_id},
     )
-    return override
+    response_payload = {**override, "idempotency_key": idempotency_key}
+    complete_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idempotency_key,
+        response_payload=response_payload,
+        resource_type="override",
+        resource_id=str(override.get("override_id") or ""),
+    )
+    return response_payload
 
 
 @app.post("/policy/publish")

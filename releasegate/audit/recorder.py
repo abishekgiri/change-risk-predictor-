@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime, timezone
 from typing import Optional
 
 from releasegate.audit.policy_bundles import store_policy_bundle
+from releasegate.decision.hashing import (
+    compute_decision_hash,
+    compute_input_hash,
+    compute_policy_hash_from_bindings,
+    compute_replay_hash,
+)
 from releasegate.decision.types import Decision
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
@@ -20,11 +25,30 @@ class AuditRecorder:
     ENGINE_VERSION = "0.2.0"
 
     @staticmethod
-    def _canonical_decision(decision: Decision) -> tuple[str, str]:
+    def _canonical_decision(decision: Decision) -> str:
         raw_dict = decision.model_dump(mode="json")
-        canonical_json = json.dumps(raw_dict, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        decision_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        return canonical_json, decision_hash
+        return json.dumps(raw_dict, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _attach_hashes(decision: Decision) -> None:
+        release_status = decision.release_status.value if hasattr(decision.release_status, "value") else str(decision.release_status)
+        if not decision.input_hash:
+            decision.input_hash = compute_input_hash(decision.input_snapshot)
+        if not decision.policy_hash:
+            decision.policy_hash = compute_policy_hash_from_bindings([b.model_dump(mode="json") for b in decision.policy_bindings])
+        if not decision.decision_hash:
+            decision.decision_hash = compute_decision_hash(
+                release_status=release_status,
+                reason_code=decision.reason_code,
+                policy_bundle_hash=decision.policy_bundle_hash,
+                inputs_present=decision.inputs_present,
+            )
+        if not decision.replay_hash:
+            decision.replay_hash = compute_replay_hash(
+                input_hash=decision.input_hash,
+                policy_hash=decision.policy_hash,
+                decision_hash=decision.decision_hash,
+            )
 
     @staticmethod
     def _persist_policy_snapshots(
@@ -81,7 +105,8 @@ class AuditRecorder:
             if not getattr(binding, "tenant_id", None):
                 binding.tenant_id = effective_tenant
 
-        canonical_json, decision_hash = AuditRecorder._canonical_decision(decision)
+        AuditRecorder._attach_hashes(decision)
+        canonical_json = AuditRecorder._canonical_decision(decision)
         created_at = decision.timestamp.astimezone(timezone.utc).isoformat()
 
         try:
@@ -90,8 +115,8 @@ class AuditRecorder:
                 INSERT INTO audit_decisions (
                     decision_id, tenant_id, context_id, repo, pr_number,
                     release_status, policy_bundle_hash, engine_version,
-                    decision_hash, full_decision_json, created_at, evaluation_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    decision_hash, input_hash, policy_hash, replay_hash, full_decision_json, created_at, evaluation_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.decision_id,
@@ -102,7 +127,10 @@ class AuditRecorder:
                     decision.release_status,
                     decision.policy_bundle_hash,
                     AuditRecorder.ENGINE_VERSION,
-                    decision_hash,
+                    decision.decision_hash,
+                    decision.input_hash,
+                    decision.policy_hash,
+                    decision.replay_hash,
                     canonical_json,
                     created_at,
                     decision.evaluation_key,

@@ -46,67 +46,72 @@ def record_override(
     effective_target_type = target_type or "pr"
     effective_target_id = target_id or (f"{repo}#{pr_number}" if pr_number is not None else repo)
     now = datetime.now(timezone.utc).isoformat()
-    prev_hash = _get_last_hash(repo=repo, tenant_id=effective_tenant) or ("0" * 64)
+    max_attempts = 3
+    for _attempt in range(max_attempts):
+        prev_hash = _get_last_hash(repo=repo, tenant_id=effective_tenant) or ("0" * 64)
+        payload = {
+            "tenant_id": effective_tenant,
+            "repo": repo,
+            "pr_number": pr_number,
+            "issue_key": issue_key,
+            "decision_id": decision_id,
+            "actor": actor,
+            "reason": reason,
+            "target_type": effective_target_type,
+            "target_id": effective_target_id,
+            "previous_hash": prev_hash,
+            "created_at": now,
+        }
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+        event_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        override_id = hashlib.sha256(f"{effective_tenant}:{repo}:{now}:{event_hash}".encode()).hexdigest()[:32]
 
-    payload = {
-        "tenant_id": effective_tenant,
-        "repo": repo,
-        "pr_number": pr_number,
-        "issue_key": issue_key,
-        "decision_id": decision_id,
-        "actor": actor,
-        "reason": reason,
-        "target_type": effective_target_type,
-        "target_id": effective_target_id,
-        "previous_hash": prev_hash,
-        "created_at": now,
-    }
-    if idempotency_key is not None:
-        payload["idempotency_key"] = idempotency_key
-    event_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-    override_id = hashlib.sha256(f"{effective_tenant}:{repo}:{now}:{event_hash}".encode()).hexdigest()[:32]
-
-    try:
-        storage.execute(
-            """
-            INSERT INTO audit_overrides (
-                override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                override_id,
-                effective_tenant,
-                decision_id,
-                repo,
-                pr_number,
-                issue_key,
-                actor,
-                reason,
-                effective_target_type,
-                effective_target_id,
-                idempotency_key,
-                prev_hash,
-                event_hash,
-                now,
-            ),
-        )
-        payload["override_id"] = override_id
-        payload["event_hash"] = event_hash
-        return payload
-    except Exception as exc:
-        lowered = str(exc).lower()
-        if idempotency_key and ("idempotency" in lowered or "unique" in lowered):
-            existing = storage.fetchone(
+        try:
+            storage.execute(
                 """
-                SELECT * FROM audit_overrides
-                WHERE tenant_id = ? AND idempotency_key = ?
-                LIMIT 1
+                INSERT INTO audit_overrides (
+                    override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (effective_tenant, idempotency_key),
+                (
+                    override_id,
+                    effective_tenant,
+                    decision_id,
+                    repo,
+                    pr_number,
+                    issue_key,
+                    actor,
+                    reason,
+                    effective_target_type,
+                    effective_target_id,
+                    idempotency_key,
+                    prev_hash,
+                    event_hash,
+                    now,
+                ),
             )
-            if existing:
-                return existing
-        raise
+            payload["override_id"] = override_id
+            payload["event_hash"] = event_hash
+            return payload
+        except Exception as exc:
+            lowered = str(exc).lower()
+            if idempotency_key and ("idempotency" in lowered or "unique" in lowered):
+                existing = storage.fetchone(
+                    """
+                    SELECT * FROM audit_overrides
+                    WHERE tenant_id = ? AND idempotency_key = ?
+                    LIMIT 1
+                    """,
+                    (effective_tenant, idempotency_key),
+                )
+                if existing:
+                    return existing
+            # Parallel append race: another writer advanced the chain tip first.
+            if "previous_hash" in lowered and "unique" in lowered:
+                continue
+            raise
+    raise RuntimeError("Unable to append override after retries due to concurrent ledger updates")
 
 
 def list_overrides(

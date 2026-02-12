@@ -51,6 +51,9 @@ def _init_postgres_schema() -> str:
             policy_bundle_hash TEXT NOT NULL,
             engine_version TEXT NOT NULL,
             decision_hash TEXT NOT NULL,
+            input_hash TEXT,
+            policy_hash TEXT,
+            replay_hash TEXT,
             full_decision_json TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL,
             evaluation_key TEXT,
@@ -107,6 +110,12 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_overrides_tenant_target_created
         ON audit_overrides(tenant_id, target_type, target_id, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
+        ON audit_overrides(tenant_id, repo, previous_hash)
         """
     )
     cur.execute(
@@ -350,6 +359,36 @@ def _init_postgres_schema() -> str:
         ON checkpoint_signing_keys(tenant_id, is_active, created_at)
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            tenant_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            idem_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response_json JSONB,
+            resource_type TEXT,
+            resource_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, operation, idem_key)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_idempotency_keys_tenant_operation_created
+        ON idempotency_keys(tenant_id, operation, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at
+        ON idempotency_keys(expires_at)
+        """
+    )
     # Ensure existing Postgres deployments are hardened to tenant-scoped PKs.
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS tenant_id TEXT")
@@ -363,6 +402,9 @@ def _init_postgres_schema() -> str:
     cur.execute("ALTER TABLE audit_overrides ALTER COLUMN tenant_id SET NOT NULL")
     cur.execute("ALTER TABLE audit_checkpoints ALTER COLUMN tenant_id SET NOT NULL")
     cur.execute("ALTER TABLE audit_proof_packs ALTER COLUMN tenant_id SET NOT NULL")
+    cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS input_hash TEXT")
+    cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS policy_hash TEXT")
+    cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS replay_hash TEXT")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_algorithm TEXT")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_iterations INTEGER")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_salt TEXT")
@@ -399,6 +441,12 @@ def _init_postgres_schema() -> str:
             WHEN duplicate_table THEN NULL;
             WHEN duplicate_object THEN NULL;
         END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
+        ON audit_overrides(tenant_id, repo, previous_hash)
         """
     )
     cur.execute(
@@ -664,6 +712,9 @@ def init_db() -> str:
             policy_bundle_hash TEXT NOT NULL,
             engine_version TEXT NOT NULL,
             decision_hash TEXT NOT NULL,
+            input_hash TEXT,
+            policy_hash TEXT,
+            replay_hash TEXT,
             full_decision_json TEXT NOT NULL,
             created_at TIMESTAMP NOT NULL,
             evaluation_key TEXT,
@@ -840,6 +891,24 @@ def init_db() -> str:
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            tenant_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            idem_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response_json TEXT,
+            resource_type TEXT,
+            resource_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, operation, idem_key)
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS checkpoint_signing_keys (
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
@@ -866,6 +935,7 @@ def init_db() -> str:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_overrides_tenant_target_created ON audit_overrides(tenant_id, target_type, target_id, created_at)")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_tenant_idempotency_key ON audit_overrides(tenant_id, idempotency_key)")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_tenant_override ON audit_overrides(tenant_id, override_id)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev ON audit_overrides(tenant_id, repo, previous_hash)")
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_policy_snapshots_tenant_decision ON policy_snapshots(tenant_id, decision_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_policy_bundles_tenant_active_created ON policy_bundles(tenant_id, is_active, created_at)")
@@ -895,6 +965,10 @@ def init_db() -> str:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_events_tenant_action_created ON security_audit_events(tenant_id, action, created_at)"
     )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_idempotency_keys_tenant_operation_created ON idempotency_keys(tenant_id, operation, created_at)"
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at ON idempotency_keys(expires_at)")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created ON checkpoint_signing_keys(tenant_id, is_active, created_at)"
     )
