@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting ComplianceBot SaaS MVP..."
+echo "🚀 Starting ReleaseGate SaaS MVP..."
 
 # 1. Install Dependencies
 echo "Installing Python dependencies..."

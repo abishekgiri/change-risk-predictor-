@@ -6,9 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Prevent Python from buffering stdout and stderr
 ENV PYTHONUNBUFFERED=1
 
-# Create a non-root user (UID 1000) named 'compliancebot'
-RUN groupadd -g 1000 compliancebot && \
-    useradd -m -u 1000 -g compliancebot compliancebot
+# Create a non-root user (UID 1000) named 'releasegate'
+RUN groupadd -g 1000 releasegate && \
+    useradd -m -u 1000 -g releasegate releasegate
 
 # Set working directory to /app for installation
 WORKDIR /app
@@ -23,7 +23,7 @@ COPY requirements.txt pyproject.toml /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY compliancebot /app/compliancebot
+COPY releasegate /app/releasegate
 COPY README.md LICENSE /app/
 
 # Install the package
@@ -33,10 +33,10 @@ RUN pip install --no-cache-dir .
 WORKDIR /workspace
 
 # Switch to non-root user
-USER compliancebot
+USER releasegate
 
 # Define entrypoint
-ENTRYPOINT ["compliancebot"]
+ENTRYPOINT ["releasegate"]
 
 # Default command
 CMD ["--help"]

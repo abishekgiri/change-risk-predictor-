@@ -12,7 +12,7 @@ from releasegate.config import DB_PATH
 from releasegate.storage.sqlite import add_label
 from releasegate.model.train import train as train_model
 
-st.set_page_config(page_title="ComplianceBot Dashboard", page_icon=None, layout="wide")
+st.set_page_config(page_title="ReleaseGate Dashboard", page_icon=None, layout="wide")
 
 # --- Helper Functions ---
 def get_db_connection():
@@ -69,7 +69,7 @@ if selected_repo != "All":
     df = df[df['repo'] == selected_repo]
 
 # --- Main Dashboard ---
-st.title("ComplianceBot Dashboard")
+st.title("ReleaseGate Dashboard")
 
 # 1. KPI Cards
 total_prs = len(df)

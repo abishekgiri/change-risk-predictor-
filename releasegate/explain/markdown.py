@@ -20,12 +20,12 @@ def render(report: ExplanationReport) -> str:
         prob = int(report.get("risk_prob", 0) * 100)
         level = report["risk_level"]
         decision = report["decision"]
-        header = f"**ComplianceBot: {level}** — {score}/100 ({prob}%) — **{decision}**"
+        header = f"**ReleaseGate: {level}** — {score}/100 ({prob}%) — **{decision}**"
     else:
         # Phase 2 format
         control_result = report.get("control_result", "UNKNOWN")
         severity = report.get("severity", "UNKNOWN")
-        header = f"**ComplianceBot: {severity}** — **{control_result}**"
+        header = f"**ReleaseGate: {severity}** — **{control_result}**"
     
     lines.append(header)
     lines.append("")
@@ -99,4 +99,3 @@ def _severity_emoji(severity: str) -> str:
         return "🟡"
     else:
         return "🟢"
-

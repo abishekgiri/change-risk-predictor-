@@ -1,5 +1,5 @@
-name: 'ComplianceBot Change Risk Analyzer'
-description: 'Automated Change Risk Scoring & Compliance Enforcement for Pull Requests'
+name: 'ReleaseGate Change Risk Analyzer'
+description: 'Automated change-risk scoring and enforcement for pull requests'
 author: 'Abishek Giri'
 
 branding:
@@ -26,11 +26,11 @@ inputs:
   config:
     description: 'Path to custom configuration file'
     required: false
-    default: 'compliancebot.yaml'
+    default: 'releasegate.yaml'
 
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/abishekgiri/compliancebot:v1'
+  image: 'Dockerfile'
   args:
     - 'analyze-pr'
     - '--repo'
@@ -42,4 +42,5 @@ runs:
 
   env:
     GITHUB_TOKEN: ${{ inputs.token }}
+    RELEASEGATE_ENFORCEMENT: ${{ inputs.mode }}
     COMPLIANCEBOT_ENFORCEMENT: ${{ inputs.mode }}

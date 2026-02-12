@@ -27,7 +27,7 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
         # Check Commit Status API
         repo.get_commit(commit_sha).create_status(
             state="pending",
-            context="ComplianceBot/SaaS",
+            context="ReleaseGate/SaaS",
             description="Analysis in progress..."
         )
         
@@ -48,7 +48,8 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
             ]
             
             env = os.environ.copy()
-            env["COMPLIANCEBOT_ENFORCEMENT"] = "report_only" 
+            env["RELEASEGATE_ENFORCEMENT"] = "report_only"
+            env["COMPLIANCEBOT_ENFORCEMENT"] = "report_only"
             
             proc = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True, env=env)
             
@@ -104,7 +105,7 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
             # 5. Report Final Status
             repo.get_commit(commit_sha).create_status(
                 state=state,
-                context="ComplianceBot/SaaS",
+                context="ReleaseGate/SaaS",
                 description=description
             )
             

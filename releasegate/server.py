@@ -93,7 +93,7 @@ configure_logging()
 
 # Initialize App
 app = FastAPI(
-    title="ComplianceBot Webhook Listener",
+    title="ReleaseGate Webhook Listener",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -232,7 +232,7 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
     }
 
     conclusion = "failure" if risk_level == "HIGH" else "success"
-    title = f"ComplianceBot CI: {risk_level} severity (Score: {score})"
+    title = f"ReleaseGate CI: {risk_level} severity (Score: {score})"
 
     summary = "Risk analysis completed.\n\n### Reasons\n" + \
         "\n".join(f"- {r}" for r in reasons)
@@ -241,7 +241,7 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
         summary += "\n\n### Evidence\n" + "\n".join(f"- {e}" for e in evidence)
 
     payload = {
-        "name": "ComplianceBot CI",
+        "name": "ReleaseGate CI",
         "head_sha": head_sha,
         "status": "completed",
         "conclusion": conclusion,
