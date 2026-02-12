@@ -1,9 +1,13 @@
-from typing import Dict, Any, List
+import os
+from typing import Dict, Any, List, Tuple
 from releasegate.policy.policy_types import Policy
 from releasegate.policy.loader import PolicyLoader
 from releasegate.enforcement.core_risk import CoreRiskControl
 from releasegate.enforcement.registry import ControlRegistry
 from releasegate.enforcement.types import ControlContext
+from releasegate.observability.internal_metrics import incr
+from releasegate.storage.base import resolve_tenant_id
+from releasegate.utils.ttl_cache import TTLCache, yaml_tree_fingerprint
 from releasegate.engine_core import (
     ComplianceRunResult,
     PolicyResult,
@@ -13,14 +17,29 @@ from releasegate.engine_core import (
     flatten_signals,
 )
 
+
+def _policy_cache_ttl_seconds() -> float:
+    try:
+        return float(os.getenv("RELEASEGATE_POLICY_REGISTRY_CACHE_TTL_SECONDS", "300"))
+    except Exception:
+        return 300.0
+
+
+_POLICY_CACHE = TTLCache(
+    max_entries=max(1, int(os.getenv("RELEASEGATE_POLICY_REGISTRY_CACHE_MAX_ENTRIES", "256"))),
+    default_ttl_seconds=max(1.0, _policy_cache_ttl_seconds()),
+)
+
 class ComplianceEngine:
     """
     Deterministic Policy Evaluation Engine.
     """
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled")
-        self.policies = self.loader.load_all()
+        self.policy_dir = str(config.get("policy_dir") or "releasegate/policy/compiled")
+        self.tenant_id = resolve_tenant_id(config.get("tenant_id"), allow_none=True) or "system"
+        self.loader = PolicyLoader(policy_dir=self.policy_dir, schema="compiled")
+        self.policies = self._load_compiled_policies()
         self.policy_hash = self._compute_policy_hash(self.policies)
         
         # Instantiate Controls
@@ -28,6 +47,26 @@ class ComplianceEngine:
         
         # Phase 3: Control Registry (all 5 controls)
         self.control_registry = ControlRegistry(config)
+
+    def _policy_cache_key(self) -> Tuple[str, str, str]:
+        return (
+            self.tenant_id,
+            os.path.abspath(self.policy_dir),
+            yaml_tree_fingerprint(self.policy_dir),
+        )
+
+    def _load_compiled_policies(self) -> List[Policy]:
+        cache_key = self._policy_cache_key()
+        hit, cached = _POLICY_CACHE.get(cache_key)
+        if hit:
+            incr("cache_policy_registry_hit", tenant_id=self.tenant_id)
+            return list(cached)
+
+        incr("cache_policy_registry_miss", tenant_id=self.tenant_id)
+        loaded = self.loader.load_all()
+        policies = [policy for policy in loaded if isinstance(policy, Policy)]
+        _POLICY_CACHE.set(cache_key, tuple(policies), ttl_seconds=_policy_cache_ttl_seconds())
+        return policies
 
     def evaluate(self, raw_signals: Dict[str, Any]) -> ComplianceRunResult:
         # 1. Gather Control Signals from Core Risk (Phase 2)

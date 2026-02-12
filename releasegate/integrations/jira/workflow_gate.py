@@ -22,9 +22,48 @@ from releasegate.policy.policy_types import Policy
 from releasegate.observability.internal_metrics import incr
 from releasegate.security.audit import log_security_event
 from releasegate.storage.base import resolve_tenant_id
+from releasegate.utils.ttl_cache import TTLCache, file_fingerprint, stable_tuple, yaml_tree_fingerprint
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+_TRANSITION_MAP_CACHE = TTLCache(
+    max_entries=max(1, _env_int("RELEASEGATE_TRANSITION_MAP_CACHE_MAX_ENTRIES", 256)),
+    default_ttl_seconds=max(1.0, _env_float("RELEASEGATE_TRANSITION_MAP_CACHE_TTL_SECONDS", 300.0)),
+)
+_ROLE_MAP_CACHE = TTLCache(
+    max_entries=max(1, _env_int("RELEASEGATE_ROLE_MAP_CACHE_MAX_ENTRIES", 256)),
+    default_ttl_seconds=max(1.0, _env_float("RELEASEGATE_ROLE_MAP_CACHE_TTL_SECONDS", 300.0)),
+)
+_ROLE_RESOLUTION_CACHE = TTLCache(
+    max_entries=max(1, _env_int("RELEASEGATE_ROLE_RESOLUTION_CACHE_MAX_ENTRIES", 2048)),
+    default_ttl_seconds=max(1.0, _env_float("RELEASEGATE_ROLE_RESOLUTION_CACHE_TTL_SECONDS", 180.0)),
+)
+_POLICY_REGISTRY_CACHE = TTLCache(
+    max_entries=max(1, _env_int("RELEASEGATE_POLICY_REGISTRY_CACHE_MAX_ENTRIES", 256)),
+    default_ttl_seconds=max(1.0, _env_float("RELEASEGATE_POLICY_REGISTRY_CACHE_TTL_SECONDS", 300.0)),
+)
 
 class WorkflowGate:
     def __init__(self):
@@ -35,10 +74,12 @@ class WorkflowGate:
         self.dependency_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_DEP_TIMEOUT_SECONDS", "5"))
         self.storage_timeout_seconds = float(os.getenv("RELEASEGATE_STORAGE_TIMEOUT_SECONDS", "3"))
         self.policy_timeout_seconds = float(os.getenv("RELEASEGATE_POLICY_REGISTRY_TIMEOUT_SECONDS", "3"))
-        self._transition_map_cache: Optional[JiraTransitionMap] = None
-        self._role_map_cache: Optional[JiraRoleMap] = None
+        self.transition_map_cache_ttl_seconds = _env_float("RELEASEGATE_TRANSITION_MAP_CACHE_TTL_SECONDS", 300.0)
+        self.role_map_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_MAP_CACHE_TTL_SECONDS", 300.0)
+        self.role_resolution_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_RESOLUTION_CACHE_TTL_SECONDS", 180.0)
+        self.policy_registry_cache_ttl_seconds = _env_float("RELEASEGATE_POLICY_REGISTRY_CACHE_TTL_SECONDS", 300.0)
+        self._active_tenant_id: Optional[str] = None
         self._policy_hash_cache: Optional[str] = None
-        self._compiled_policy_cache: Optional[Dict[str, Policy]] = None
         self._resolved_mode_hint: Optional[str] = None
         self._resolved_gate_hint: Optional[str] = None
         self._unresolved_gate_hint: Optional[str] = None
@@ -49,6 +90,8 @@ class WorkflowGate:
         Enforces idempotency, audit-on-error, and policy gates.
         """
         tenant_id = self._tenant_id(request)
+        self._active_tenant_id = tenant_id
+        self._policy_hash_cache = None
         evaluation_key = self._compute_key(request, tenant_id=tenant_id)
         repo, pr_number = self._repo_and_pr(request)
         strict_mode = self.strict_mode
@@ -818,12 +861,19 @@ class WorkflowGate:
     def _tenant_id(self, req: TransitionCheckRequest) -> str:
         return resolve_tenant_id(req.tenant_id or req.context_overrides.get("tenant_id"))
 
+    def _cache_tenant(self, tenant_id: Optional[str] = None) -> str:
+        return resolve_tenant_id(tenant_id or self._active_tenant_id, allow_none=True) or "system"
+
+    def _role_map_hash(self, role_map: JiraRoleMap) -> str:
+        payload = json.dumps(role_map.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _build_context(self, req: TransitionCheckRequest):
         """Construct the EvaluationContext from Jira request + Jira API data."""
         from releasegate.context.types import EvaluationContext, Actor, Change, Timing
         
         # 1. Resolve Role
-        role = self._resolve_role(req)
+        role = self._resolve_role(req, tenant_id=self._tenant_id(req))
         
         # 2. Extract PR (Change Context)
         repo = req.context_overrides.get("repo", "unknown/repo")
@@ -876,7 +926,8 @@ class WorkflowGate:
 
     def _resolve_policies(self, req: TransitionCheckRequest) -> List[str]:
         """Resolve policy IDs from Jira transition mapping config."""
-        transition_map = self._load_transition_map()
+        effective_tenant = self._tenant_id(req)
+        transition_map = self._load_transition_map(tenant_id=effective_tenant)
         if not transition_map:
             return []
 
@@ -917,7 +968,7 @@ class WorkflowGate:
         self._resolved_mode_hint = matched_rule.mode
         self._resolved_gate_hint = matched_rule.gate
 
-        known_policy_ids = list(self._compiled_policy_map().keys())
+        known_policy_ids = list(self._compiled_policy_map(tenant_id=effective_tenant).keys())
         resolved_policy_ids, gate_error = resolve_gate_policy_ids(
             transition_map=transition_map,
             gate_name=matched_rule.gate,
@@ -936,12 +987,21 @@ class WorkflowGate:
             deduped.append(policy_id)
         return deduped
 
-    def _load_transition_map(self) -> Optional[JiraTransitionMap]:
-        if self._transition_map_cache is not None:
-            return self._transition_map_cache
+    def _load_transition_map(self, tenant_id: Optional[str] = None) -> Optional[JiraTransitionMap]:
+        effective_tenant = self._cache_tenant(tenant_id)
+        cache_key = (
+            effective_tenant,
+            os.path.abspath(self.policy_map_path),
+            file_fingerprint(self.policy_map_path),
+        )
+        hit, cached = _TRANSITION_MAP_CACHE.get(cache_key)
+        if hit:
+            incr("cache_transition_map_hit", tenant_id=effective_tenant)
+            return cached
+        incr("cache_transition_map_miss", tenant_id=effective_tenant)
 
         try:
-            self._transition_map_cache = self._call_with_timeout(
+            loaded = self._call_with_timeout(
                 "policy_registry",
                 load_transition_map,
                 self.policy_timeout_seconds,
@@ -953,7 +1013,7 @@ class WorkflowGate:
             self._log_event(
                 "warning",
                 event="jira.transition.config.transition_map_missing",
-                tenant_id=resolve_tenant_id(allow_none=True) or "unknown",
+                tenant_id=effective_tenant,
                 decision_id="pending",
                 request_id="n/a",
                 issue_key="n/a",
@@ -971,7 +1031,7 @@ class WorkflowGate:
             self._log_event(
                 "warning",
                 event="jira.transition.config.transition_map_invalid",
-                tenant_id=resolve_tenant_id(allow_none=True) or "unknown",
+                tenant_id=effective_tenant,
                 decision_id="pending",
                 request_id="n/a",
                 issue_key="n/a",
@@ -986,13 +1046,27 @@ class WorkflowGate:
                 error=str(exc),
             )
             return None
-        return self._transition_map_cache
+        _TRANSITION_MAP_CACHE.set(
+            cache_key,
+            loaded,
+            ttl_seconds=max(1.0, self.transition_map_cache_ttl_seconds),
+        )
+        return loaded
 
-    def _load_role_map(self) -> Optional[JiraRoleMap]:
-        if self._role_map_cache is not None:
-            return self._role_map_cache
+    def _load_role_map(self, tenant_id: Optional[str] = None) -> Optional[JiraRoleMap]:
+        effective_tenant = self._cache_tenant(tenant_id)
+        cache_key = (
+            effective_tenant,
+            os.path.abspath(self.role_map_path),
+            file_fingerprint(self.role_map_path),
+        )
+        hit, cached = _ROLE_MAP_CACHE.get(cache_key)
+        if hit:
+            incr("cache_role_map_hit", tenant_id=effective_tenant)
+            return cached
+        incr("cache_role_map_miss", tenant_id=effective_tenant)
         try:
-            self._role_map_cache = self._call_with_timeout(
+            loaded = self._call_with_timeout(
                 "policy_registry",
                 load_role_map,
                 self.policy_timeout_seconds,
@@ -1004,7 +1078,7 @@ class WorkflowGate:
             self._log_event(
                 "warning",
                 event="jira.transition.config.role_map_missing",
-                tenant_id=resolve_tenant_id(allow_none=True) or "unknown",
+                tenant_id=effective_tenant,
                 decision_id="pending",
                 request_id="n/a",
                 issue_key="n/a",
@@ -1022,7 +1096,7 @@ class WorkflowGate:
             self._log_event(
                 "warning",
                 event="jira.transition.config.role_map_invalid",
-                tenant_id=resolve_tenant_id(allow_none=True) or "unknown",
+                tenant_id=effective_tenant,
                 decision_id="pending",
                 request_id="n/a",
                 issue_key="n/a",
@@ -1037,7 +1111,12 @@ class WorkflowGate:
                 error=str(exc),
             )
             return None
-        return self._role_map_cache
+        _ROLE_MAP_CACHE.set(
+            cache_key,
+            loaded,
+            ttl_seconds=max(1.0, self.role_map_cache_ttl_seconds),
+        )
+        return loaded
 
     def _effective_strict_mode(self, mode_hint: Optional[str], *, default: bool) -> bool:
         if mode_hint == "strict":
@@ -1046,48 +1125,79 @@ class WorkflowGate:
             return False
         return default
 
-    def _resolve_role(self, req: TransitionCheckRequest) -> str:
+    def _resolve_role(self, req: TransitionCheckRequest, tenant_id: Optional[str] = None) -> str:
         """
         Resolve ReleaseGate role from context overrides + Jira role map.
         Returns one of admin/operator/auditor/read_only.
         """
-        role_map = self._load_role_map()
+        effective_tenant = self._cache_tenant(tenant_id or req.tenant_id or req.context_overrides.get("tenant_id"))
+        role_map = self._load_role_map(tenant_id=effective_tenant)
         if not role_map:
             return "read_only"
 
-        actor_groups = {str(g).strip().lower() for g in (req.context_overrides.get("jira_groups") or []) if str(g).strip()}
-        actor_project_roles = {
-            str(r).strip().lower()
-            for r in (req.context_overrides.get("jira_project_roles") or [])
-            if str(r).strip()
-        }
+        actor_groups = stable_tuple(req.context_overrides.get("jira_groups") or [])
+        actor_project_roles = stable_tuple(req.context_overrides.get("jira_project_roles") or [])
+        principal_id = str(req.actor_account_id or req.actor_email or "unknown").strip().lower()
+        role_map_hash = self._role_map_hash(role_map)
+        resolution_key = (
+            effective_tenant,
+            role_map_hash,
+            principal_id,
+            actor_groups,
+            actor_project_roles,
+        )
+        hit, cached = _ROLE_RESOLUTION_CACHE.get(resolution_key)
+        if hit:
+            incr("cache_role_resolution_hit", tenant_id=effective_tenant)
+            return str(cached)
+        incr("cache_role_resolution_miss", tenant_id=effective_tenant)
 
+        actor_groups_set = {group.lower() for group in actor_groups}
+        actor_project_roles_set = {role.lower() for role in actor_project_roles}
+
+        resolved_role = "read_only"
         for role_name in ["admin", "operator", "auditor", "read_only"]:
             resolver = role_map.roles.get(role_name)
             if resolver is None:
                 continue
             expected_groups = {group.lower() for group in resolver.jira_groups}
             expected_project_roles = {project_role.lower() for project_role in resolver.jira_project_roles}
-            if actor_groups.intersection(expected_groups) or actor_project_roles.intersection(expected_project_roles):
-                return role_name
+            if actor_groups_set.intersection(expected_groups) or actor_project_roles_set.intersection(expected_project_roles):
+                resolved_role = role_name
+                break
 
-        return "read_only"
+        _ROLE_RESOLUTION_CACHE.set(
+            resolution_key,
+            resolved_role,
+            ttl_seconds=max(1.0, self.role_resolution_cache_ttl_seconds),
+        )
+        return resolved_role
 
-    def _current_policy_hash(self) -> str:
+    def _current_policy_hash(self, tenant_id: Optional[str] = None) -> str:
         if self._policy_hash_cache:
             return self._policy_hash_cache
 
-        compiled_map = self._compiled_policy_map()
-        default_tenant = resolve_tenant_id(allow_none=True) or "system"
-        bindings = self._build_policy_bindings(sorted(compiled_map.keys()), compiled_map, tenant_id=default_tenant)
+        effective_tenant = self._cache_tenant(tenant_id)
+        compiled_map = self._compiled_policy_map(tenant_id=effective_tenant)
+        bindings = self._build_policy_bindings(sorted(compiled_map.keys()), compiled_map, tenant_id=effective_tenant)
         self._policy_hash_cache = self._policy_bindings_hash(bindings)
         return self._policy_hash_cache
 
-    def _compiled_policy_map(self) -> Dict[str, Policy]:
-        if self._compiled_policy_cache is not None:
-            return self._compiled_policy_cache
+    def _compiled_policy_map(self, tenant_id: Optional[str] = None) -> Dict[str, Policy]:
+        effective_tenant = self._cache_tenant(tenant_id)
+        policy_dir = "releasegate/policy/compiled"
+        cache_key = (
+            effective_tenant,
+            os.path.abspath(policy_dir),
+            yaml_tree_fingerprint(policy_dir),
+        )
+        hit, cached = _POLICY_REGISTRY_CACHE.get(cache_key)
+        if hit:
+            incr("cache_policy_registry_hit", tenant_id=effective_tenant)
+            return dict(cached)
+        incr("cache_policy_registry_miss", tenant_id=effective_tenant)
 
-        loader = PolicyLoader(policy_dir="releasegate/policy/compiled", schema="compiled", strict=False)
+        loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=False)
         policies = self._call_with_timeout(
             "policy_registry",
             loader.load_all,
@@ -1098,7 +1208,11 @@ class WorkflowGate:
         for policy in policies:
             if isinstance(policy, Policy):
                 compiled[policy.policy_id] = policy
-        self._compiled_policy_cache = compiled
+        _POLICY_REGISTRY_CACHE.set(
+            cache_key,
+            dict(compiled),
+            ttl_seconds=max(1.0, self.policy_registry_cache_ttl_seconds),
+        )
         return compiled
 
     def _policy_hash_for_dict(self, policy_dict: Dict[str, Any]) -> str:

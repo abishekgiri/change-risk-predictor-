@@ -64,6 +64,7 @@ tmp/
 temp/
 *.tmp
 *.temp
+tests/perf/results/
 
 # Editor / OS Files
 .DS_Store
