@@ -8,9 +8,9 @@ LABEL_COLORS = {
 }
 
 LABEL_DESCRIPTIONS = {
-    "P0": "RiskBot review priority: Immediate (high risk)",
-    "P1": "RiskBot review priority: Normal",
-    "P2": "RiskBot review priority: Low (safe to skim)"
+    "P0": "ReleaseGate review priority: Immediate (high risk)",
+    "P1": "ReleaseGate review priority: Normal",
+    "P2": "ReleaseGate review priority: Low (safe to skim)"
 }
 
 def sync_labels(

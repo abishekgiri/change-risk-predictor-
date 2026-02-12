@@ -71,7 +71,7 @@ def test_markdown_determinism():
  md_output = markdown.render(report)
  
  # Expected snapshot (golden output)
- expected = """**ComplianceBot: HIGH** — 82/100 (76%) — **FAIL**
+ expected = """**ReleaseGate: HIGH** — 82/100 (76%) — **FAIL**
 
 ### Top Risk Contributors
 

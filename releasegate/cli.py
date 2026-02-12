@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_p.add_argument("--repo", required=True, help="Repository name (owner/repo)")
     analyze_p.add_argument("--pr", required=True, help="PR number")
     analyze_p.add_argument("--token", help="GitHub token (optional, else uses GITHUB_TOKEN env)")
-    analyze_p.add_argument("--config", default="compliancebot.yaml", help="Path to config yaml")
+    analyze_p.add_argument("--config", default="releasegate.yaml", help="Path to config yaml")
     analyze_p.add_argument("--output", help="Write JSON result to file")
     analyze_p.add_argument("--format", default="json", choices=["json", "text"])
     analyze_p.add_argument("--post-comment", action="store_true", help="Post PR comment")
@@ -280,7 +280,7 @@ def main() -> int:
                 print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
 
         # Enforcement mode
-        mode = os.getenv("COMPLIANCEBOT_ENFORCEMENT", "report_only")
+        mode = os.getenv("RELEASEGATE_ENFORCEMENT", os.getenv("COMPLIANCEBOT_ENFORCEMENT", "report_only"))
         if mode == "block" and decision == "BLOCK":
             return 1
         return 0

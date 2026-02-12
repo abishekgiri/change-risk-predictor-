@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from releasegate.engine import ComplianceEngine
 
 def demo_risk_scoring():
-    print(" ComplianceBot V2: Scoring & Calibration Demo")
+    print(" ReleaseGate V2: Scoring & Calibration Demo")
     print("==============================================")
 
     # Mock Config

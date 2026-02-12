@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# ComplianceBot Doctor - Diagnostic Script
+# ReleaseGate Doctor - Diagnostic Script
 
 echo "========================================"
-echo " ComplianceBot Doctor"
+echo " ReleaseGate Doctor"
 echo "========================================"
 
 # 1. Check Token
@@ -48,9 +48,9 @@ else
  echo "[OK] Rate Limit OK. Remaining: $REMAINING"
 fi
 
-# 4. Check ComplianceBot CLI
+# 4. Check ReleaseGate CLI
 echo ""
-echo "[4] Checking ComplianceBot CLI..."
+echo "[4] Checking ReleaseGate CLI..."
 if command -v releasegate &> /dev/null; then
   echo "[OK] 'releasegate' command found."
 else

@@ -8,6 +8,8 @@ ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g.,
 [![Version](https://img.shields.io/badge/version-v2.0.0--policy--control--plane-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.0.0-policy-control-plane)
 [![Tests](https://img.shields.io/badge/tests-98%20passing-success.svg)](#development)
 
+See also: [Contributing](CONTRIBUTING.md), [Security Policy](SECURITY.md), [Changelog](CHANGELOG.md).
+
 ---
 
 ## Why ReleaseGate Exists
@@ -286,12 +288,15 @@ change-risk-predictor/
 │   ├── seed_phase9_db.py
 │   └── verify_phase*.py
 │
-├── docs/                           # Documentation
+├── docs/                           # Current source-of-truth docs
 │   ├── architecture.md
-│   ├── security_and_roles.md
-│   ├── user_guide.md
-│   ├── demo-flow.md
-│   └── phases/                     # Phase documentation
+│   ├── decision-model.md
+│   ├── policy-dsl.md
+│   ├── security.md
+│   ├── jira-config.md
+│   ├── forge-hardening.md
+│   ├── contracts/
+│   └── legacy/                     # Superseded/historical docs
 │
 ├── .github/workflows/              # CI/CD
 │   └── compliance-check.yml        # Policy lint enforcement

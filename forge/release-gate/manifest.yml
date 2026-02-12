@@ -2,7 +2,7 @@ modules:
 
   jira:workflowValidator:
     - key: release-gate-transition-validator
-      name: Release Gate Validator
+      name: ReleaseGate Validator
       description: Blocks workflow transitions based on risk + policy.
       function: validateTransition
 
