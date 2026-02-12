@@ -1,9 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
+from releasegate.audit.idempotency import (
+    claim_idempotency,
+    complete_idempotency,
+    derive_system_idempotency_key,
+    wait_for_idempotency_response,
+)
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
 from releasegate.integrations.jira.client import JiraClient
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
 from releasegate.security.auth import require_access
+from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
 
 router = APIRouter()
@@ -11,6 +18,11 @@ router = APIRouter()
 @router.post("/transition/check", response_model=TransitionCheckResponse)
 async def check_transition(
     request: TransitionCheckRequest,
+    x_idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_atlassian_webhook_identifier: str | None = Header(default=None, alias="X-Atlassian-Webhook-Identifier"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    x_github_delivery: str | None = Header(default=None, alias="X-GitHub-Delivery"),
+    x_webhook_delivery: str | None = Header(default=None, alias="X-Webhook-Delivery"),
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
         scopes=["enforcement:write"],
@@ -23,8 +35,86 @@ async def check_transition(
     Returns:
       200 OK with allow=true/false
     """
+    tenant_id = resolve_tenant_id(request.tenant_id or auth.tenant_id or request.context_overrides.get("tenant_id"))
+    request.tenant_id = tenant_id
+
+    delivery_id = (
+        x_atlassian_webhook_identifier
+        or x_request_id
+        or x_github_delivery
+        or x_webhook_delivery
+        or request.context_overrides.get("delivery_id")
+    )
+    operation = "jira_transition_check"
+    idem_key = (
+        x_idempotency_key
+        or request.context_overrides.get("idempotency_key")
+        or (
+            derive_system_idempotency_key(
+                tenant_id=tenant_id,
+                operation=operation,
+                identity={
+                    "integration_id": auth.integration_id or "jira",
+                    "delivery_id": delivery_id,
+                },
+            )
+            if delivery_id
+            else derive_system_idempotency_key(
+                tenant_id=tenant_id,
+                operation=operation,
+                identity={
+                    "integration_id": auth.integration_id or "jira",
+                    "issue_key": request.issue_key,
+                    "transition_id": request.transition_id,
+                    "source_status": request.source_status,
+                    "target_status": request.target_status,
+                    "environment": request.environment,
+                    "actor_account_id": request.actor_account_id,
+                },
+            )
+        )
+    )
+
+    request.context_overrides = {
+        **request.context_overrides,
+        "idempotency_key": idem_key,
+    }
+    if delivery_id:
+        request.context_overrides["delivery_id"] = delivery_id
+
+    try:
+        claim = claim_idempotency(
+            tenant_id=tenant_id,
+            operation=operation,
+            idem_key=idem_key,
+            request_payload=request.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if claim.state == "replay" and claim.response is not None:
+        return TransitionCheckResponse.model_validate(claim.response)
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=tenant_id,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        if replayed is not None:
+            return TransitionCheckResponse.model_validate(replayed)
+        raise HTTPException(status_code=409, detail="Idempotent request is still in progress")
+
     gate = WorkflowGate()
-    return gate.check_transition(request)
+    response = gate.check_transition(request)
+    complete_idempotency(
+        tenant_id=tenant_id,
+        operation=operation,
+        idem_key=idem_key,
+        response_payload=response.model_dump(mode="json"),
+        resource_type="decision",
+        resource_id=response.decision_id,
+    )
+    return response
 
 @router.get("/health")
 async def health_check():

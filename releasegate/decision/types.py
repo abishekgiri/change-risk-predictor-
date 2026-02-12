@@ -70,6 +70,10 @@ class Decision(BaseModel):
     inputs_present: Dict[str, bool] = Field(default_factory=dict)
     input_snapshot: Dict[str, Any] = Field(default_factory=dict)
     policy_bindings: List[PolicyBinding] = Field(default_factory=list)
+    input_hash: Optional[str] = None
+    policy_hash: Optional[str] = None
+    decision_hash: Optional[str] = None
+    replay_hash: Optional[str] = None
     
     # UX
     message: str

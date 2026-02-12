@@ -17,6 +17,7 @@ def record_proof_pack_generation(
     repo: Optional[str] = None,
     pr_number: Optional[int] = None,
     tenant_id: Optional[str] = None,
+    export_key: Optional[str] = None,
 ) -> str:
     """
     Persist proof-pack generation metadata for auditability.
@@ -24,9 +25,8 @@ def record_proof_pack_generation(
     init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     created_at = datetime.now(timezone.utc).isoformat()
-    proof_pack_id = hashlib.sha256(
-        f"{effective_tenant}:{decision_id}:{output_format}:{created_at}".encode("utf-8")
-    ).hexdigest()[:32]
+    material = f"{effective_tenant}:{decision_id}:{output_format}:{bundle_version}:{export_key or ''}"
+    proof_pack_id = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
     storage = get_storage_backend()
     storage.execute(

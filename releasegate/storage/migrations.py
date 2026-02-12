@@ -713,6 +713,53 @@ def _migration_20260212_009_security_hardening(cursor) -> None:
     )
 
 
+def _migration_20260212_010_phase4_idempotency_and_hashes(cursor) -> None:
+    if not _column_exists(cursor, "audit_decisions", "input_hash"):
+        cursor.execute("ALTER TABLE audit_decisions ADD COLUMN input_hash TEXT")
+    if not _column_exists(cursor, "audit_decisions", "policy_hash"):
+        cursor.execute("ALTER TABLE audit_decisions ADD COLUMN policy_hash TEXT")
+    if not _column_exists(cursor, "audit_decisions", "replay_hash"):
+        cursor.execute("ALTER TABLE audit_decisions ADD COLUMN replay_hash TEXT")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            tenant_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            idem_key TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            status TEXT NOT NULL,
+            response_json TEXT,
+            resource_type TEXT,
+            resource_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, operation, idem_key)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_idempotency_keys_tenant_operation_created
+        ON idempotency_keys(tenant_id, operation, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at
+        ON idempotency_keys(expires_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
+        ON audit_overrides(tenant_id, repo, previous_hash)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -758,6 +805,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260212_009_security_hardening",
         description="Harden auth schema with webhook signing keys, nonce scope, and PBKDF2 api-key fields.",
         apply=_migration_20260212_009_security_hardening,
+    ),
+    Migration(
+        migration_id="20260212_010_phase4_idempotency_and_hashes",
+        description="Add phase-4 idempotency key records, deterministic decision hashes, and chain-integrity indexes.",
+        apply=_migration_20260212_010_phase4_idempotency_and_hashes,
     ),
 ]
 

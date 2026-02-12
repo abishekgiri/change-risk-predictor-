@@ -99,6 +99,11 @@ def test_replay_endpoint_recomputes_status_and_policy_hash():
     assert body["replay_status"] == "BLOCKED"
     assert body["status_match"] is True
     assert body["policy_hash_match"] is True
+    assert body["input_hash_match"] is True
+    assert body["decision_hash_match"] is True
+    assert body["replay_hash_match"] is True
+    assert body["matches_original"] is True
+    assert body["mismatch_reason"] is None
     assert body["triggered_policies"] == ["RG-POL-1"]
     assert body["repo"] == repo
     assert body["pr_number"] == pr_number
