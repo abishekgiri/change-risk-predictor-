@@ -3,6 +3,7 @@ import os
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 from releasegate.integrations.jira.types import TransitionCheckRequest
+from releasegate.integrations.jira.client import JiraDependencyTimeout
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
 from releasegate.decision.types import Decision, EnforcementTargets
 
@@ -475,3 +476,51 @@ def test_gate_strict_mode_blocks_on_risk_fetch_error(MockRecorder, base_request)
     assert resp.allow is False
     assert resp.status == "ERROR"
     assert "failed to fetch issue property" in resp.reason
+
+
+def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
+    gate = WorkflowGate()
+    with patch.object(gate, "_resolve_policies", side_effect=TimeoutError("policy registry timed out")), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is True
+    assert resp.status == "SKIPPED"
+    assert "dependency timeout" in resp.reason
+
+
+def test_gate_policy_registry_timeout_strict_blocks(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    with patch.object(gate, "_resolve_policies", side_effect=TimeoutError("policy registry timed out")), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "dependency timeout" in resp.reason
+
+
+def test_gate_jira_timeout_in_permissive_mode_is_skipped(base_request):
+    gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(side_effect=JiraDependencyTimeout("jira timed out"))
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is True
+    assert resp.status == "SKIPPED"
+    assert "dependency timeout" in resp.reason
+
+
+def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(side_effect=JiraDependencyTimeout("jira timed out"))
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert "dependency timeout" in resp.reason

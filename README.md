@@ -35,6 +35,7 @@ It is a **governance control plane**.
 
 Decision output fields, `reason_code` meanings, and strict/permissive behavior are defined only in `docs/decision-model.md`.
 Other docs (including this README) are descriptive and defer to that spec.
+Forge runtime hardening and failure handling is documented in `docs/forge-hardening.md`.
 
 ## Core Capabilities
 
@@ -325,41 +326,53 @@ GET /integrations/jira/metrics/internal
 
 ## CLI Commands
 
-### Generate demo flow
+### One-command demo
 
 ```bash
 make demo
 ```
 
+### Validate deploy-time policy bundle
+
+```bash
+python -m releasegate.cli validate-policy-bundle
+```
+
+### Validate Jira transition/role mappings
+
+```bash
+python -m releasegate.cli validate-jira-config
+python -m releasegate.cli validate-jira-config --check-jira
+```
+
 ### Create signed checkpoint
 
 ```bash
-releasegate checkpoint create
+python -m releasegate.cli checkpoint-override --repo org/service --tenant demo
 ```
 
-### Verify ledger + checkpoint
+### Verify DB migration status
 
 ```bash
-releasegate verify-ledger
-releasegate verify-checkpoint
+python -m releasegate.cli db-migration-status
 ```
 
 ### Export proof pack
 
 ```bash
-releasegate export-proof-pack --decision-id <id>
+python -m releasegate.cli proof-pack --decision-id <id> --tenant demo --format json
 ```
 
 ### Run policy simulation
 
 ```bash
-releasegate simulate --last 100
+python -m releasegate.cli simulate-policies --repo org/service --tenant demo --limit 100
 ```
 
 ### Lint policy definitions
 
 ```bash
-releasegate lint
+python -m releasegate.cli lint-policies
 ```
 
 ---

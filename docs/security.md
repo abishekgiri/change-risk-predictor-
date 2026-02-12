@@ -112,3 +112,12 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
   - Decision replay from stored snapshot + policy bindings
   - Override chain verification
   - Checkpoint verification
+
+## Forge Runtime Hardening
+
+- Transition evaluations emit structured JSON logs with `decision_id`, `tenant_id`, `request_id`, `policy_bundle_hash`, `result`, and `reason_code`.
+- Dependency timeouts are deterministic:
+  - strict mode: `BLOCKED` + `TIMEOUT_DEPENDENCY`
+  - permissive mode: `SKIPPED` + `SKIPPED_TIMEOUT`
+- Deploy-time policy bundle validation is available via:
+  - `python -m releasegate.cli validate-policy-bundle`

@@ -14,6 +14,7 @@ See [Set up Forge](https://developer.atlassian.com/platform/forge/set-up-forge/)
 
 - Build and deploy your app by running:
 ```
+python -m releasegate.cli validate-policy-bundle
 forge deploy
 ```
 
