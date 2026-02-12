@@ -1,29 +1,34 @@
 # ReleaseGate Architecture
 
-## Overview
-ReleaseGate uses a decoupled, 4-step pipeline to ensure deterministic and auditable governance.
-
 ```mermaid
-graph TD
-    A[Context Engine] -->|EvaluationContext| B[Policy Engine]
-    B -->|PolicyResult| C[Decision Model]
-    C -->|Decision| D[Audit Log]
-    C -->|Decision| E[Enforcement Layer]
-    D -.->|Replay| E
+flowchart LR
+    A["ingestion/"] --> B["policy_registry/"]
+    B --> C["evaluator/"]
+    C --> D["adapters/"]
+    D --> E["ledger/"]
+    E --> F["artifacts/checkpoints/"]
+    F --> G["artifacts/proof_pack/"]
+    G --> H["replay/"]
+    G --> I["simulation/"]
 ```
 
-## Key Concepts
+## Module Boundary Map
 
-### Deterministic Evaluation
-- Same context + same policies → same decision
-- No hidden state
-- No probabilistic behavior
+| Architecture Node | Target Module Boundary | Current Implementation Mapping |
+|---|---|---|
+| Ingestion | `releasegate/ingestion/` | `releasegate/integrations/jira/`, provider modules |
+| Policy Registry | `releasegate/policy_registry/` | `releasegate/policy/loader.py`, `releasegate/saas/policy.py` |
+| Evaluator | `releasegate/evaluator/` | `releasegate/engine.py`, `releasegate/engine_core/` |
+| Enforcement Adapters | `releasegate/adapters/` | `releasegate/integrations/jira/workflow_gate.py`, enforcement runner |
+| Ledger | `releasegate/ledger/` | `releasegate/audit/overrides.py`, `releasegate/audit/recorder.py` |
+| Checkpoints | `releasegate/artifacts/checkpoints/` | `releasegate/audit/checkpoints.py` |
+| Proof Packs | `releasegate/artifacts/proof_pack/` | `releasegate/server.py` proof-pack endpoint, CLI proof-pack command |
+| Replay | `releasegate/replay/` | `releasegate/replay/decision_replay.py` |
+| Simulation | `releasegate/simulation/` | `releasegate/policy/simulation.py` |
 
-### Decision Hash
-Decisions are integrity-protected using SHA-256 hashing of the canonical JSON representation. This ensures that the audit log provides a verifiable history of governance actions.
+## Boundary Rules
 
-### Idempotency Keys
-Every enforcement action (GitHub Check, Jira Comment) is generated with a deterministic `idempotency_key` based on the Decision ID, Action Type, and Target. This prevents duplicate actions and allows safe retries in CI/CD pipelines.
-
-### Retroactive Enforcement
-Because `EnforcementTargets` are stored within the immutable `Decision` object, actions can be executed (or re-executed) at any time after the initial evaluation. This enables delayed governance and robust handling of external API failures.
+- Evaluator is pure decision logic (no external side effects).
+- Adapters enforce decisions and own API/protocol translation.
+- Ledger and artifact generation are append-only / read-only workflows.
+- Replay and simulation operate from stored snapshots and policy bindings.
