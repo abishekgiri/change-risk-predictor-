@@ -71,11 +71,18 @@ def rotate_checkpoint_signing_key(
 
 
 def get_active_checkpoint_signing_key(tenant_id: str) -> Optional[str]:
+    record = get_active_checkpoint_signing_key_record(tenant_id)
+    if not record:
+        return None
+    return record.get("key")
+
+
+def get_active_checkpoint_signing_key_record(tenant_id: str) -> Optional[Dict[str, str]]:
     init_db()
     storage = get_storage_backend()
     row = storage.fetchone(
         """
-        SELECT encrypted_key
+        SELECT key_id, encrypted_key
         FROM checkpoint_signing_keys
         WHERE tenant_id = ? AND is_active = 1
         ORDER BY created_at DESC
@@ -88,7 +95,10 @@ def get_active_checkpoint_signing_key(tenant_id: str) -> Optional[str]:
     encrypted = row.get("encrypted_key")
     if not encrypted:
         return None
-    return _fernet().decrypt(encrypted.encode("utf-8")).decode("utf-8")
+    return {
+        "key_id": str(row.get("key_id") or ""),
+        "key": _fernet().decrypt(encrypted.encode("utf-8")).decode("utf-8"),
+    }
 
 
 def list_checkpoint_signing_keys(tenant_id: str) -> List[Dict[str, str]]:
@@ -103,4 +113,3 @@ def list_checkpoint_signing_keys(tenant_id: str) -> List[Dict[str, str]]:
         """,
         (resolve_tenant_id(tenant_id),),
     )
-

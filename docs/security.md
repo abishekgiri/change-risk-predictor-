@@ -105,6 +105,8 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
 - Signed:
   - Checkpoint payloads (HMAC)
   - Webhook request payloads (HMAC)
+- Note:
+  - Checkpoint verification currently uses HMAC-SHA256 shared secrets; offline verification therefore requires access to signing-secret material. Public-key verification is planned.
 - Append-only:
   - Override ledger
   - Security audit events

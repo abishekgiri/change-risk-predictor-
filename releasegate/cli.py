@@ -3,6 +3,7 @@ import sys
 import os
 import json
 import yaml
+from datetime import datetime, timezone
 
 from releasegate.storage.base import resolve_tenant_id
 
@@ -114,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
     proof_p.add_argument("--checkpoint-cadence", default="daily", choices=["daily", "weekly"])
     proof_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     proof_p.add_argument("--output", help="Output file path (required for zip)")
+
+    verify_proof_pack_p = sub.add_parser(
+        "verify-proof-pack",
+        help="Verify proof-pack artifact integrity offline.",
+    )
+    verify_proof_pack_p.add_argument("file", help="Path to proof-pack JSON or ZIP file")
+    verify_proof_pack_p.add_argument("--format", default="text", choices=["text", "json"])
+    verify_proof_pack_p.add_argument("--signing-key", help="Checkpoint signing key for verification (HMAC)")
+    verify_proof_pack_p.add_argument("--key-file", help="Path to trusted key file/key map for verification")
 
     sub.add_parser("db-migrate", help="Apply forward-only DB migrations.")
     sub.add_parser("db-migration-status", help="Show applied DB migrations.")
@@ -570,10 +580,21 @@ def main() -> int:
         return 0
 
     if args.cmd == "proof-pack":
-        from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
-        from releasegate.audit.overrides import list_overrides, verify_override_chain
+        from releasegate.audit.checkpoints import (
+            load_override_checkpoint,
+            period_id_for_timestamp,
+            verify_override_checkpoint,
+        )
+        from releasegate.audit.overrides import list_override_chain_segment, list_overrides, verify_override_chain
         from releasegate.audit.reader import AuditReader
         from releasegate.audit.proof_packs import record_proof_pack_generation
+        from releasegate.decision.hashing import (
+            compute_decision_hash,
+            compute_input_hash,
+            compute_policy_hash_from_bindings,
+            compute_replay_hash,
+        )
+        from releasegate.utils.canonical import sha256_json
 
         tenant_id = resolve_tenant_id(args.tenant)
 
@@ -595,11 +616,26 @@ def main() -> int:
         override_snapshot = None
         chain_proof = None
         checkpoint_proof = None
+        checkpoint_snapshot = None
+        ledger_segment = []
+        period_id = ""
         if repo:
             overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=tenant_id)
             override_snapshot = next((o for o in overrides if o.get("decision_id") == args.decision_id), None)
+            ledger_segment = list_override_chain_segment(
+                repo=repo,
+                pr=pr_number,
+                tenant_id=tenant_id,
+                limit=2000,
+            )
             chain_proof = verify_override_chain(repo=repo, pr=pr_number, tenant_id=tenant_id)
             period_id = period_id_for_timestamp(created_at, cadence=args.checkpoint_cadence)
+            checkpoint_snapshot = load_override_checkpoint(
+                repo=repo,
+                cadence=args.checkpoint_cadence,
+                period_id=period_id,
+                tenant_id=tenant_id,
+            )
             checkpoint_proof = verify_override_checkpoint(
                 repo=repo,
                 cadence=args.checkpoint_cadence,
@@ -608,9 +644,70 @@ def main() -> int:
                 tenant_id=tenant_id,
             )
 
+        input_hash = decision_snapshot.get("input_hash") or compute_input_hash(decision_snapshot.get("input_snapshot", {}))
+        policy_hash = decision_snapshot.get("policy_hash") or compute_policy_hash_from_bindings(
+            decision_snapshot.get("policy_bindings") or decision_snapshot.get("policy_snapshot") or []
+        )
+        decision_hash = decision_snapshot.get("decision_hash") or compute_decision_hash(
+            release_status=str(decision_snapshot.get("release_status") or "UNKNOWN"),
+            reason_code=decision_snapshot.get("reason_code"),
+            policy_bundle_hash=str(decision_snapshot.get("policy_bundle_hash") or ""),
+            inputs_present=decision_snapshot.get("inputs_present") or {},
+        )
+        replay_hash = decision_snapshot.get("replay_hash") or compute_replay_hash(
+            input_hash=input_hash,
+            policy_hash=policy_hash,
+            decision_hash=decision_hash,
+        )
+        checkpoint_signature = ""
+        signing_key_id = ""
+        checkpoint_id = ""
+        if checkpoint_snapshot:
+            checkpoint_signature = ((checkpoint_snapshot.get("signature") or {}).get("value") or "")
+            signing_key_id = ((checkpoint_snapshot.get("signature") or {}).get("key_id") or "")
+            checkpoint_id = ((checkpoint_snapshot.get("ids") or {}).get("checkpoint_id") or "")
+
+        proof_pack_id = record_proof_pack_generation(
+            decision_id=args.decision_id,
+            output_format=args.format.lower(),
+            bundle_version="audit_proof_v1",
+            repo=repo,
+            pr_number=pr_number,
+            tenant_id=tenant_id,
+        )
+
         bundle = {
+            "schema_name": "proof_pack",
+            "schema_version": "proof_pack_v1",
             "bundle_version": "audit_proof_v1",
             "tenant_id": tenant_id,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "ids": {
+                "decision_id": args.decision_id,
+                "checkpoint_id": checkpoint_id,
+                "proof_pack_id": proof_pack_id,
+                "policy_bundle_hash": decision_snapshot.get("policy_bundle_hash") or "",
+                "repo": repo or "",
+                "pr_number": pr_number if pr_number is not None else "",
+                "period_id": period_id,
+                "checkpoint_cadence": args.checkpoint_cadence,
+            },
+            "integrity": {
+                "canonicalization": "releasegate-canonical-json-v1",
+                "hash_alg": "sha256",
+                "input_hash": input_hash,
+                "policy_hash": policy_hash,
+                "decision_hash": decision_hash,
+                "replay_hash": replay_hash,
+                "ledger": {
+                    "ledger_tip_hash": ledger_segment[-1].get("event_hash") if ledger_segment else "",
+                    "ledger_record_id": ledger_segment[-1].get("override_id") if ledger_segment else "",
+                },
+                "signatures": {
+                    "checkpoint_signature": checkpoint_signature,
+                    "signing_key_id": signing_key_id,
+                },
+            },
             "decision_id": args.decision_id,
             "repo": repo,
             "pr_number": pr_number,
@@ -618,19 +715,16 @@ def main() -> int:
             "policy_snapshot": decision_snapshot.get("policy_bindings", []),
             "input_snapshot": decision_snapshot.get("input_snapshot", {}),
             "override_snapshot": override_snapshot,
+            "ledger_segment": ledger_segment,
+            "checkpoint_snapshot": checkpoint_snapshot,
             "chain_proof": chain_proof,
             "checkpoint_proof": checkpoint_proof,
         }
+        export_checksum = sha256_json(bundle)
+        bundle["export_checksum"] = export_checksum
+        bundle["proof_pack_id"] = proof_pack_id
 
         if args.format == "json":
-            record_proof_pack_generation(
-                decision_id=args.decision_id,
-                output_format="json",
-                bundle_version=bundle["bundle_version"],
-                repo=repo,
-                pr_number=pr_number,
-                tenant_id=tenant_id,
-            )
             if args.output:
                 with open(args.output, "w", encoding="utf-8") as f:
                     json.dump(bundle, f, indent=2, default=str)
@@ -647,25 +741,52 @@ def main() -> int:
         memory = io.BytesIO()
         with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("bundle.json", json.dumps(bundle, indent=2, default=str))
+            zf.writestr("integrity.json", json.dumps(bundle["integrity"], indent=2, default=str))
             zf.writestr("decision_snapshot.json", json.dumps(bundle["decision_snapshot"], indent=2, default=str))
             zf.writestr("policy_snapshot.json", json.dumps(bundle["policy_snapshot"], indent=2, default=str))
             zf.writestr("input_snapshot.json", json.dumps(bundle["input_snapshot"], indent=2, default=str))
             zf.writestr("override_snapshot.json", json.dumps(bundle["override_snapshot"], indent=2, default=str))
+            zf.writestr("ledger_segment.json", json.dumps(bundle["ledger_segment"], indent=2, default=str))
             zf.writestr("chain_proof.json", json.dumps(bundle["chain_proof"], indent=2, default=str))
             zf.writestr("checkpoint_proof.json", json.dumps(bundle["checkpoint_proof"], indent=2, default=str))
+            zf.writestr("checkpoint_snapshot.json", json.dumps(bundle["checkpoint_snapshot"], indent=2, default=str))
         memory.seek(0)
         with open(args.output, "wb") as f:
             f.write(memory.getvalue())
-        record_proof_pack_generation(
-            decision_id=args.decision_id,
-            output_format="zip",
-            bundle_version=bundle["bundle_version"],
-            repo=repo,
-            pr_number=pr_number,
-            tenant_id=tenant_id,
-        )
         print(f"Wrote proof pack: {args.output}")
         return 0
+
+    if args.cmd == "verify-proof-pack":
+        from releasegate.audit.proof_pack_verify import (
+            ProofPackFileError,
+            format_verification_summary,
+            verify_proof_pack_file,
+        )
+
+        try:
+            report = verify_proof_pack_file(
+                args.file,
+                signing_key=args.signing_key,
+                key_file=args.key_file,
+            )
+        except ProofPackFileError as exc:
+            payload = {
+                "ok": False,
+                "error_code": "PROOF_PACK_FILE_INVALID",
+                "error_message": str(exc),
+                "file": args.file,
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"verification: FAIL\nerror_code: {payload['error_code']}\nerror_message: {payload['error_message']}")
+            return 3
+
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_verification_summary(report))
+        return 0 if report.get("ok") else 2
 
     return 2
 

@@ -16,6 +16,10 @@ from releasegate.storage.schema import init_db
 EMPTY_ROOT_HASH = hashlib.sha256(b"releasegate-empty-checkpoint").hexdigest()
 DEFAULT_CADENCE = "daily"
 SUPPORTED_CADENCES = {"daily", "weekly"}
+SCHEMA_NAME = "checkpoint"
+SCHEMA_VERSION = "checkpoint_v1"
+CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
+HASH_ALGORITHM = "sha256"
 
 
 def parse_utc_datetime(value: Any) -> datetime:
@@ -63,18 +67,34 @@ def _checkpoint_store_dir(store_dir: Optional[str] = None) -> Path:
     return path
 
 
-def _checkpoint_signing_key(signing_key: Optional[str] = None, tenant_id: Optional[str] = None) -> bytes:
-    key = signing_key or os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "")
-    if not key and tenant_id:
-        try:
-            from releasegate.security.checkpoint_keys import get_active_checkpoint_signing_key
+def _checkpoint_signing_material(
+    signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, str]:
+    if signing_key:
+        return {"key": signing_key, "key_id": "manual"}
 
-            key = get_active_checkpoint_signing_key(tenant_id)
+    env_key = os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "").strip()
+    if env_key:
+        return {
+            "key": env_key,
+            "key_id": (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID") or "env").strip(),
+        }
+
+    if tenant_id:
+        try:
+            from releasegate.security.checkpoint_keys import get_active_checkpoint_signing_key_record
+
+            record = get_active_checkpoint_signing_key_record(tenant_id)
+            if record and record.get("key"):
+                return {
+                    "key": str(record["key"]),
+                    "key_id": str(record.get("key_id") or "tenant-active-key"),
+                }
         except Exception:
-            key = None
-    if not key:
-        raise ValueError("Checkpoint signing key missing. Set RELEASEGATE_CHECKPOINT_SIGNING_KEY.")
-    return key.encode("utf-8")
+            pass
+
+    raise ValueError("Checkpoint signing key missing. Set RELEASEGATE_CHECKPOINT_SIGNING_KEY.")
 
 
 def _checkpoint_path(
@@ -131,6 +151,14 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _checkpoint_id(payload: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        f"{payload.get('tenant_id')}:{payload.get('repo')}:{payload.get('cadence')}:{payload.get('period_id')}:{payload.get('pr_number')}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+
+
 def compute_override_chain_root(
     repo: str,
     *,
@@ -148,6 +176,7 @@ def compute_override_chain_root(
     rolling_root = expected_prev
     first_event_at: Optional[str] = None
     last_event_at: Optional[str] = None
+    tip_override_id: Optional[str] = None
 
     for idx, row in enumerate(rows):
         previous_hash = row.get("previous_hash") or ""
@@ -184,42 +213,53 @@ def compute_override_chain_root(
         last_event_at = row.get("created_at")
         rolling_root = hashlib.sha256(f"{rolling_root}:{row.get('event_hash')}".encode("utf-8")).hexdigest()
         expected_prev = row.get("event_hash") or ""
+        tip_override_id = row.get("override_id")
 
     return {
         "valid_chain": True,
         "reason": None,
         "event_count": len(rows),
         "root_hash": rolling_root if rows else EMPTY_ROOT_HASH,
+        "tip_event_hash": expected_prev if rows else "",
+        "tip_override_id": tip_override_id,
         "first_event_at": first_event_at,
         "last_event_at": last_event_at,
         "tenant_id": effective_tenant,
     }
 
 
-def _sign_payload(payload: Dict[str, Any], signing_key: Optional[str] = None, tenant_id: Optional[str] = None) -> str:
+def _sign_payload(
+    payload: Dict[str, Any],
+    signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, str]:
     effective_tenant = tenant_id or payload.get("tenant_id")
-    key = _checkpoint_signing_key(signing_key, tenant_id=effective_tenant)
+    material = _checkpoint_signing_material(signing_key, tenant_id=effective_tenant)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hmac.new(key, canonical, hashlib.sha256).hexdigest()
+    return {
+        "algorithm": "HMAC-SHA256",
+        "value": hmac.new(material["key"].encode("utf-8"), canonical, hashlib.sha256).hexdigest(),
+        "key_id": material.get("key_id") or "",
+    }
 
 
 def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optional[str] = None) -> bool:
     payload = checkpoint.get("payload")
-    signature = checkpoint.get("signature", {}).get("value")
+    signature_obj = checkpoint.get("signature", {})
+    signature = signature_obj.get("value")
     if not isinstance(payload, dict) or not isinstance(signature, str):
         return False
-    expected = _sign_payload(payload, signing_key=signing_key, tenant_id=payload.get("tenant_id"))
+    expected = _sign_payload(payload, signing_key=signing_key, tenant_id=payload.get("tenant_id")).get("value")
     return hmac.compare_digest(expected, signature)
 
 
 def _record_checkpoint_metadata(checkpoint: Dict[str, Any], path: str) -> None:
     payload = checkpoint.get("payload", {})
     signature = checkpoint.get("signature", {})
-    checkpoint_id = hashlib.sha256(
-        f"{payload.get('tenant_id')}:{payload.get('repo')}:{payload.get('cadence')}:{payload.get('period_id')}:{payload.get('pr_number')}".encode(
-            "utf-8"
-        )
-    ).hexdigest()[:32]
+    checkpoint_id = (
+        checkpoint.get("ids", {}).get("checkpoint_id")
+        or _checkpoint_id(payload)
+    )
 
     init_db()
     storage = get_storage_backend()
@@ -281,14 +321,42 @@ def create_override_checkpoint(
         "last_event_at": chain.get("last_event_at"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    signature_value = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
+    signature_obj = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
+    checkpoint_id = _checkpoint_id(payload)
     checkpoint = {
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": payload.get("generated_at"),
+        "tenant_id": effective_tenant,
+        "ids": {
+            "checkpoint_id": checkpoint_id,
+            "decision_id": "",
+            "proof_pack_id": "",
+            "policy_bundle_hash": "",
+            "repo": repo,
+            "pr_number": pr,
+            "period_id": period_id,
+            "cadence": cadence,
+        },
+        "integrity": {
+            "canonicalization": CANONICALIZATION_VERSION,
+            "hash_alg": HASH_ALGORITHM,
+            "input_hash": "",
+            "policy_hash": "",
+            "decision_hash": "",
+            "replay_hash": "",
+            "ledger": {
+                "ledger_tip_hash": chain.get("tip_event_hash") or "",
+                "ledger_record_id": chain.get("tip_override_id") or "",
+            },
+            "signatures": {
+                "checkpoint_signature": signature_obj.get("value") or "",
+                "signing_key_id": signature_obj.get("key_id") or "",
+            },
+        },
         "checkpoint_version": "v1",
         "payload": payload,
-        "signature": {
-            "algorithm": "HMAC-SHA256",
-            "value": signature_value,
-        },
+        "signature": signature_obj,
     }
 
     path = _checkpoint_path(
@@ -373,6 +441,8 @@ def verify_override_checkpoint(
         return {
             "exists": False,
             "valid": False,
+            "schema_name": SCHEMA_NAME,
+            "schema_version": SCHEMA_VERSION,
             "tenant_id": effective_tenant,
             "repo": repo,
             "cadence": cadence,
@@ -406,6 +476,11 @@ def verify_override_checkpoint(
     result = {
         "exists": True,
         "valid": valid,
+        "schema_name": checkpoint.get("schema_name", SCHEMA_NAME),
+        "schema_version": checkpoint.get("schema_version", SCHEMA_VERSION),
+        "generated_at": checkpoint.get("generated_at") or payload.get("generated_at"),
+        "ids": checkpoint.get("ids", {}),
+        "integrity": checkpoint.get("integrity", {}),
         "tenant_id": payload_tenant,
         "repo": payload_repo,
         "cadence": payload.get("cadence", cadence),

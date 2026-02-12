@@ -119,6 +119,7 @@ def list_overrides(
     limit: int = 200,
     pr: Optional[int] = None,
     tenant_id: Optional[str] = None,
+    ascending: bool = False,
 ) -> List[Dict[str, Any]]:
     init_db()
     storage = get_storage_backend()
@@ -128,9 +129,34 @@ def list_overrides(
     if pr is not None:
         query += " AND pr_number = ?"
         params.append(pr)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    direction = "ASC" if ascending else "DESC"
+    query += f" ORDER BY created_at {direction} LIMIT ?"
     params.append(limit)
     return storage.fetchall(query, params)
+
+
+def list_override_chain_segment(
+    *,
+    repo: str,
+    pr: Optional[int] = None,
+    tenant_id: Optional[str] = None,
+    up_to: Optional[str] = None,
+    limit: int = 2000,
+) -> List[Dict[str, Any]]:
+    """
+    Return canonical override rows in chain order (ASC), optionally bounded by timestamp.
+    """
+    rows = list_overrides(
+        repo=repo,
+        limit=limit,
+        pr=pr,
+        tenant_id=tenant_id,
+        ascending=True,
+    )
+    if up_to is None:
+        return rows
+    cutoff = str(up_to)
+    return [row for row in rows if str(row.get("created_at") or "") <= cutoff]
 
 
 def get_active_override(
