@@ -44,9 +44,51 @@ from releasegate.decision.hashing import (
 )
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
+from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
+from releasegate.storage.migrations import MIGRATIONS
+from releasegate.storage.schema import SCHEMA_VERSION
 
 # Load env vars
 load_dotenv()
+
+
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
+def configure_logging() -> None:
+    log_level = (os.getenv("RELEASEGATE_LOG_LEVEL", "INFO") or "INFO").upper()
+    level_value = getattr(logging, log_level, logging.INFO)
+    log_format = (os.getenv("RELEASEGATE_LOG_FORMAT", "json") or "json").strip().lower()
+
+    root = logging.getLogger()
+    root.setLevel(level_value)
+    formatter: logging.Formatter
+    if log_format == "json":
+        formatter = JsonLogFormatter()
+    else:
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+        return
+
+    for handler in root.handlers:
+        handler.setFormatter(formatter)
+
+
+configure_logging()
 
 
 # Initialize App
@@ -140,9 +182,9 @@ def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
         resp = requests.get(url, headers=headers)
         if resp.status_code == 200:
             return resp.json()
-        print(f"Failed to fetch PR details: {resp.status_code}")
-    except Exception as e:
-        print(f"Error fetching PR details: {e}")
+        logger.warning("Failed to fetch PR details: status_code=%s", resp.status_code)
+    except Exception:
+        logger.exception("Error fetching PR details")
 
     return {}
 
@@ -171,15 +213,15 @@ def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
     }
     try:
         requests.post(url, json={"body": body}, headers=headers)
-        print(f"Posted comment to PR #{pr_number}")
-    except Exception as e:
-        print(f"Failed to post comment: {e}")
+        logger.info("Posted comment to PR #%s", pr_number)
+    except Exception:
+        logger.exception("Failed to post comment")
 
 
 def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level: str, reasons: list, evidence: list = None):
     """Create a GitHub Check Run."""
     if not GITHUB_TOKEN:
-        print("Warning: No GITHUB_TOKEN, skipping check run creation.")
+        logger.warning("No GITHUB_TOKEN, skipping check run creation")
         return
 
     url = f"https://api.github.com/repos/{repo_full_name}/check-runs"
@@ -215,11 +257,15 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
     try:
         resp = requests.post(url, json=payload, headers=headers)
         if resp.status_code not in [200, 201]:
-            print(f"Failed to create check run: {resp.status_code} - {resp.text}")
+            logger.warning(
+                "Failed to create check run: status_code=%s response=%s",
+                resp.status_code,
+                resp.text,
+            )
         else:
-            print(f"Created check run: {title}")
-    except Exception as e:
-        print(f"Error creating check run: {e}")
+            logger.info("Created check run: %s", title)
+    except Exception:
+        logger.exception("Error creating check run")
 
 
 @app.post("/ci/score")
@@ -236,7 +282,7 @@ def ci_score(
     """
     repo_full_name = payload.repo
     pr_number = payload.pr
-    print(f"CI Analysis Request: {repo_full_name} #{pr_number}")
+    logger.info("CI analysis request: repo=%s pr=%s", repo_full_name, pr_number)
 
     pr_data = get_pr_details(repo_full_name, pr_number)
     metrics = PRRiskInput(
@@ -314,7 +360,7 @@ async def github_webhook(
     if not repo_full_name or not pr_number:
         return {"msg": "Missing repo or pr_number"}
 
-    print(f"Processing PR #{pr_number} for {repo_full_name} ({action})")
+    logger.info("Processing PR event: repo=%s pr=%s action=%s", repo_full_name, pr_number, action)
 
     base_sha = pr.get("base", {}).get("sha", "unknown")
     head_sha = pr.get("head", {}).get("sha", "unknown")
@@ -348,7 +394,7 @@ async def github_webhook(
                 if client.set_issue_property(issue_key, "releasegate_risk", payload):
                     attached_issue_keys.append(issue_key)
         except Exception as e:
-            print(f"Warning: Jira risk attach failed: {e}")
+            logger.warning("Jira risk attach failed: %s", e)
 
     score_data = {
         "risk_score": risk_score,
@@ -386,25 +432,119 @@ async def github_webhook(
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "service": "RiskBot Webhook Listener"}
+    return {"status": "ok", "service": "ReleaseGate API"}
+
+
+def _expected_schema_version() -> str:
+    return MIGRATIONS[-1].migration_id if MIGRATIONS else SCHEMA_VERSION
+
+
+def _readiness_payload() -> tuple[dict, int]:
+    payload = {
+        "status": "ok",
+        "service": "ReleaseGate API",
+        "storage": "ok",
+        "migrations": {
+            "status": "ok",
+            "expected": _expected_schema_version(),
+            "current": None,
+            "updated_at": None,
+        },
+    }
+
+    try:
+        from releasegate.storage.schema import init_db
+
+        current_version = init_db()
+        expected_version = payload["migrations"]["expected"]
+        get_storage_backend().fetchone("SELECT 1 AS ok")
+        state = get_storage_backend().fetchone(
+            "SELECT current_version, migration_id, updated_at FROM schema_state WHERE id = 1"
+        )
+        current_schema = None
+        if state:
+            current_schema = state.get("migration_id") or state.get("current_version")
+            payload["migrations"]["updated_at"] = state.get("updated_at")
+        if not current_schema:
+            current_schema = current_version
+        payload["migrations"]["current"] = current_schema
+        if str(current_schema) != str(expected_version):
+            payload["status"] = "error"
+            payload["migrations"]["status"] = "outdated"
+            return payload, 503
+    except Exception:
+        payload["status"] = "error"
+        payload["storage"] = "error"
+        payload["migrations"]["status"] = "error"
+        return payload, 503
+    return payload, 200
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok", "service": "ReleaseGate API"}
+
+
+@app.get("/readyz")
+def readyz():
+    payload, status_code = _readiness_payload()
+    if status_code != 200:
+        raise HTTPException(status_code=status_code, detail=payload)
+    return payload
 
 
 @app.get("/health")
 def health():
-    storage_status = "ok"
-    try:
-        get_storage_backend().fetchone("SELECT 1 AS ok")
-    except Exception:
-        storage_status = "error"
-    status_code = 200 if storage_status == "ok" else 503
-    payload = {
-        "status": "ok" if storage_status == "ok" else "error",
-        "service": "RiskBot Webhook Listener",
-        "storage": storage_status,
-    }
+    payload, status_code = _readiness_payload()
     if status_code != 200:
         raise HTTPException(status_code=status_code, detail=payload)
     return payload
+
+
+def _prometheus_label(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+def metrics():
+    snap = metrics_snapshot(include_tenants=True)
+    by_tenant = snap.pop("_by_tenant", {}) if isinstance(snap, dict) else {}
+    lines = [
+        "# HELP releasegate_metric_total ReleaseGate internal counters",
+        "# TYPE releasegate_metric_total counter",
+        "# HELP releasegate_metric_tenant_total ReleaseGate internal counters by tenant",
+        "# TYPE releasegate_metric_tenant_total counter",
+    ]
+    for metric_name in sorted(snap.keys()):
+        lines.append(
+            f'releasegate_metric_total{{metric="{_prometheus_label(metric_name)}"}} {int(snap[metric_name])}'
+        )
+    for tenant in sorted(by_tenant.keys()):
+        tenant_metrics = by_tenant.get(tenant) or {}
+        for metric_name in sorted(tenant_metrics.keys()):
+            lines.append(
+                "releasegate_metric_tenant_total"
+                + f'{{tenant_id="{_prometheus_label(tenant)}",metric="{_prometheus_label(metric_name)}"}} '
+                + f"{int(tenant_metrics[metric_name])}"
+            )
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.get("/metrics/tenant/{tenant_id}")
+def metrics_for_tenant(
+    tenant_id: str,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "metrics": metrics_snapshot(tenant_id=effective_tenant),
+    }
 
 
 @app.on_event("startup")
