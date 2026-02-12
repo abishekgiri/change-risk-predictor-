@@ -1,6 +1,8 @@
 # Secrets & Credentials
 .env
 .env.*
+!.env.example
+!/deploy/compose/.env.example
 .env.releasegate
 .env.releasegate.*
 releasegate_secrets.env

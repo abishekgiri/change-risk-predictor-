@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: releasegate-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-releasegate}
+      POSTGRES_USER: ${POSTGRES_USER:-releasegate}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-releasegate}
+    volumes:
+      - releasegate_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-releasegate} -d ${POSTGRES_DB:-releasegate}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  releasegate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: releasegate-api
+    env_file:
+      - .env
+    environment:
+      RELEASEGATE_STORAGE_BACKEND: ${RELEASEGATE_STORAGE_BACKEND:-postgres}
+      RELEASEGATE_POSTGRES_DSN: ${RELEASEGATE_POSTGRES_DSN:-postgresql://releasegate:releasegate@postgres:5432/releasegate}
+      RELEASEGATE_AUTO_MIGRATE: ${RELEASEGATE_AUTO_MIGRATE:-true}
+      RELEASEGATE_JWT_ISSUER: ${RELEASEGATE_JWT_ISSUER:-releasegate}
+      RELEASEGATE_JWT_AUDIENCE: ${RELEASEGATE_JWT_AUDIENCE:-releasegate-api}
+      RELEASEGATE_JWT_SECRET: ${RELEASEGATE_JWT_SECRET:-change-me}
+      RELEASEGATE_CHECKPOINT_SIGNING_KEY: ${RELEASEGATE_CHECKPOINT_SIGNING_KEY:-change-me}
+      RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID: ${RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID:-compose-default}
+      RELEASEGATE_TENANT_ID: ${RELEASEGATE_TENANT_ID:-demo-tenant}
+      RELEASEGATE_STRICT_MODE: ${RELEASEGATE_STRICT_MODE:-false}
+      RELEASEGATE_LEDGER_VERIFY_ON_STARTUP: ${RELEASEGATE_LEDGER_VERIFY_ON_STARTUP:-true}
+      RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION: ${RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION:-true}
+      RELEASEGATE_RATE_LIMIT_WINDOW_SECONDS: ${RELEASEGATE_RATE_LIMIT_WINDOW_SECONDS:-60}
+      RELEASEGATE_RATE_LIMIT_TENANT_DEFAULT: ${RELEASEGATE_RATE_LIMIT_TENANT_DEFAULT:-180}
+      RELEASEGATE_RATE_LIMIT_IP_DEFAULT: ${RELEASEGATE_RATE_LIMIT_IP_DEFAULT:-300}
+      RELEASEGATE_RATE_LIMIT_TENANT_HEAVY: ${RELEASEGATE_RATE_LIMIT_TENANT_HEAVY:-20}
+      RELEASEGATE_RATE_LIMIT_IP_HEAVY: ${RELEASEGATE_RATE_LIMIT_IP_HEAVY:-40}
+      RELEASEGATE_RATE_LIMIT_TENANT_WEBHOOK: ${RELEASEGATE_RATE_LIMIT_TENANT_WEBHOOK:-300}
+      RELEASEGATE_RATE_LIMIT_IP_WEBHOOK: ${RELEASEGATE_RATE_LIMIT_IP_WEBHOOK:-600}
+      RELEASEGATE_LOG_LEVEL: ${RELEASEGATE_LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${RELEASEGATE_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  releasegate_postgres_data:
