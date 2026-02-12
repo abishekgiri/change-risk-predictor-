@@ -8,6 +8,12 @@
 
 ## Stored Checkpoint Shape
 Top-level object:
+- `schema_name`: string, `checkpoint`
+- `schema_version`: string, `checkpoint_v1`
+- `generated_at`: UTC timestamp string
+- `tenant_id`: string
+- `ids`: object
+- `integrity`: object
 - `checkpoint_version`: string, must be `v1`
 - `payload`: object
 - `signature`: object
@@ -27,10 +33,28 @@ Payload fields:
 Signature fields:
 - `algorithm`: string, currently `HMAC-SHA256`
 - `value`: hex string
+- `key_id`: string
+
+`integrity` fields:
+- `canonicalization`: `releasegate-canonical-json-v1`
+- `hash_alg`: `sha256`
+- `input_hash` (empty string in checkpoint-only artifact)
+- `policy_hash` (empty string in checkpoint-only artifact)
+- `decision_hash` (empty string in checkpoint-only artifact)
+- `replay_hash` (empty string in checkpoint-only artifact)
+- `ledger.ledger_tip_hash`
+- `ledger.ledger_record_id`
+- `signatures.checkpoint_signature`
+- `signatures.signing_key_id`
 
 ## Verification Response
 - `exists`: boolean
 - `valid`: boolean
+- `schema_name`: string
+- `schema_version`: string
+- `generated_at`: timestamp string
+- `ids`: object
+- `integrity`: object
 - `repo`: string
 - `cadence`: string
 - `period_id`: string

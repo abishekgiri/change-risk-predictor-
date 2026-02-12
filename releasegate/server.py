@@ -36,6 +36,12 @@ from releasegate.audit.idempotency import (
     derive_system_idempotency_key,
     wait_for_idempotency_response,
 )
+from releasegate.decision.hashing import (
+    compute_decision_hash,
+    compute_input_hash,
+    compute_policy_hash_from_bindings,
+    compute_replay_hash,
+)
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 
@@ -106,6 +112,8 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # For API calls
 LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}
 LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
+CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
+HASH_ALGORITHM = "sha256"
 
 
 def _effective_tenant(auth: AuthContext, requested_tenant: Optional[str]) -> str:
@@ -464,6 +472,67 @@ def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = N
     return "POLICY_ALLOWED"
 
 
+def _decision_hashes_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, str]:
+    input_snapshot = snapshot.get("input_snapshot") or {}
+    policy_snapshot = snapshot.get("policy_bindings") or snapshot.get("policy_snapshot") or []
+    inputs_present = snapshot.get("inputs_present") or {}
+    release_status = str(snapshot.get("release_status") or "UNKNOWN")
+    reason_code = snapshot.get("reason_code")
+    policy_bundle_hash = str(snapshot.get("policy_bundle_hash") or "")
+
+    input_hash = str(snapshot.get("input_hash") or compute_input_hash(input_snapshot))
+    policy_hash = str(snapshot.get("policy_hash") or compute_policy_hash_from_bindings(policy_snapshot))
+    decision_hash = str(
+        snapshot.get("decision_hash")
+        or compute_decision_hash(
+            release_status=release_status,
+            reason_code=reason_code,
+            policy_bundle_hash=policy_bundle_hash,
+            inputs_present=inputs_present,
+        )
+    )
+    replay_hash = str(
+        snapshot.get("replay_hash")
+        or compute_replay_hash(
+            input_hash=input_hash,
+            policy_hash=policy_hash,
+            decision_hash=decision_hash,
+        )
+    )
+    return {
+        "input_hash": input_hash,
+        "policy_hash": policy_hash,
+        "decision_hash": decision_hash,
+        "replay_hash": replay_hash,
+    }
+
+
+def _integrity_section(
+    *,
+    hashes: Dict[str, str],
+    ledger_tip_hash: Optional[str] = None,
+    ledger_record_id: Optional[str] = None,
+    checkpoint_signature: Optional[str] = None,
+    signing_key_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "canonicalization": CANONICALIZATION_VERSION,
+        "hash_alg": HASH_ALGORITHM,
+        "input_hash": hashes.get("input_hash") or "",
+        "policy_hash": hashes.get("policy_hash") or "",
+        "decision_hash": hashes.get("decision_hash") or "",
+        "replay_hash": hashes.get("replay_hash") or "",
+        "ledger": {
+            "ledger_tip_hash": ledger_tip_hash or "",
+            "ledger_record_id": ledger_record_id or "",
+        },
+        "signatures": {
+            "checkpoint_signature": checkpoint_signature or "",
+            "signing_key_id": signing_key_id or "",
+        },
+    }
+
+
 def _bounded_limit(value: int, *, max_allowed: int, field: str = "limit") -> int:
     bounded = int(value)
     if bounded <= 0:
@@ -499,9 +568,29 @@ def _soc2_records(
         message = full.get("message") or ""
         explicit_reason = full.get("reason_code")
         ov = override_map.get(r.get("decision_id"))
+        hashes = _decision_hashes_from_snapshot(full) if full else {
+            "input_hash": "",
+            "policy_hash": "",
+            "decision_hash": "",
+            "replay_hash": "",
+        }
+        checkpoint_signature = ""
+        signing_key_id = ""
+        if ov:
+            checkpoint_signature = ""
+            signing_key_id = ""
 
         records.append({
+            "schema_name": "soc2_record",
+            "schema_version": "soc2_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "tenant_id": r.get("tenant_id") or full.get("tenant_id"),
+            "ids": {
+                "decision_id": r.get("decision_id"),
+                "checkpoint_id": "",
+                "proof_pack_id": "",
+                "policy_bundle_hash": full.get("policy_bundle_hash") or r.get("policy_bundle_hash"),
+            },
             "decision_id": r.get("decision_id"),
             "decision": decision,
             "reason_code": _derive_reason_code(decision, message, explicit_reason),
@@ -514,6 +603,13 @@ def _soc2_records(
             "repo": r.get("repo"),
             "pr_number": r.get("pr_number"),
             "created_at": r.get("created_at"),
+            "integrity": _integrity_section(
+                hashes=hashes,
+                ledger_tip_hash=ov.get("event_hash") if ov else "",
+                ledger_record_id=ov.get("override_id") if ov else "",
+                checkpoint_signature=checkpoint_signature,
+                signing_key_id=signing_key_id,
+            ),
         })
     return records
 
@@ -602,9 +698,32 @@ def audit_export(
     if contract == "soc2_v1":
         chain_flag = bool(chain_result.get("valid")) if (verify_chain and chain_result is not None) else (False if verify_chain else None)
         export_rows = _soc2_records(rows, overrides=overrides, chain_verified=chain_flag)
+        record_hash_map = {str(r.get("decision_id") or ""): (r.get("integrity") or {}) for r in export_rows}
+        aggregated_hashes = {
+            "input_hash": sha256_json({k: v.get("input_hash", "") for k, v in record_hash_map.items()}),
+            "policy_hash": sha256_json({k: v.get("policy_hash", "") for k, v in record_hash_map.items()}),
+            "decision_hash": sha256_json({k: v.get("decision_hash", "") for k, v in record_hash_map.items()}),
+            "replay_hash": sha256_json({k: v.get("replay_hash", "") for k, v in record_hash_map.items()}),
+        }
+        tip_override = overrides[0] if overrides else {}
         payload = {
             "contract": "soc2_v1",
+            "schema_name": "soc2_export",
+            "schema_version": "soc2_v1",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "tenant_id": effective_tenant,
+            "ids": {
+                "decision_id": "",
+                "checkpoint_id": "",
+                "proof_pack_id": "",
+                "policy_bundle_hash": "",
+                "repo": repo,
+            },
+            "integrity": _integrity_section(
+                hashes=aggregated_hashes,
+                ledger_tip_hash=tip_override.get("event_hash") or "",
+                ledger_record_id=tip_override.get("override_id") or "",
+            ),
             "repo": repo,
             "records": export_rows,
         }
@@ -743,8 +862,12 @@ def audit_proof_pack(
     ),
 ):
     from releasegate.audit.reader import AuditReader
-    from releasegate.audit.overrides import list_overrides, verify_override_chain
-    from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
+    from releasegate.audit.overrides import list_override_chain_segment, list_overrides, verify_override_chain
+    from releasegate.audit.checkpoints import (
+        load_override_checkpoint,
+        period_id_for_timestamp,
+        verify_override_checkpoint,
+    )
     from releasegate.audit.proof_packs import record_proof_pack_generation
 
     effective_tenant = _effective_tenant(auth, tenant_id)
@@ -803,13 +926,28 @@ def audit_proof_pack(
     override_snapshot = None
     chain_proof = None
     checkpoint_proof = None
+    checkpoint_snapshot = None
+    ledger_segment = []
+    period_id = None
 
     if repo:
         overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=effective_tenant)
         override_snapshot = next((o for o in overrides if o.get("decision_id") == decision_id), None)
+        ledger_segment = list_override_chain_segment(
+            repo=repo,
+            pr=pr_number,
+            tenant_id=effective_tenant,
+            limit=2000,
+        )
         chain_proof = verify_override_chain(repo=repo, pr=pr_number, tenant_id=effective_tenant)
         try:
             period_id = period_id_for_timestamp(created_at, cadence=checkpoint_cadence)
+            checkpoint_snapshot = load_override_checkpoint(
+                repo=repo,
+                cadence=checkpoint_cadence,
+                period_id=period_id,
+                tenant_id=effective_tenant,
+            )
             checkpoint_proof = verify_override_checkpoint(
                 repo=repo,
                 cadence=checkpoint_cadence,
@@ -820,10 +958,57 @@ def audit_proof_pack(
         except Exception as exc:
             checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
 
+    proof_pack_id = record_proof_pack_generation(
+        decision_id=decision_id,
+        output_format="json" if format.lower() == "json" else "zip",
+        bundle_version="audit_proof_v1",
+        repo=repo,
+        pr_number=pr_number,
+        tenant_id=effective_tenant,
+        export_key=export_key,
+    )
+    decision_hashes = _decision_hashes_from_snapshot(decision_snapshot)
+    checkpoint_signature = ""
+    signing_key_id = ""
+    checkpoint_id = ""
+    if checkpoint_snapshot:
+        checkpoint_signature = (
+            (checkpoint_snapshot.get("signature") or {}).get("value")
+            or ""
+        )
+        signing_key_id = (
+            (checkpoint_snapshot.get("signature") or {}).get("key_id")
+            or ((checkpoint_snapshot.get("integrity") or {}).get("signatures") or {}).get("signing_key_id")
+            or ""
+        )
+        checkpoint_id = (checkpoint_snapshot.get("ids") or {}).get("checkpoint_id") or ""
+
+    ledger_tip_hash = ledger_segment[-1].get("event_hash") if ledger_segment else ""
+    ledger_record_id = ledger_segment[-1].get("override_id") if ledger_segment else ""
+
     bundle = {
+        "schema_name": "proof_pack",
+        "schema_version": "proof_pack_v1",
         "bundle_version": "audit_proof_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "tenant_id": effective_tenant,
+        "ids": {
+            "decision_id": decision_id,
+            "checkpoint_id": checkpoint_id,
+            "proof_pack_id": proof_pack_id,
+            "policy_bundle_hash": decision_snapshot.get("policy_bundle_hash") or "",
+            "repo": repo or "",
+            "pr_number": pr_number if pr_number is not None else "",
+            "period_id": period_id or "",
+            "checkpoint_cadence": checkpoint_cadence,
+        },
+        "integrity": _integrity_section(
+            hashes=decision_hashes,
+            ledger_tip_hash=ledger_tip_hash,
+            ledger_record_id=ledger_record_id,
+            checkpoint_signature=checkpoint_signature,
+            signing_key_id=signing_key_id,
+        ),
         "decision_id": decision_id,
         "repo": repo,
         "pr_number": pr_number,
@@ -831,21 +1016,14 @@ def audit_proof_pack(
         "policy_snapshot": decision_snapshot.get("policy_bindings", []),
         "input_snapshot": decision_snapshot.get("input_snapshot", {}),
         "override_snapshot": override_snapshot,
+        "ledger_segment": ledger_segment,
+        "checkpoint_snapshot": checkpoint_snapshot,
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
     }
     export_checksum = sha256_json(bundle)
 
     if format.lower() == "json":
-        proof_pack_id = record_proof_pack_generation(
-            decision_id=decision_id,
-            output_format="json",
-            bundle_version=bundle["bundle_version"],
-            repo=repo,
-            pr_number=pr_number,
-            tenant_id=effective_tenant,
-            export_key=export_key,
-        )
         log_security_event(
             tenant_id=effective_tenant,
             principal_id=auth.principal_id,
@@ -875,22 +1053,16 @@ def audit_proof_pack(
     zip_bytes = _deterministic_zip_payload(
         {
             "bundle.json": bundle,
+            "integrity.json": bundle["integrity"],
             "chain_proof.json": bundle["chain_proof"],
             "checkpoint_proof.json": bundle["checkpoint_proof"],
+            "checkpoint_snapshot.json": bundle["checkpoint_snapshot"],
             "decision_snapshot.json": bundle["decision_snapshot"],
             "input_snapshot.json": bundle["input_snapshot"],
+            "ledger_segment.json": bundle["ledger_segment"],
             "override_snapshot.json": bundle["override_snapshot"],
             "policy_snapshot.json": bundle["policy_snapshot"],
         }
-    )
-    proof_pack_id = record_proof_pack_generation(
-        decision_id=decision_id,
-        output_format="zip",
-        bundle_version=bundle["bundle_version"],
-        repo=repo,
-        pr_number=pr_number,
-        tenant_id=effective_tenant,
-        export_key=export_key,
     )
     log_security_event(
         tenant_id=effective_tenant,

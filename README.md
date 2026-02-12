@@ -363,6 +363,12 @@ python -m releasegate.cli db-migration-status
 python -m releasegate.cli proof-pack --decision-id <id> --tenant demo --format json
 ```
 
+### Verify proof pack offline
+
+```bash
+python -m releasegate.cli verify-proof-pack /path/to/proof-pack.json
+```
+
 ### Run policy simulation
 
 ```bash
