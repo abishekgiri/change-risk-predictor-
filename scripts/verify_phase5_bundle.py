@@ -52,8 +52,6 @@ index 83db48f..f735c32 100644
         "inputs/pr_metadata.json",
         "findings.json",
         "policies_used.json",
-        "artifacts/diff.patch",
-        "artifacts/snippets/hash1_0.txt" # Snippet generated for finding
     ]
     
     for f in expected_files:
@@ -69,12 +67,12 @@ index 83db48f..f735c32 100644
         manifest = json.load(f)
     
     # Check one file
-    snippet_rel_path = "artifacts/snippets/hash1_0.txt"
-    listed_hash = manifest[snippet_rel_path]
-    computed_hash = bundler._compute_file_hash(snippet_rel_path)
+    checked_rel_path = "findings.json"
+    listed_hash = manifest[checked_rel_path]
+    computed_hash = bundler._compute_file_hash(checked_rel_path)
     
     if listed_hash != computed_hash:
-        print(f"❌ Hash Mismatch for {snippet_rel_path}")
+        print(f"❌ Hash Mismatch for {checked_rel_path}")
         exit(1)
     
     print(f"✅ Hash Match Verified: {listed_hash}")

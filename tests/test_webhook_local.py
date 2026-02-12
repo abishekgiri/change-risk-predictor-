@@ -1,4 +1,6 @@
 import unittest.mock
+from datetime import datetime, timezone
+import uuid
 from fastapi.testclient import TestClient
 from releasegate.server import app
 from releasegate.config import DB_PATH
@@ -6,6 +8,7 @@ import sqlite3
 import json
 import hmac
 import hashlib
+from releasegate.security.webhook_keys import create_webhook_key
 
 client = TestClient(app)
 
@@ -35,12 +38,29 @@ def test_webhook_pr_opened():
     }
     
     # 2. Post
-    # Generate signature
+    # Generate signatures
     secret = "mock_secret"
+    signing_secret = "phase3-local-webhook-secret"
+    signing_key = create_webhook_key(
+        tenant_id="tenant-test",
+        integration_id="github",
+        created_by="test-suite",
+        raw_secret=signing_secret,
+        deactivate_existing=True,
+    )
     # Ensure consistent JSON serialization
-    payload_bytes = json.dumps(payload).encode('utf-8')
+    payload_text = json.dumps(payload)
+    payload_bytes = payload_text.encode('utf-8')
     mac = hmac.new(secret.encode(), msg=payload_bytes, digestmod=hashlib.sha256)
     signature = "sha256=" + mac.hexdigest()
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+    nonce = f"nonce-opened-{uuid.uuid4().hex[:8]}"
+    canonical = "\n".join([timestamp, nonce, "POST", "/webhooks/github", payload_text])
+    releasegate_signature = hmac.new(
+        signing_secret.encode(),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
     with unittest.mock.patch("releasegate.server.GITHUB_SECRET", secret), \
          unittest.mock.patch("releasegate.integrations.jira.client.JiraClient") as jira_client_cls:
@@ -53,7 +73,11 @@ def test_webhook_pr_opened():
             headers={
                 "X-GitHub-Event": "pull_request",
                 "X-Hub-Signature-256": signature,
-                "Content-Type": "application/json"
+                "X-Signature": releasegate_signature,
+                "X-Key-Id": signing_key["key_id"],
+                "X-Timestamp": timestamp,
+                "X-Nonce": nonce,
+                "Content-Type": "application/json",
             }
         )
         
@@ -78,10 +102,32 @@ def test_webhook_pr_opened():
 
 def test_webhook_ping():
     """Test GitHub Ping event."""
+    signing_secret = "phase3-local-webhook-secret-ping"
+    signing_key = create_webhook_key(
+        tenant_id="tenant-test",
+        integration_id="github",
+        created_by="test-suite",
+        raw_secret=signing_secret,
+        deactivate_existing=True,
+    )
+    payload = {"zen": "Non-blocking is better than blocking."}
+    payload_text = json.dumps(payload)
+    payload_bytes = payload_text.encode("utf-8")
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+    nonce = f"nonce-ping-{uuid.uuid4().hex[:8]}"
+    canonical = "\n".join([timestamp, nonce, "POST", "/webhooks/github", payload_text])
+    signature = hmac.new(signing_secret.encode(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     response = client.post(
         "/webhooks/github",
-        json={"zen": "Non-blocking is better than blocking."},
-        headers={"X-GitHub-Event": "ping"}
+        content=payload_bytes,
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-Signature": signature,
+            "X-Key-Id": signing_key["key_id"],
+            "X-Timestamp": timestamp,
+            "X-Nonce": nonce,
+            "Content-Type": "application/json",
+        },
     )
     assert response.status_code == 200
     assert response.json() == {"msg": "pong"}

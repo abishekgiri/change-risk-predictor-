@@ -1,6 +1,9 @@
 # Secrets & Credentials
 .env
 .env.*
+.env.releasegate
+.env.releasegate.*
+releasegate_secrets.env
 *.key
 *.pem
 secrets/

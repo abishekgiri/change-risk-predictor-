@@ -519,6 +519,200 @@ def _migration_20260212_007_tenant_composite_primary_keys(cursor) -> None:
     _create_immutability_triggers(cursor)
 
 
+def _migration_20260212_008_security_auth_tables(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            key_algorithm TEXT,
+            key_iterations INTEGER,
+            key_salt TEXT,
+            roles_json TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_tenant_key_hash
+        ON api_keys(tenant_id, key_hash)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active
+        ON api_keys(tenant_id, revoked_at, created_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_nonces (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL DEFAULT 'legacy',
+            key_id TEXT NOT NULL DEFAULT 'legacy',
+            nonce TEXT NOT NULL,
+            signature_hash TEXT NOT NULL,
+            used_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, integration_id, nonce)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_webhook_nonces_expires_at
+        ON webhook_nonces(expires_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            auth_method TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_security_events_tenant_action_created
+        ON security_audit_events(tenant_id, action, created_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS checkpoint_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created
+        ON checkpoint_signing_keys(tenant_id, is_active, created_at)
+        """
+    )
+
+
+def _migration_20260212_009_security_hardening(cursor) -> None:
+    if not _column_exists(cursor, "api_keys", "key_algorithm"):
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN key_algorithm TEXT")
+    if not _column_exists(cursor, "api_keys", "key_iterations"):
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN key_iterations INTEGER")
+    if not _column_exists(cursor, "api_keys", "key_salt"):
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN key_salt TEXT")
+    if not _column_exists(cursor, "api_keys", "is_enabled"):
+        cursor.execute("ALTER TABLE api_keys ADD COLUMN is_enabled INTEGER NOT NULL DEFAULT 1")
+    cursor.execute("UPDATE api_keys SET key_algorithm = COALESCE(NULLIF(TRIM(key_algorithm), ''), 'legacy_sha256')")
+    cursor.execute("UPDATE api_keys SET key_iterations = COALESCE(key_iterations, 0)")
+    cursor.execute("UPDATE api_keys SET key_salt = COALESCE(key_salt, '')")
+    cursor.execute("UPDATE api_keys SET is_enabled = COALESCE(is_enabled, CASE WHEN revoked_at IS NULL THEN 1 ELSE 0 END)")
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_global_key_id
+        ON api_keys(key_id)
+        """
+    )
+
+    nonce_has_integration = _column_exists(cursor, "webhook_nonces", "integration_id")
+    nonce_has_key_id = _column_exists(cursor, "webhook_nonces", "key_id")
+    nonce_pk = _table_pk_columns(cursor, "webhook_nonces")
+    expected_pk = ["tenant_id", "integration_id", "nonce"]
+    if nonce_pk != expected_pk or not nonce_has_integration or not nonce_has_key_id:
+        integration_expr = "COALESCE(NULLIF(TRIM(integration_id), ''), 'legacy')" if nonce_has_integration else "'legacy'"
+        key_expr = "COALESCE(NULLIF(TRIM(key_id), ''), 'legacy')" if nonce_has_key_id else "'legacy'"
+        cursor.execute(
+            """
+            CREATE TABLE webhook_nonces_new (
+                tenant_id TEXT NOT NULL,
+                integration_id TEXT NOT NULL,
+                key_id TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                signature_hash TEXT NOT NULL,
+                used_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, integration_id, nonce)
+            )
+            """
+        )
+        cursor.execute(
+            f"""
+            INSERT INTO webhook_nonces_new (
+                tenant_id, integration_id, key_id, nonce, signature_hash, used_at, expires_at
+            )
+            SELECT
+                COALESCE(NULLIF(TRIM(tenant_id), ''), 'default') AS tenant_id,
+                {integration_expr} AS integration_id,
+                {key_expr} AS key_id,
+                nonce,
+                signature_hash,
+                used_at,
+                expires_at
+            FROM webhook_nonces
+            """
+        )
+        cursor.execute("DROP TABLE webhook_nonces")
+        cursor.execute("ALTER TABLE webhook_nonces_new RENAME TO webhook_nonces")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_nonces_expires_at ON webhook_nonces(expires_at)")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_signing_keys (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_secret TEXT NOT NULL,
+            secret_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, integration_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_signing_keys_key_id
+        ON webhook_signing_keys(key_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_webhook_signing_keys_tenant_integration_active
+        ON webhook_signing_keys(tenant_id, integration_id, is_active, created_at)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -555,6 +749,16 @@ MIGRATIONS: List[Migration] = [
         description="Rebuild audit tables to enforce tenant-scoped composite primary keys.",
         apply=_migration_20260212_007_tenant_composite_primary_keys,
     ),
+    Migration(
+        migration_id="20260212_008_security_auth_tables",
+        description="Add auth, webhook nonce, and security audit tables.",
+        apply=_migration_20260212_008_security_auth_tables,
+    ),
+    Migration(
+        migration_id="20260212_009_security_hardening",
+        description="Harden auth schema with webhook signing keys, nonce scope, and PBKDF2 api-key fields.",
+        apply=_migration_20260212_009_security_hardening,
+    ),
 ]
 
 
@@ -571,6 +775,8 @@ def apply_sqlite_migrations(conn, *, auto_apply: bool = True) -> str:
     """
     cursor = conn.cursor()
     _create_schema_migrations_table(cursor)
+    # Persist migration bookkeeping tables before transactional migration work.
+    conn.commit()
     applied = _applied_migration_ids(cursor)
     pending = [m for m in MIGRATIONS if m.migration_id not in applied]
     if pending and not auto_apply:
@@ -579,20 +785,27 @@ def apply_sqlite_migrations(conn, *, auto_apply: bool = True) -> str:
         )
     current = "base"
 
-    for migration in pending:
-        current = migration.migration_id
-        migration.apply(cursor)
-        _mark_migration(cursor, migration.migration_id, migration.description)
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
 
-    if not pending and MIGRATIONS:
-        current = MIGRATIONS[-1].migration_id
-        cursor.execute(
-            """
-            INSERT INTO schema_state (id, current_version, migration_id, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO NOTHING
-            """,
-            (current, current, datetime.now(timezone.utc).isoformat()),
-        )
-    conn.commit()
+        for migration in pending:
+            current = migration.migration_id
+            migration.apply(cursor)
+            _mark_migration(cursor, migration.migration_id, migration.description)
+
+        if not pending and MIGRATIONS:
+            current = MIGRATIONS[-1].migration_id
+            cursor.execute(
+                """
+                INSERT INTO schema_state (id, current_version, migration_id, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (current, current, datetime.now(timezone.utc).isoformat()),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
     return current if MIGRATIONS else "base"

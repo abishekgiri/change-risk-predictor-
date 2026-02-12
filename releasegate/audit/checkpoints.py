@@ -63,8 +63,15 @@ def _checkpoint_store_dir(store_dir: Optional[str] = None) -> Path:
     return path
 
 
-def _checkpoint_signing_key(signing_key: Optional[str] = None) -> bytes:
+def _checkpoint_signing_key(signing_key: Optional[str] = None, tenant_id: Optional[str] = None) -> bytes:
     key = signing_key or os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "")
+    if not key and tenant_id:
+        try:
+            from releasegate.security.checkpoint_keys import get_active_checkpoint_signing_key
+
+            key = get_active_checkpoint_signing_key(tenant_id)
+        except Exception:
+            key = None
     if not key:
         raise ValueError("Checkpoint signing key missing. Set RELEASEGATE_CHECKPOINT_SIGNING_KEY.")
     return key.encode("utf-8")
@@ -189,8 +196,9 @@ def compute_override_chain_root(
     }
 
 
-def _sign_payload(payload: Dict[str, Any], signing_key: Optional[str] = None) -> str:
-    key = _checkpoint_signing_key(signing_key)
+def _sign_payload(payload: Dict[str, Any], signing_key: Optional[str] = None, tenant_id: Optional[str] = None) -> str:
+    effective_tenant = tenant_id or payload.get("tenant_id")
+    key = _checkpoint_signing_key(signing_key, tenant_id=effective_tenant)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
@@ -200,7 +208,7 @@ def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optiona
     signature = checkpoint.get("signature", {}).get("value")
     if not isinstance(payload, dict) or not isinstance(signature, str):
         return False
-    expected = _sign_payload(payload, signing_key=signing_key)
+    expected = _sign_payload(payload, signing_key=signing_key, tenant_id=payload.get("tenant_id"))
     return hmac.compare_digest(expected, signature)
 
 
@@ -273,7 +281,7 @@ def create_override_checkpoint(
         "last_event_at": chain.get("last_event_at"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    signature_value = _sign_payload(payload, signing_key=signing_key)
+    signature_value = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
     checkpoint = {
         "checkpoint_version": "v1",
         "payload": payload,

@@ -10,6 +10,7 @@ from releasegate.audit.overrides import record_override
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets, PolicyBinding
 from releasegate.server import app
+from tests.auth_helpers import jwt_headers
 
 
 client = TestClient(app)
@@ -105,6 +106,7 @@ def test_audit_proof_pack_contains_evidence(monkeypatch, tmp_path):
     resp = client.get(
         f"/audit/proof-pack/{stored.decision_id}",
         params={"format": "json", "tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["proofpack:read", "checkpoint:read", "policy:read"]),
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -148,6 +150,7 @@ def test_audit_proof_pack_zip_format(monkeypatch, tmp_path):
     resp = client.get(
         f"/audit/proof-pack/{stored.decision_id}",
         params={"format": "zip", "tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["proofpack:read", "checkpoint:read", "policy:read"]),
     )
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"

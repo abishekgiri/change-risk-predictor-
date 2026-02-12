@@ -12,6 +12,7 @@ from releasegate.decision.types import Decision, EnforcementTargets, DecisionTyp
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
 from releasegate.observability.internal_metrics import incr
+from releasegate.security.audit import log_security_event
 from releasegate.storage.base import resolve_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,19 @@ class WorkflowGate:
                     reason=normalized_override_reason,
                     idempotency_key=override_idempotency_key,
                     tenant_id=tenant_id,
+                )
+                log_security_event(
+                    tenant_id=tenant_id,
+                    principal_id=request.actor_account_id or "jira-workflow",
+                    auth_method="signature",
+                    action="override_create",
+                    target_type="issue",
+                    target_id=request.issue_key,
+                    metadata={
+                        "decision_id": final_decision.decision_id,
+                        "repo": repo,
+                        "pr_number": pr_number,
+                    },
                 )
             except Exception as e:
                 logger.warning(f"Override ledger write failed: {e}")
