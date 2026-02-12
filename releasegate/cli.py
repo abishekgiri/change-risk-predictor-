@@ -63,6 +63,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow invalid policy files to be skipped (lint still runs on valid files).",
     )
 
+    jira_validate_p = sub.add_parser(
+        "validate-jira-config",
+        help="Validate Jira transition/role mapping config and optional Jira connectivity.",
+    )
+    jira_validate_p.add_argument(
+        "--transition-map",
+        default="releasegate/integrations/jira/jira_transition_map.yaml",
+        help="Path to jira_transition_map.yaml",
+    )
+    jira_validate_p.add_argument(
+        "--role-map",
+        default="releasegate/integrations/jira/jira_role_map.yaml",
+        help="Path to jira_role_map.yaml",
+    )
+    jira_validate_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
+    jira_validate_p.add_argument("--check-jira", action="store_true", help="Validate mappings against live Jira metadata")
+    jira_validate_p.add_argument("--format", default="text", choices=["text", "json"])
+
+    bundle_validate_p = sub.add_parser(
+        "validate-policy-bundle",
+        help="Deploy-time guard: validate compiled policy bundle load + lint.",
+    )
+    bundle_validate_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
+    bundle_validate_p.add_argument("--format", default="text", choices=["text", "json"])
+    bundle_validate_p.add_argument(
+        "--no-schema-strict",
+        action="store_true",
+        help="Allow invalid policy files to be skipped while validating policy bundle.",
+    )
+
     checkpoint_p = sub.add_parser("checkpoint-override", help="Create signed override-ledger root checkpoint.")
     checkpoint_p.add_argument("--repo", required=True)
     checkpoint_p.add_argument("--cadence", default="daily", choices=["daily", "weekly"])
@@ -454,6 +484,41 @@ def main() -> int:
             print(json.dumps(report, indent=2))
         else:
             print(format_lint_report(report))
+        return 0 if report.get("ok") else 1
+
+    if args.cmd == "validate-policy-bundle":
+        from releasegate.policy.lint import lint_compiled_policies, format_lint_report
+
+        report = lint_compiled_policies(
+            policy_dir=args.policy_dir,
+            strict_schema=not args.no_schema_strict,
+        )
+        report = {
+            **report,
+            "validation_profile": "deploy_bundle_v1",
+        }
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_lint_report(report))
+        return 0 if report.get("ok") else 1
+
+    if args.cmd == "validate-jira-config":
+        from releasegate.integrations.jira.validate import (
+            format_jira_validation_report,
+            validate_jira_config_files,
+        )
+
+        report = validate_jira_config_files(
+            transition_map_path=args.transition_map,
+            role_map_path=args.role_map,
+            policy_dir=args.policy_dir,
+            check_jira=args.check_jira,
+        )
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_jira_validation_report(report))
         return 0 if report.get("ok") else 1
 
     if args.cmd == "checkpoint-override":

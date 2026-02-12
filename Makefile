@@ -1,4 +1,4 @@
-.PHONY: test verify phase6 demo clean
+.PHONY: test verify phase6 demo validate-policy-bundle validate-jira-config clean
 
 test:
 	pytest
@@ -12,6 +12,12 @@ phase6:
 
 demo:
 	python3 scripts/demo_block_override_export.py
+
+validate-policy-bundle:
+	python3 -m releasegate.cli validate-policy-bundle
+
+validate-jira-config:
+	python3 -m releasegate.cli validate-jira-config
 
 clean:
 	rm -rf __pycache__

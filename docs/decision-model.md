@@ -84,6 +84,8 @@ Decision output is split into two parts:
 | `SOD_PR_AUTHOR_CANNOT_OVERRIDE` | Override blocked by separation-of-duties (PR author). |
 | `SOD_REQUESTOR_CANNOT_SELF_APPROVE` | Override blocked by separation-of-duties (requestor self-approval). |
 | `RISK_METADATA_FETCH_ERROR` | Risk metadata retrieval failed. |
+| `TIMEOUT_DEPENDENCY` | Dependency timed out in strict mode (blocks transition). |
+| `SKIPPED_TIMEOUT` | Dependency timed out in permissive mode (audited skip/allow). |
 | `SYSTEM_ERROR` | Internal evaluation/enforcement error. |
 
 ## Hashing Rules
@@ -127,6 +129,7 @@ Ordering rules:
 | Missing risk metadata | `SKIPPED` + `MISSING_RISK_METADATA` | `BLOCKED` + `MISSING_RISK_METADATA_STRICT` |
 | No policies mapped | `SKIPPED` + `NO_POLICIES_MAPPED` | `BLOCKED` + `NO_POLICIES_MAPPED_STRICT` |
 | Invalid policy reference | `SKIPPED` + `INVALID_POLICY_REFERENCE` | `BLOCKED` + `INVALID_POLICY_REFERENCE_STRICT` |
+| Dependency timeout (Jira/policy/storage) | `SKIPPED` + `SKIPPED_TIMEOUT` | `BLOCKED` + `TIMEOUT_DEPENDENCY` |
 | Override SoD violation | `BLOCKED` | `BLOCKED` |
 | Expired/missing override justification | `BLOCKED` | `BLOCKED` |
 | Internal system error | `ERROR` decision recorded; enforcement allow/deny based on strictness and environment | `ERROR` decision recorded; production behavior remains fail-closed |

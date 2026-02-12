@@ -1,3 +1,6 @@
+import json
+import logging
+
 from fastapi import APIRouter, Header, HTTPException
 from releasegate.audit.idempotency import (
     claim_idempotency,
@@ -14,6 +17,7 @@ from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 @router.post("/transition/check", response_model=TransitionCheckResponse)
 async def check_transition(
@@ -82,6 +86,24 @@ async def check_transition(
     if delivery_id:
         request.context_overrides["delivery_id"] = delivery_id
 
+    request_id = delivery_id or idem_key
+    logger.info(
+        json.dumps(
+            {
+                "event": "jira.transition.request.received",
+                "component": "jira_routes",
+                "tenant_id": tenant_id,
+                "decision_id": "pending",
+                "request_id": request_id,
+                "issue_key": request.issue_key,
+                "transition_id": request.transition_id,
+                "result": "PENDING",
+                "reason_code": "PENDING",
+            },
+            sort_keys=True,
+        )
+    )
+
     try:
         claim = claim_idempotency(
             tenant_id=tenant_id,
@@ -93,7 +115,25 @@ async def check_transition(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if claim.state == "replay" and claim.response is not None:
-        return TransitionCheckResponse.model_validate(claim.response)
+        replay = TransitionCheckResponse.model_validate(claim.response)
+        logger.info(
+            json.dumps(
+                {
+                    "event": "jira.transition.request.replay",
+                    "component": "jira_routes",
+                    "tenant_id": tenant_id,
+                    "decision_id": replay.decision_id,
+                    "request_id": request_id,
+                    "issue_key": request.issue_key,
+                    "transition_id": request.transition_id,
+                    "result": replay.status,
+                    "reason_code": "IDEMPOTENT_REPLAY",
+                    "policy_bundle_hash": replay.policy_hash,
+                },
+                sort_keys=True,
+            )
+        )
+        return replay
     if claim.state == "in_progress":
         replayed = wait_for_idempotency_response(
             tenant_id=tenant_id,
@@ -106,6 +146,23 @@ async def check_transition(
 
     gate = WorkflowGate()
     response = gate.check_transition(request)
+    logger.info(
+        json.dumps(
+            {
+                "event": "jira.transition.request.completed",
+                "component": "jira_routes",
+                "tenant_id": tenant_id,
+                "decision_id": response.decision_id,
+                "request_id": request_id,
+                "issue_key": request.issue_key,
+                "transition_id": request.transition_id,
+                "result": response.status,
+                "reason_code": "COMPLETED",
+                "policy_bundle_hash": response.policy_hash,
+            },
+            sort_keys=True,
+        )
+    )
     complete_idempotency(
         tenant_id=tenant_id,
         operation=operation,

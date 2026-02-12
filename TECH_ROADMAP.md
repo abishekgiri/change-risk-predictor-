@@ -25,6 +25,9 @@ ReleaseGate is a Jira-native release governance and enforcement engine.
 - Add CI checks to prevent breaking changes in those contracts.
 - Add explicit deprecation/version policy before introducing any `v2` artifact.
 - Transaction envelope unification (`idempotency key claim` + `primary write` + `audit append` + `ledger update` in one DB transaction) is planned.
+- Forge production hardening with structured decision logs and deterministic timeout handling is in progress.
+- Jira config UX hardening via `validate-jira-config` and versioned mapping templates is in progress.
+- Deploy-time policy bundle validation (`validate-policy-bundle`) is in progress.
 
 ## Non-Goals
 - No dashboards.
