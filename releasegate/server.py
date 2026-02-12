@@ -21,17 +21,28 @@ from fastapi.responses import PlainTextResponse, Response
 import csv
 import io
 import zipfile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
-from releasegate.storage.base import resolve_tenant_id
+from releasegate.security.auth import require_access, tenant_from_request
+from releasegate.security.audit import log_security_event
+from releasegate.security.api_keys import create_api_key, list_api_keys, revoke_api_key, rotate_api_key
+from releasegate.security.checkpoint_keys import list_checkpoint_signing_keys, rotate_checkpoint_signing_key
+from releasegate.security.webhook_keys import create_webhook_key, list_webhook_keys
+from releasegate.security.types import AuthContext
+from releasegate.storage import get_storage_backend
 
 # Load env vars
 load_dotenv()
 
 
 # Initialize App
-app = FastAPI(title="ComplianceBot Webhook Listener")
+app = FastAPI(
+    title="ComplianceBot Webhook Listener",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +50,47 @@ class CIScoreRequest(BaseModel):
     repo: str
     pr: int
     sha: Optional[str] = None
+
+
+class ManualOverrideRequest(BaseModel):
+    repo: str
+    pr_number: Optional[int] = None
+    issue_key: Optional[str] = None
+    decision_id: Optional[str] = None
+    reason: str = Field(min_length=3)
+    target_type: str = "pr"
+    target_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+class PublishPolicyRequest(BaseModel):
+    policy_bundle_hash: str
+    policy_snapshot: list[dict] = Field(default_factory=list)
+    activate: bool = True
+    note: Optional[str] = None
+
+
+class CreateApiKeyRequest(BaseModel):
+    name: str
+    roles: list[str] = Field(default_factory=lambda: ["operator"])
+    scopes: list[str] = Field(default_factory=lambda: ["enforcement:write"])
+    tenant_id: Optional[str] = None
+
+
+class RotateCheckpointSigningKeyRequest(BaseModel):
+    key: str = Field(min_length=16)
+    tenant_id: Optional[str] = None
+
+
+class RotateApiKeyRequest(BaseModel):
+    tenant_id: Optional[str] = None
+
+
+class CreateWebhookSigningKeyRequest(BaseModel):
+    integration_id: str = Field(min_length=1)
+    tenant_id: Optional[str] = None
+    rotate_existing: bool = True
+    secret: Optional[str] = None
 
 
 # --- Config ---
@@ -49,9 +101,11 @@ LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "fa
 LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _require_tenant_id(value: Optional[str]) -> str:
+def _effective_tenant(auth: AuthContext, requested_tenant: Optional[str]) -> str:
     try:
-        return str(resolve_tenant_id(value))
+        return tenant_from_request(auth, requested_tenant)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -154,7 +208,14 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
 
 
 @app.post("/ci/score")
-def ci_score(payload: CIScoreRequest):
+def ci_score(
+    payload: CIScoreRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
     """
     CI Endpoint: Returns metadata-only risk classification for a PR.
     """
@@ -191,6 +252,12 @@ async def github_webhook(
     request: Request,
     x_hub_signature_256: str = Header(None),
     x_github_event: str = Header(None),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        allow_signature=True,
+        rate_profile="webhook",
+    ),
 ):
     payload = await request.body()
 
@@ -307,6 +374,24 @@ def health_check():
     return {"status": "ok", "service": "RiskBot Webhook Listener"}
 
 
+@app.get("/health")
+def health():
+    storage_status = "ok"
+    try:
+        get_storage_backend().fetchone("SELECT 1 AS ok")
+    except Exception:
+        storage_status = "error"
+    status_code = 200 if storage_status == "ok" else 503
+    payload = {
+        "status": "ok" if storage_status == "ok" else "error",
+        "service": "RiskBot Webhook Listener",
+        "storage": storage_status,
+    }
+    if status_code != 200:
+        raise HTTPException(status_code=status_code, detail=payload)
+    return payload
+
+
 @app.on_event("startup")
 def verify_ledger_on_startup():
     from releasegate.storage.schema import init_db
@@ -330,10 +415,19 @@ def verify_ledger_on_startup():
 
 
 @app.get("/audit/ledger/verify")
-def verify_ledger(repo: Optional[str] = None, pr: Optional[int] = None, tenant_id: Optional[str] = None):
+def verify_ledger(
+    repo: Optional[str] = None,
+    pr: Optional[int] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
     from releasegate.audit.overrides import verify_all_override_chains, verify_override_chain
 
-    effective_tenant = _require_tenant_id(tenant_id)
+    effective_tenant = _effective_tenant(auth, tenant_id)
     if repo:
         result = verify_override_chain(repo=repo, pr=pr, tenant_id=effective_tenant)
         return {"tenant_id": effective_tenant, "repo": repo, **result}
@@ -361,6 +455,15 @@ def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = N
     if decision == "SKIPPED":
         return "POLICY_SKIPPED"
     return "POLICY_ALLOWED"
+
+
+def _bounded_limit(value: int, *, max_allowed: int, field: str = "limit") -> int:
+    bounded = int(value)
+    if bounded <= 0:
+        raise HTTPException(status_code=400, detail=f"{field} must be > 0")
+    if bounded > max_allowed:
+        raise HTTPException(status_code=400, detail=f"{field} exceeds maximum allowed ({max_allowed})")
+    return bounded
 
 
 def _soc2_records(
@@ -419,12 +522,18 @@ def audit_export(
     include_overrides: bool = False,
     verify_chain: bool = False,
     contract: str = "soc2_v1",
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
 ):
     """
     Export audit decisions in JSON or CSV.
     """
     from releasegate.audit.reader import AuditReader
-    effective_tenant = _require_tenant_id(tenant_id)
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    limit = _bounded_limit(limit, max_allowed=500, field="limit")
     rows = AuditReader.list_decisions(
         repo=repo,
         limit=limit,
@@ -462,6 +571,16 @@ def audit_export(
         if verify_chain:
             payload["override_chain"] = chain_result if chain_result is not None else {"valid": False, "checked": 0}
 
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="audit_export",
+        target_type="repo",
+        target_id=repo,
+        metadata={"format": format.lower(), "contract": contract, "row_count": len(export_rows)},
+    )
+
     if format.lower() == "csv":
         if not export_rows:
             return PlainTextResponse("", media_type="text/csv")
@@ -472,7 +591,6 @@ def audit_export(
         for r in export_rows:
             writer.writerow(r)
         return PlainTextResponse(output.getvalue(), media_type="text/csv")
-
     return payload
 
 
@@ -483,19 +601,34 @@ def create_override_checkpoint(
     pr: Optional[int] = None,
     at: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
 ):
     from releasegate.audit.checkpoints import create_override_checkpoint as create_checkpoint
 
+    effective_tenant = _effective_tenant(auth, tenant_id)
     try:
         result = create_checkpoint(
             repo=repo,
             cadence=cadence,
             pr=pr,
             at=at,
-            tenant_id=_require_tenant_id(tenant_id),
+            tenant_id=effective_tenant,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="checkpoint_create",
+        target_type="repo",
+        target_id=repo,
+        metadata={"cadence": cadence, "pr_number": pr},
+    )
     return result
 
 
@@ -506,16 +639,22 @@ def verify_override_checkpoint(
     cadence: str = "daily",
     pr: Optional[int] = None,
     tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
 ):
     from releasegate.audit.checkpoints import verify_override_checkpoint as verify_checkpoint
 
+    effective_tenant = _effective_tenant(auth, tenant_id)
     try:
         result = verify_checkpoint(
             repo=repo,
             cadence=cadence,
             period_id=period_id,
             pr=pr,
-            tenant_id=_require_tenant_id(tenant_id),
+            tenant_id=effective_tenant,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -530,15 +669,22 @@ def simulate_policy_impact(
     limit: int = 100,
     policy_dir: str = "releasegate/policy/compiled",
     tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
 ):
     from releasegate.policy.simulation import simulate_policy_impact as run_simulation
 
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    limit = _bounded_limit(limit, max_allowed=500, field="limit")
     try:
         return run_simulation(
             repo=repo,
             limit=limit,
             policy_dir=policy_dir,
-            tenant_id=_require_tenant_id(tenant_id),
+            tenant_id=effective_tenant,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Policy simulation failed: {exc}") from exc
@@ -550,13 +696,18 @@ def audit_proof_pack(
     format: str = "json",
     checkpoint_cadence: str = "daily",
     tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["proofpack:read"],
+        rate_profile="heavy",
+    ),
 ):
     from releasegate.audit.reader import AuditReader
     from releasegate.audit.overrides import list_overrides, verify_override_chain
     from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
     from releasegate.audit.proof_packs import record_proof_pack_generation
 
-    effective_tenant = _require_tenant_id(tenant_id)
+    effective_tenant = _effective_tenant(auth, tenant_id)
     row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
@@ -621,6 +772,15 @@ def audit_proof_pack(
             pr_number=pr_number,
             tenant_id=effective_tenant,
         )
+        log_security_event(
+            tenant_id=effective_tenant,
+            principal_id=auth.principal_id,
+            auth_method=auth.auth_method,
+            action="proof_pack_export",
+            target_type="decision",
+            target_id=decision_id,
+            metadata={"format": "json"},
+        )
         return bundle
     if format.lower() != "zip":
         raise HTTPException(status_code=400, detail="Unsupported format (expected json or zip)")
@@ -643,6 +803,15 @@ def audit_proof_pack(
         pr_number=pr_number,
         tenant_id=effective_tenant,
     )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="proof_pack_export",
+        target_type="decision",
+        target_id=decision_id,
+        metadata={"format": "zip"},
+    )
     return Response(
         content=memory.getvalue(),
         media_type="application/zip",
@@ -650,8 +819,282 @@ def audit_proof_pack(
     )
 
 
+@app.post("/audit/overrides")
+def create_manual_override(
+    payload: ManualOverrideRequest,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["override:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.overrides import record_override
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    override = record_override(
+        repo=payload.repo,
+        pr_number=payload.pr_number,
+        issue_key=payload.issue_key,
+        decision_id=payload.decision_id,
+        actor=auth.principal_id,
+        reason=payload.reason,
+        idempotency_key=payload.idempotency_key,
+        tenant_id=effective_tenant,
+        target_type=payload.target_type,
+        target_id=payload.target_id,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="override_create",
+        target_type=payload.target_type,
+        target_id=payload.target_id or payload.repo,
+        metadata={"repo": payload.repo, "pr_number": payload.pr_number, "decision_id": payload.decision_id},
+    )
+    return override
+
+
+@app.post("/policy/publish")
+def publish_policy_bundle(
+    payload: PublishPolicyRequest,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.policy_bundles import get_policy_bundle, store_policy_bundle
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    snapshot = payload.policy_snapshot
+    if not snapshot:
+        existing = get_policy_bundle(tenant_id=effective_tenant, policy_bundle_hash=payload.policy_bundle_hash)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Policy bundle not found and no policy_snapshot provided")
+        snapshot = existing.get("policy_snapshot", [])
+
+    if payload.activate:
+        get_storage_backend().execute(
+            "UPDATE policy_bundles SET is_active = 0 WHERE tenant_id = ?",
+            (effective_tenant,),
+        )
+    store_policy_bundle(
+        tenant_id=effective_tenant,
+        policy_bundle_hash=payload.policy_bundle_hash,
+        policy_snapshot=snapshot,
+        is_active=payload.activate,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_publish",
+        target_type="policy_bundle",
+        target_id=payload.policy_bundle_hash,
+        metadata={"activate": payload.activate, "policy_count": len(snapshot), "note": payload.note},
+    )
+    return {
+        "status": "published",
+        "tenant_id": effective_tenant,
+        "policy_bundle_hash": payload.policy_bundle_hash,
+        "active": payload.activate,
+        "policy_count": len(snapshot),
+    }
+
+
+@app.post("/auth/api-keys")
+def create_scoped_api_key(
+    payload: CreateApiKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    created = create_api_key(
+        tenant_id=effective_tenant,
+        name=payload.name,
+        roles=payload.roles or ["operator"],
+        scopes=payload.scopes or ["enforcement:write"],
+        created_by=auth.principal_id,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="api_key_create",
+        target_type="api_key",
+        target_id=created["key_id"],
+        metadata={"name": payload.name, "roles": created["roles"], "scopes": created["scopes"]},
+    )
+    return created
+
+
+@app.get("/auth/api-keys")
+def list_scoped_api_keys(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "keys": list_api_keys(tenant_id=effective_tenant),
+    }
+
+
+@app.delete("/auth/api-keys/{key_id}")
+def revoke_scoped_api_key(
+    key_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    revoked = revoke_api_key(tenant_id=effective_tenant, key_id=key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="API key not found")
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="api_key_revoke",
+        target_type="api_key",
+        target_id=key_id,
+    )
+    return {"status": "revoked", "tenant_id": effective_tenant, "key_id": key_id}
+
+
+@app.post("/auth/api-keys/{key_id}/rotate")
+def rotate_scoped_api_key(
+    key_id: str,
+    payload: RotateApiKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    rotated = rotate_api_key(
+        tenant_id=effective_tenant,
+        key_id=key_id,
+        rotated_by=auth.principal_id,
+    )
+    if not rotated:
+        raise HTTPException(status_code=404, detail="API key not found")
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="api_key_rotate",
+        target_type="api_key",
+        target_id=rotated["key_id"],
+        metadata={"rotated_from_key_id": key_id},
+    )
+    return rotated
+
+
+@app.post("/auth/webhook-signing-keys")
+def create_scoped_webhook_signing_key(
+    payload: CreateWebhookSigningKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    created = create_webhook_key(
+        tenant_id=effective_tenant,
+        integration_id=payload.integration_id,
+        created_by=auth.principal_id,
+        raw_secret=payload.secret,
+        deactivate_existing=payload.rotate_existing,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="webhook_key_create",
+        target_type="webhook_signing_key",
+        target_id=created["key_id"],
+        metadata={"integration_id": payload.integration_id, "rotate_existing": payload.rotate_existing},
+    )
+    return created
+
+
+@app.get("/auth/webhook-signing-keys")
+def list_scoped_webhook_signing_keys(
+    integration_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "keys": list_webhook_keys(tenant_id=effective_tenant, integration_id=integration_id),
+    }
+
+
+@app.post("/auth/checkpoint-signing-keys/rotate")
+def rotate_checkpoint_key(
+    payload: RotateCheckpointSigningKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    rotated = rotate_checkpoint_signing_key(
+        tenant_id=effective_tenant,
+        raw_key=payload.key,
+        created_by=auth.principal_id,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="checkpoint_key_rotate",
+        target_type="checkpoint_signing_key",
+        target_id=rotated["key_id"],
+    )
+    return rotated
+
+
+@app.get("/auth/checkpoint-signing-keys")
+def list_checkpoint_keys(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "keys": list_checkpoint_signing_keys(tenant_id=effective_tenant),
+    }
+
+
 @app.post("/decisions/{decision_id}/replay")
-def replay_stored_decision(decision_id: str, tenant_id: Optional[str] = None):
+def replay_stored_decision(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
     """
     Deterministically replay a stored decision using saved input snapshot + policy bindings.
     """
@@ -659,7 +1102,7 @@ def replay_stored_decision(decision_id: str, tenant_id: Optional[str] = None):
     from releasegate.decision.types import Decision
     from releasegate.replay.decision_replay import replay_decision
 
-    row = AuditReader.get_decision(decision_id, tenant_id=_require_tenant_id(tenant_id))
+    row = AuditReader.get_decision(decision_id, tenant_id=_effective_tenant(auth, tenant_id))
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
 
@@ -681,4 +1124,13 @@ def replay_stored_decision(decision_id: str, tenant_id: Optional[str] = None):
     report["created_at"] = row.get("created_at")
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
+    log_security_event(
+        tenant_id=decision.tenant_id,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="decision_replay",
+        target_type="decision",
+        target_id=decision_id,
+        metadata={"repo": report.get("repo"), "pr_number": report.get("pr_number")},
+    )
     return report

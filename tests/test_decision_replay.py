@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets, PolicyBinding
 from releasegate.server import app
+from tests.auth_helpers import jwt_headers
 
 
 client = TestClient(app)
@@ -86,7 +87,11 @@ def test_replay_endpoint_recomputes_status_and_policy_hash():
     )
     stored = AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number)
 
-    resp = client.post(f"/decisions/{stored.decision_id}/replay", params={"tenant_id": "tenant-test"})
+    resp = client.post(
+        f"/decisions/{stored.decision_id}/replay",
+        params={"tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["policy:read"]),
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["decision_id"] == stored.decision_id
@@ -129,7 +134,11 @@ def test_replay_endpoint_requires_policy_bindings():
     )
     stored = AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number)
 
-    resp = client.post(f"/decisions/{stored.decision_id}/replay", params={"tenant_id": "tenant-test"})
+    resp = client.post(
+        f"/decisions/{stored.decision_id}/replay",
+        params={"tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["policy:read"]),
+    )
     assert resp.status_code == 422
     detail = resp.json().get("detail", "")
     assert "no policy bindings" in detail.lower()

@@ -1,13 +1,11 @@
 import os
 import json
 import hashlib
-from datetime import datetime, timezone
 from typing import Dict, List, Any
 
 from releasegate.storage.paths import get_bundle_path
-from releasegate.audit.types import AuditEvent, TraceableFinding
+from releasegate.audit.types import TraceableFinding
 from releasegate.storage.atomic import ensure_directory, atomic_write
-from releasegate.evidence.snippets import extract_snippet
 
 class EvidenceBundler:
     """
@@ -44,28 +42,14 @@ class EvidenceBundler:
         """
         Writes all artifacts and returns the SHA256 of the manifest.
         """
+        _ = diff_text  # Diff content is intentionally handled in-memory only.
         
         # 1. Write Data Artifacts
         self._write_json("inputs/pr_metadata.json", inputs)
         self._write_json("findings.json", [f.__dict__ for f in findings])
         self._write_json("policies_used.json", policies)
-        
-        # 2. Write Diff Artifact
-        ensure_directory(os.path.join(self.bundle_path, "artifacts"))
-        self._write_file("artifacts/diff.patch", diff_text)
-        
-        # 3. Generate Snippets (if any findings)
-        ensure_directory(os.path.join(self.bundle_path, "artifacts/snippets"))
-        for i, finding in enumerate(findings):
-            # Try to grab filename from message or context if possible
-            # For MVP, we assume global diff or specific known file
-            # This logic mimics finding context extraction
-            snippet = extract_snippet(diff_text, "unknown.py") 
-            fname = f"{finding.fingerprint[:8]}_{i}.txt"
-            self._write_file(f"artifacts/snippets/{fname}", snippet)
-            finding.evidence_files.append(f"artifacts/snippets/{fname}")
-        
-        # 4. Create Manifest
+
+        # 2. Create Manifest
         # Scan all files we just wrote
         manifest = {}
         for root, _, files in os.walk(self.bundle_path):
@@ -76,6 +60,5 @@ class EvidenceBundler:
         
         self._write_json("manifest.json", manifest)
         
-        # 5. Return Manifest Hash (Root of Trust)
+        # 3. Return Manifest Hash (Root of Trust)
         return self._compute_file_hash("manifest.json")
-

@@ -8,7 +8,7 @@ from releasegate.config import DB_PATH
 from releasegate.storage.migrations import MIGRATIONS, apply_sqlite_migrations
 
 
-SCHEMA_VERSION = "v5"
+SCHEMA_VERSION = "v6"
 
 
 def _init_postgres_schema() -> str:
@@ -219,6 +219,137 @@ def _init_postgres_schema() -> str:
         ON metrics_events(tenant_id, metric_name, created_at)
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            key_algorithm TEXT,
+            key_iterations INTEGER,
+            key_salt TEXT,
+            roles_json JSONB NOT NULL,
+            scopes_json JSONB NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            last_used_at TIMESTAMPTZ,
+            revoked_at TIMESTAMPTZ,
+            is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_tenant_key_hash
+        ON api_keys(tenant_id, key_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active
+        ON api_keys(tenant_id, revoked_at, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_global_key_id
+        ON api_keys(key_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_nonces (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            nonce TEXT NOT NULL,
+            signature_hash TEXT NOT NULL,
+            used_at TIMESTAMPTZ NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, integration_id, nonce)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_webhook_nonces_expires_at
+        ON webhook_nonces(expires_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_signing_keys (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_secret TEXT NOT NULL,
+            secret_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            rotated_at TIMESTAMPTZ,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            PRIMARY KEY (tenant_id, integration_id, key_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_signing_keys_key_id
+        ON webhook_signing_keys(key_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_webhook_signing_keys_tenant_integration_active
+        ON webhook_signing_keys(tenant_id, integration_id, is_active, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            auth_method TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_security_events_tenant_action_created
+        ON security_audit_events(tenant_id, action, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS checkpoint_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            rotated_at TIMESTAMPTZ,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created
+        ON checkpoint_signing_keys(tenant_id, is_active, created_at)
+        """
+    )
     # Ensure existing Postgres deployments are hardened to tenant-scoped PKs.
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS tenant_id TEXT")
@@ -232,6 +363,44 @@ def _init_postgres_schema() -> str:
     cur.execute("ALTER TABLE audit_overrides ALTER COLUMN tenant_id SET NOT NULL")
     cur.execute("ALTER TABLE audit_checkpoints ALTER COLUMN tenant_id SET NOT NULL")
     cur.execute("ALTER TABLE audit_proof_packs ALTER COLUMN tenant_id SET NOT NULL")
+    cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_algorithm TEXT")
+    cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_iterations INTEGER")
+    cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_salt TEXT")
+    cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN")
+    cur.execute("UPDATE api_keys SET key_algorithm = COALESCE(NULLIF(btrim(key_algorithm), ''), 'legacy_sha256')")
+    cur.execute("UPDATE api_keys SET key_iterations = COALESCE(key_iterations, 0)")
+    cur.execute("UPDATE api_keys SET key_salt = COALESCE(key_salt, '')")
+    cur.execute("UPDATE api_keys SET is_enabled = COALESCE(is_enabled, CASE WHEN revoked_at IS NULL THEN TRUE ELSE FALSE END)")
+    cur.execute("ALTER TABLE api_keys ALTER COLUMN is_enabled SET DEFAULT TRUE")
+    cur.execute("ALTER TABLE api_keys ALTER COLUMN is_enabled SET NOT NULL")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_global_key_id ON api_keys(key_id)")
+    cur.execute("ALTER TABLE webhook_nonces ADD COLUMN IF NOT EXISTS integration_id TEXT")
+    cur.execute("ALTER TABLE webhook_nonces ADD COLUMN IF NOT EXISTS key_id TEXT")
+    cur.execute(
+        "UPDATE webhook_nonces SET integration_id = COALESCE(NULLIF(btrim(integration_id), ''), 'legacy')"
+    )
+    cur.execute("UPDATE webhook_nonces SET key_id = COALESCE(NULLIF(btrim(key_id), ''), 'legacy')")
+    cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN integration_id SET NOT NULL")
+    cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN key_id SET NOT NULL")
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM pg_constraint
+                WHERE conname = 'webhook_nonces_pkey'
+                  AND conrelid = 'webhook_nonces'::regclass
+            ) THEN
+                ALTER TABLE webhook_nonces DROP CONSTRAINT webhook_nonces_pkey;
+            END IF;
+            ALTER TABLE webhook_nonces ADD CONSTRAINT webhook_nonces_pkey PRIMARY KEY (tenant_id, integration_id, nonce);
+        EXCEPTION
+            WHEN duplicate_table THEN NULL;
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        """
+    )
     cur.execute(
         """
         DO $$
@@ -601,6 +770,89 @@ def init_db() -> str:
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS api_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            key_prefix TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            key_algorithm TEXT,
+            key_iterations INTEGER,
+            key_salt TEXT,
+            roles_json TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_nonces (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL DEFAULT 'legacy',
+            key_id TEXT NOT NULL DEFAULT 'legacy',
+            nonce TEXT NOT NULL,
+            signature_hash TEXT NOT NULL,
+            used_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, integration_id, nonce)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_signing_keys (
+            tenant_id TEXT NOT NULL,
+            integration_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_secret TEXT NOT NULL,
+            secret_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, integration_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            principal_id TEXT NOT NULL,
+            auth_method TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT,
+            target_id TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS checkpoint_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_context_id ON audit_decisions(context_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_created ON audit_decisions(tenant_id, repo, created_at)")
@@ -631,6 +883,20 @@ def init_db() -> str:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_metrics_events_tenant_metric_time ON metrics_events(tenant_id, metric_name, created_at)"
+    )
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_tenant_key_hash ON api_keys(tenant_id, key_hash)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_active ON api_keys(tenant_id, revoked_at, created_at)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_global_key_id ON api_keys(key_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_webhook_nonces_expires_at ON webhook_nonces(expires_at)")
+    cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_webhook_signing_keys_key_id ON webhook_signing_keys(key_id)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_webhook_signing_keys_tenant_integration_active ON webhook_signing_keys(tenant_id, integration_id, is_active, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_events_tenant_action_created ON security_audit_events(tenant_id, action, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created ON checkpoint_signing_keys(tenant_id, is_active, created_at)"
     )
 
     cursor.execute(

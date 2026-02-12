@@ -7,6 +7,7 @@ from releasegate.audit.overrides import record_override
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets
 from releasegate.server import app
+from tests.auth_helpers import jwt_headers
 
 
 client = TestClient(app)
@@ -57,6 +58,7 @@ def test_audit_export_soc2_contract_has_required_fields():
             "verify_chain": "true",
             "format": "json",
         },
+        headers=jwt_headers(),
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -89,6 +91,7 @@ def test_audit_export_soc2_csv_contains_contract_columns():
             "contract": "soc2_v1",
             "format": "csv",
         },
+        headers=jwt_headers(),
     )
     assert resp.status_code == 200
     text = resp.text
