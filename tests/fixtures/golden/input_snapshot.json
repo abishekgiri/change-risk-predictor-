@@ -1,0 +1,27 @@
+{
+  "repo": "golden-org/service-api",
+  "pr_number": 184,
+  "issue_key": "DEMO-1",
+  "transition": {
+    "id": "31",
+    "name": "Done",
+    "source_status": "Ready for Release",
+    "target_status": "Done",
+    "environment": "PRODUCTION",
+    "project_key": "DEMO",
+    "issue_type": "Task"
+  },
+  "actor": {
+    "account_id": "acct-golden-operator",
+    "email": "operator@releasegate.local"
+  },
+  "risk_metrics": {
+    "changed_files_count": 42,
+    "additions": 1200,
+    "deletions": 220
+  },
+  "override": {
+    "reason": "Emergency change approved by release governance",
+    "justification_required": true
+  }
+}

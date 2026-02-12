@@ -1,0 +1,17 @@
+policy_id: GOLDEN-BLOCK-001
+version: "1.0.0"
+name: "Golden Demo High Risk Block"
+description: "Blocks release transition when attached risk metadata is HIGH or CRITICAL."
+scope: pull_request
+enabled: true
+controls:
+  - signal: raw.risk.level
+    operator: in
+    value: ["HIGH", "CRITICAL"]
+enforcement:
+  result: BLOCK
+  message: "Golden demo policy blocked transition because attached risk is HIGH."
+evidence:
+  include:
+    - raw.risk.level
+    - raw.risk.score

@@ -1,0 +1,19 @@
+version: 1
+jira:
+  project_keys:
+    - DEMO
+  issue_types:
+    - Task
+
+gate_bindings:
+  release_gate:
+    - GOLDEN-BLOCK-001
+
+transitions:
+  - transition_id: "31"
+    transition_name: "Done"
+    gate: release_gate
+    mode: strict
+    applies_to:
+      environments:
+        - PRODUCTION

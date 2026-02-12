@@ -4,6 +4,11 @@ from typing import Any, Dict, Iterable
 
 from releasegate.utils.canonical import canonical_json, sha256_json, sha256_text
 
+NON_DETERMINISTIC_INPUT_KEYS = {
+    "computed_at",
+    "generated_at",
+}
+
 
 def _policy_binding_material(bindings: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
     material: list[Dict[str, Any]] = []
@@ -19,8 +24,22 @@ def _policy_binding_material(bindings: Iterable[Dict[str, Any]]) -> list[Dict[st
     return material
 
 
+def _normalize_input_snapshot(value: Any) -> Any:
+    if isinstance(value, dict):
+        normalized: Dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key) in NON_DETERMINISTIC_INPUT_KEYS:
+                continue
+            normalized[key] = _normalize_input_snapshot(item)
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_input_snapshot(item) for item in value]
+    return value
+
+
 def compute_input_hash(input_snapshot: Dict[str, Any] | None) -> str:
-    return sha256_json(input_snapshot or {})
+    # Exclude non-deterministic envelope timestamps from decision determinism.
+    return sha256_json(_normalize_input_snapshot(input_snapshot or {}))
 
 
 def compute_policy_hash_from_bindings(bindings: Iterable[Dict[str, Any]]) -> str:
