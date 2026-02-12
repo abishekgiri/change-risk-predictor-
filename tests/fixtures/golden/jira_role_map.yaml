@@ -1,0 +1,19 @@
+version: 1
+roles:
+  admin:
+    jira_groups:
+      - jira-administrators
+
+  operator:
+    jira_groups:
+      - release-operators
+    jira_project_roles:
+      - Developers
+
+  auditor:
+    jira_groups:
+      - compliance-auditors
+
+  read_only:
+    jira_groups:
+      - everyone

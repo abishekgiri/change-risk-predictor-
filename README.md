@@ -403,6 +403,18 @@ uvicorn releasegate.server:app --reload
 pytest
 ```
 
+### Golden Demo
+
+Prerequisites: Python 3.11+, `make` (Docker optional; not required for `make golden`).
+
+```bash
+make golden
+```
+
+Artifacts are written to `out/golden/`.
+`✅ PASS` means risk attach, transition block, override, proof-pack export+verify, replay, and simulation all succeeded.
+Manual verify: `python -m releasegate.cli verify-proof-pack out/golden/proof_pack.json --format json --signing-key <key>`.
+
 **Current status:**
 
 - 98 tests passing

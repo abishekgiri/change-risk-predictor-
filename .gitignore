@@ -29,6 +29,7 @@ credentials/
 
 # Generated Runtime Output
 audit_bundles/
+out/golden/
 *.bundle/
 explanation__*.json
 explanation__*.md
