@@ -22,6 +22,7 @@ class TransitionCheckRequest(BaseModel):
     environment: str = Field(..., description="Target environment (PRODUCTION, STAGING, etc.)")
     project_key: str = Field(..., description="Project Key e.g. PROJ")
     issue_type: str = Field(..., description="Issue Type e.g. Story, Bug")
+    tenant_id: Optional[str] = Field(None, description="Tenant/organization identity for multi-tenant isolation")
     
     # Overrides (Optional)
     context_overrides: Dict[str, Any] = Field(default_factory=dict, description="Manual context like repo/pr")
@@ -39,6 +40,7 @@ class TransitionCheckResponse(BaseModel):
     decision_id: str = Field(..., description="ReleaseGate Decision UUID")
     status: Literal["ALLOWED", "CONDITIONAL", "BLOCKED", "SKIPPED", "ERROR"] = Field(..., description="ReleaseGate Status")
     policy_hash: Optional[str] = Field(None, description="Hash fingerprint of compiled policy bundle")
+    tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
     
     requirements: List[str] = Field(default_factory=list, description="List of unsatisfied requirements")
     unlock_conditions: List[str] = Field(default_factory=list, description="Human readable unlock instructions")

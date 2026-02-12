@@ -28,5 +28,5 @@ async def health_check():
 
 
 @router.get("/metrics/internal")
-async def internal_metrics():
-    return metrics_snapshot()
+async def internal_metrics(tenant_id: str | None = None, include_tenants: bool = False):
+    return metrics_snapshot(tenant_id=tenant_id, include_tenants=include_tenants)

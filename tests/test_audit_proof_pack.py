@@ -102,7 +102,10 @@ def test_audit_proof_pack_contains_evidence(monkeypatch, tmp_path):
         signing_key="proof-secret",
     )
 
-    resp = client.get(f"/audit/proof-pack/{stored.decision_id}", params={"format": "json"})
+    resp = client.get(
+        f"/audit/proof-pack/{stored.decision_id}",
+        params={"format": "json", "tenant_id": "tenant-test"},
+    )
     assert resp.status_code == 200
     body = resp.json()
 
@@ -142,7 +145,10 @@ def test_audit_proof_pack_zip_format(monkeypatch, tmp_path):
     monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "proof-secret")
     monkeypatch.setenv("RELEASEGATE_CHECKPOINT_STORE_DIR", str(tmp_path))
 
-    resp = client.get(f"/audit/proof-pack/{stored.decision_id}", params={"format": "zip"})
+    resp = client.get(
+        f"/audit/proof-pack/{stored.decision_id}",
+        params={"format": "zip", "tenant_id": "tenant-test"},
+    )
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     assert resp.content.startswith(b"PK")

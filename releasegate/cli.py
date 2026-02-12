@@ -4,6 +4,8 @@ import os
 import json
 import yaml
 
+from releasegate.storage.base import resolve_tenant_id
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="releasegate")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -27,11 +29,13 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("--include-context", action="store_true", help="Include full context in output")
     eval_p.add_argument("--enforce", action="store_true", help="Execute enforcement actions")
     eval_p.add_argument("--no-audit", action="store_true", help="Skip writing to audit log")
+    eval_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     
     # Enforce Command (Retroactive)
     enforce_p = sub.add_parser("enforce", help="Enforce a previous decision")
     enforce_p.add_argument("--decision-id", required=True)
     enforce_p.add_argument("--dry-run", action="store_true", help="Plan actions but do not execute")
+    enforce_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
 
     # Audit Command
     audit_p = sub.add_parser("audit", help="Query audit logs.")
@@ -43,10 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--limit", type=int, default=20)
     audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
     audit_list.add_argument("--pr", type=int)
+    audit_list.add_argument("--tenant", required=True, help="Tenant/org identifier")
     
     # audit show
     audit_show = audit_sub.add_parser("show", help="Show full decision details")
     audit_show.add_argument("--decision-id", required=True)
+    audit_show.add_argument("--tenant", required=True, help="Tenant/org identifier")
 
     lint_p = sub.add_parser("lint-policies", help="Validate compiled policy schema and lint policy logic.")
     lint_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
@@ -62,20 +68,25 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint_p.add_argument("--cadence", default="daily", choices=["daily", "weekly"])
     checkpoint_p.add_argument("--pr", type=int)
     checkpoint_p.add_argument("--at", help="ISO timestamp for checkpoint cutoff (default: now)")
+    checkpoint_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     checkpoint_p.add_argument("--format", default="text", choices=["text", "json"])
 
     simulate_p = sub.add_parser("simulate-policies", help="Run what-if simulation over recent decisions.")
     simulate_p.add_argument("--repo", required=True)
     simulate_p.add_argument("--limit", type=int, default=100)
     simulate_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
+    simulate_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     simulate_p.add_argument("--format", default="text", choices=["text", "json"])
 
     proof_p = sub.add_parser("proof-pack", help="Export audit evidence bundle for a decision.")
     proof_p.add_argument("--decision-id", required=True)
     proof_p.add_argument("--format", default="json", choices=["json", "zip"])
     proof_p.add_argument("--checkpoint-cadence", default="daily", choices=["daily", "weekly"])
+    proof_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     proof_p.add_argument("--output", help="Output file path (required for zip)")
 
+    sub.add_parser("db-migrate", help="Apply forward-only DB migrations.")
+    sub.add_parser("db-migration-status", help="Show applied DB migrations.")
     sub.add_parser("version", help="Print version.")
     return p
 
@@ -86,9 +97,24 @@ def main() -> int:
         
     p = build_parser()
     args = p.parse_args()
+    if hasattr(args, "tenant") and getattr(args, "tenant", None):
+        os.environ["RELEASEGATE_TENANT_ID"] = args.tenant
 
     if args.cmd == "version":
         print("releasegate 0.1.0")
+        return 0
+
+    if args.cmd == "db-migrate":
+        from releasegate.storage.migrate import migrate
+
+        current = migrate()
+        print(json.dumps({"status": "ok", "schema_version": current}, indent=2))
+        return 0
+
+    if args.cmd == "db-migration-status":
+        from releasegate.storage.migrate import migration_status
+
+        print(json.dumps(migration_status(), indent=2))
         return 0
 
     if args.cmd == "analyze-pr":
@@ -263,11 +289,13 @@ def main() -> int:
             
             # 2. Check for Idempotency (Have we made this exact decision before?)
             from releasegate.audit.reader import AuditReader
-            existing_data = AuditReader.get_decision_by_evaluation_key(new_decision.evaluation_key)
+            existing_data = AuditReader.get_decision_by_evaluation_key(
+                new_decision.evaluation_key,
+                tenant_id=resolve_tenant_id(args.tenant),
+            )
             
             if existing_data:
                 # Reuse the existing decision
-                import json
                 from releasegate.decision.types import Decision
                 
                 decision_dict = json.loads(existing_data["full_decision_json"])
@@ -353,10 +381,10 @@ def main() -> int:
             from releasegate.enforcement.planner import EnforcementPlanner
             from releasegate.enforcement.runner import EnforcementRunner
             from releasegate.decision.types import Decision
-            import json
+            tenant_id = resolve_tenant_id(args.tenant)
             
             # 1. Fetch Decision
-            data = AuditReader.get_decision(args.decision_id)
+            data = AuditReader.get_decision(args.decision_id, tenant_id=tenant_id)
             if not data:
                 print(f"Error: Decision {args.decision_id} not found.", file=sys.stderr)
                 return 1
@@ -391,19 +419,19 @@ def main() -> int:
         from releasegate.audit.reader import AuditReader
         
         if args.audit_cmd == "list":
+            tenant_id = resolve_tenant_id(args.tenant)
             rows = AuditReader.list_decisions(
                 repo=args.repo,
                 limit=args.limit,
                 status=args.status,
-                pr=args.pr
+                pr=args.pr,
+                tenant_id=tenant_id,
             )
-            import json
             print(json.dumps(rows, indent=2, default=str)) # Simple JSON output for list
             
         elif args.audit_cmd == "show":
-            row = AuditReader.get_decision(args.decision_id)
+            row = AuditReader.get_decision(args.decision_id, tenant_id=resolve_tenant_id(args.tenant))
             if row:
-                import json
                 # Try to parse the inner JSON for pretty printing
                 try:
                     row["full_decision_json"] = json.loads(row["full_decision_json"])
@@ -431,17 +459,20 @@ def main() -> int:
     if args.cmd == "checkpoint-override":
         from releasegate.audit.checkpoints import create_override_checkpoint
 
+        tenant_id = resolve_tenant_id(args.tenant)
         result = create_override_checkpoint(
             repo=args.repo,
             cadence=args.cadence,
             pr=args.pr,
             at=args.at,
+            tenant_id=tenant_id,
         )
         if args.format == "json":
             print(json.dumps(result, indent=2, default=str))
         else:
             payload = result.get("payload", {})
             print(f"Checkpoint created: {result.get('path')}")
+            print(f"Tenant: {payload.get('tenant_id')}")
             print(f"Repo: {payload.get('repo')}")
             print(f"Cadence: {payload.get('cadence')}")
             print(f"Period: {payload.get('period_id')}")
@@ -452,14 +483,17 @@ def main() -> int:
     if args.cmd == "simulate-policies":
         from releasegate.policy.simulation import simulate_policy_impact
 
+        tenant_id = resolve_tenant_id(args.tenant)
         report = simulate_policy_impact(
             repo=args.repo,
             limit=args.limit,
             policy_dir=args.policy_dir,
+            tenant_id=tenant_id,
         )
         if args.format == "json":
             print(json.dumps(report, indent=2, default=str))
         else:
+            print(f"Tenant: {report.get('tenant_id')}")
             print(f"Repo: {report.get('repo')}")
             print(f"Policy Dir: {report.get('policy_dir')}")
             print(f"Policy Hash: {report.get('policy_hash')}")
@@ -474,8 +508,11 @@ def main() -> int:
         from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
         from releasegate.audit.overrides import list_overrides, verify_override_chain
         from releasegate.audit.reader import AuditReader
+        from releasegate.audit.proof_packs import record_proof_pack_generation
 
-        row = AuditReader.get_decision(args.decision_id)
+        tenant_id = resolve_tenant_id(args.tenant)
+
+        row = AuditReader.get_decision(args.decision_id, tenant_id=tenant_id)
         if not row:
             print("Decision not found.", file=sys.stderr)
             return 1
@@ -494,19 +531,21 @@ def main() -> int:
         chain_proof = None
         checkpoint_proof = None
         if repo:
-            overrides = list_overrides(repo=repo, limit=500, pr=pr_number)
+            overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=tenant_id)
             override_snapshot = next((o for o in overrides if o.get("decision_id") == args.decision_id), None)
-            chain_proof = verify_override_chain(repo=repo, pr=pr_number)
+            chain_proof = verify_override_chain(repo=repo, pr=pr_number, tenant_id=tenant_id)
             period_id = period_id_for_timestamp(created_at, cadence=args.checkpoint_cadence)
             checkpoint_proof = verify_override_checkpoint(
                 repo=repo,
                 cadence=args.checkpoint_cadence,
                 period_id=period_id,
                 pr=pr_number,
+                tenant_id=tenant_id,
             )
 
         bundle = {
             "bundle_version": "audit_proof_v1",
+            "tenant_id": tenant_id,
             "decision_id": args.decision_id,
             "repo": repo,
             "pr_number": pr_number,
@@ -519,6 +558,14 @@ def main() -> int:
         }
 
         if args.format == "json":
+            record_proof_pack_generation(
+                decision_id=args.decision_id,
+                output_format="json",
+                bundle_version=bundle["bundle_version"],
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+            )
             if args.output:
                 with open(args.output, "w", encoding="utf-8") as f:
                     json.dump(bundle, f, indent=2, default=str)
@@ -544,6 +591,14 @@ def main() -> int:
         memory.seek(0)
         with open(args.output, "wb") as f:
             f.write(memory.getvalue())
+        record_proof_pack_generation(
+            decision_id=args.decision_id,
+            output_format="zip",
+            bundle_version=bundle["bundle_version"],
+            repo=repo,
+            pr_number=pr_number,
+            tenant_id=tenant_id,
+        )
         print(f"Wrote proof pack: {args.output}")
         return 0
 

@@ -1,108 +1,141 @@
-import sqlite3
+from __future__ import annotations
+
 import hashlib
 import json
 from datetime import datetime, timezone
-from releasegate.config import DB_PATH
+from typing import Optional
+
+from releasegate.audit.policy_bundles import store_policy_bundle
 from releasegate.decision.types import Decision
+from releasegate.storage import get_storage_backend
+from releasegate.storage.base import resolve_tenant_id
+from releasegate.storage.schema import init_db
+
 
 class AuditRecorder:
     """
-    Writes decisions to the immutable audit log.
-    Enforces hashing and integrity.
+    Writes decisions to immutable audit storage and stores tenant-bound policy snapshots.
     """
-    
-    ENGINE_VERSION = "0.1.0" # Should come from package
+
+    ENGINE_VERSION = "0.2.0"
 
     @staticmethod
-    def record(decision: Decision):
-        # 1. Canonical Serialization (Sort keys for stable hash)
-        # Pydantic's model_dump_json doesn't guarantee key order by default in all versions reliably for hashing
-        # So we verify or re-dump.
-        # Actually pydantic v2 is usually good, but let's be safe: load -> dump with sort_keys=True
-        
-        raw_dict = decision.model_dump(mode='json')
-        canonical_json = json.dumps(raw_dict, sort_keys=True, ensure_ascii=False)
-        
-        # 2. Compute Integrity Hash
+    def _canonical_decision(decision: Decision) -> tuple[str, str]:
+        raw_dict = decision.model_dump(mode="json")
+        canonical_json = json.dumps(raw_dict, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         decision_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        
-        # 3. Insert (Insert Only - No Update)
-        # 3. Insert (Insert Only - No Update)
-        from releasegate.audit.db import get_connection
-        conn = get_connection()
-        cursor = conn.cursor()
-        
-        # We assume pr_number might be available via Context linkage or we extract from decision if we added it?
-        # The schema asks for repo/pr_number. The Decision object has `context_id`. 
-        # We might need to join or assume the caller passed context, OR we embedded repo/pr in Decision.
-        # Looking at Decision model: it has context_id, but not explicit repo/pr. 
-        # However, the `change` object in Context has them.
-        # BUT `record` only takes `Decision`.
-        # Strategy: The Decision JSON contains everything. For top-level columns (repo/pr), 
-        # we might need to query context or just store NULL if not easily available, 
-        # OR we parse the decision JSON if we stored context snapshot inside it? 
-        # Wait, the CLI lists "repo/pr". 
-        # Let's peek at Decision.context_id -> we assume we can't look up context from just ID easily if context isn't persisted.
-        # Correction: We didn't implement Context persistence yet (only Audit).
-        # FIX: We should extract repo/pr from the `Change` object if we had access to it.
-        # The CLI has `ctx` and `decision`.
-        # Updating `record` signature to take `EvaluationContext` optionally, or just extracting from decision if it has it.
-        # Decision has `matched_policies` etc.
-        # Let's update `record` to take `EvaluationContext` as well to populate the index columns.
-        pass
+        return canonical_json, decision_hash
 
     @staticmethod
-    def record_with_context(decision: Decision, repo: str, pr_number: int):
-        # 1. Canonical Serialization
-        raw_dict = decision.model_dump(mode='json')
-        canonical_json = json.dumps(raw_dict, sort_keys=True, ensure_ascii=False)
-        
-        # 2. Compute Integrity Hash
-        decision_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        
-        # 3. Insert
-        from releasegate.audit.db import get_connection
-        conn = get_connection()
-        cursor = conn.cursor()
-        
+    def _persist_policy_snapshots(
+        tenant_id: str,
+        decision: Decision,
+        created_at: str,
+    ) -> None:
+        if not decision.policy_bindings:
+            return
+        storage = get_storage_backend()
+        for binding in decision.policy_bindings:
+            policy_json = json.dumps(
+                binding.policy or {},
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            storage.execute(
+                """
+                INSERT INTO policy_snapshots (
+                    tenant_id, decision_id, policy_id, policy_version, policy_hash, policy_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id, decision_id, policy_id) DO NOTHING
+                """,
+                (
+                    tenant_id,
+                    decision.decision_id,
+                    binding.policy_id,
+                    binding.policy_version,
+                    binding.policy_hash,
+                    policy_json,
+                    created_at,
+                ),
+            )
+
+    @staticmethod
+    def record(decision: Decision) -> Decision:
+        repo = decision.enforcement_targets.repository
+        pr_number = decision.enforcement_targets.pr_number
+        return AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number, tenant_id=decision.tenant_id)
+
+    @staticmethod
+    def record_with_context(
+        decision: Decision,
+        repo: str,
+        pr_number: Optional[int],
+        tenant_id: Optional[str] = None,
+    ) -> Decision:
+        init_db()
+        storage = get_storage_backend()
+        effective_tenant = resolve_tenant_id(tenant_id or decision.tenant_id)
+        decision.tenant_id = effective_tenant
+        for binding in decision.policy_bindings:
+            if not getattr(binding, "tenant_id", None):
+                binding.tenant_id = effective_tenant
+
+        canonical_json, decision_hash = AuditRecorder._canonical_decision(decision)
+        created_at = decision.timestamp.astimezone(timezone.utc).isoformat()
+
         try:
-            cursor.execute("""
+            storage.execute(
+                """
                 INSERT INTO audit_decisions (
-                    decision_id, context_id, repo, pr_number, 
-                    release_status, policy_bundle_hash, engine_version, 
+                    decision_id, tenant_id, context_id, repo, pr_number,
+                    release_status, policy_bundle_hash, engine_version,
                     decision_hash, full_decision_json, created_at, evaluation_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                decision.decision_id,
-                decision.context_id,
-                repo,
-                pr_number,
-                decision.release_status,
-                decision.policy_bundle_hash,
-                AuditRecorder.ENGINE_VERSION,
-                decision_hash,
-                canonical_json,
-                decision.timestamp.isoformat(),
-                decision.evaluation_key
-            ))
-            conn.commit()
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.decision_id,
+                    effective_tenant,
+                    decision.context_id,
+                    repo,
+                    pr_number,
+                    decision.release_status,
+                    decision.policy_bundle_hash,
+                    AuditRecorder.ENGINE_VERSION,
+                    decision_hash,
+                    canonical_json,
+                    created_at,
+                    decision.evaluation_key,
+                ),
+            )
+            AuditRecorder._persist_policy_snapshots(
+                tenant_id=effective_tenant,
+                decision=decision,
+                created_at=created_at,
+            )
+            store_policy_bundle(
+                tenant_id=effective_tenant,
+                policy_bundle_hash=decision.policy_bundle_hash,
+                policy_snapshot=[b.model_dump(mode="json") for b in decision.policy_bindings],
+                is_active=True,
+            )
             return decision
-
-        except sqlite3.IntegrityError as e:
-            # Idempotency: evaluation_key already exists -> fetch existing row
-            if "audit_decisions.evaluation_key" in str(e) or "evaluation_key" in str(e):
-                cursor.execute("""
+        except Exception as exc:
+            # Idempotency collision on evaluation_key; return existing decision row.
+            lowered = str(exc).lower()
+            if decision.evaluation_key and ("evaluation_key" in lowered or "unique" in lowered):
+                row = storage.fetchone(
+                    """
                     SELECT full_decision_json
                     FROM audit_decisions
-                    WHERE evaluation_key = ?
+                    WHERE tenant_id = ? AND evaluation_key = ?
                     LIMIT 1
-                """, (decision.evaluation_key,))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    existing = row[0]
+                    """,
+                    (effective_tenant, decision.evaluation_key),
+                )
+                if row and row.get("full_decision_json"):
+                    existing = row["full_decision_json"]
                     if isinstance(existing, str):
                         existing = json.loads(existing)
                     return Decision.model_validate(existing)
             raise
-        finally:
-            conn.close()

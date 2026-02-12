@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from releasegate.policy.types import Requirement
+from releasegate.storage.base import resolve_tenant_id
 
 
 class DecisionType(str, Enum):
@@ -37,6 +38,7 @@ class PolicyBinding(BaseModel):
     policy_id: str
     policy_version: str
     policy_hash: str
+    tenant_id: str = Field(default_factory=resolve_tenant_id)
     policy: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -46,6 +48,7 @@ class Decision(BaseModel):
     This object is what gets audited and enforced.
     """
     decision_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    tenant_id: str = Field(default_factory=resolve_tenant_id)
     timestamp: datetime
     
     release_status: DecisionType

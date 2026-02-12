@@ -24,6 +24,7 @@ import zipfile
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
+from releasegate.storage.base import resolve_tenant_id
 
 # Load env vars
 load_dotenv()
@@ -46,6 +47,13 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # For API calls
 LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "false").strip().lower() in {"1", "true", "yes", "on"}
 LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _require_tenant_id(value: Optional[str]) -> str:
+    try:
+        return str(resolve_tenant_id(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
@@ -301,6 +309,9 @@ def health_check():
 
 @app.on_event("startup")
 def verify_ledger_on_startup():
+    from releasegate.storage.schema import init_db
+
+    init_db()
     if not LEDGER_VERIFY_ON_STARTUP:
         return
     from releasegate.audit.overrides import verify_all_override_chains
@@ -312,17 +323,21 @@ def verify_ledger_on_startup():
         if LEDGER_FAIL_ON_CORRUPTION:
             raise RuntimeError("Override ledger corruption detected")
     else:
-        logger.info("Override ledger verified at startup: checked_repos=%s", result.get("checked_repos", 0))
+        logger.info(
+            "Override ledger verified at startup: checked_chains=%s",
+            result.get("checked_chains", result.get("checked_repos", 0)),
+        )
 
 
 @app.get("/audit/ledger/verify")
-def verify_ledger(repo: Optional[str] = None, pr: Optional[int] = None):
+def verify_ledger(repo: Optional[str] = None, pr: Optional[int] = None, tenant_id: Optional[str] = None):
     from releasegate.audit.overrides import verify_all_override_chains, verify_override_chain
 
+    effective_tenant = _require_tenant_id(tenant_id)
     if repo:
-        result = verify_override_chain(repo=repo, pr=pr)
-        return {"repo": repo, **result}
-    return verify_all_override_chains()
+        result = verify_override_chain(repo=repo, pr=pr, tenant_id=effective_tenant)
+        return {"tenant_id": effective_tenant, "repo": repo, **result}
+    return verify_all_override_chains(tenant_id=effective_tenant)
 
 
 def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = None) -> str:
@@ -376,6 +391,7 @@ def _soc2_records(
         ov = override_map.get(r.get("decision_id"))
 
         records.append({
+            "tenant_id": r.get("tenant_id") or full.get("tenant_id"),
             "decision_id": r.get("decision_id"),
             "decision": decision,
             "reason_code": _derive_reason_code(decision, message, explicit_reason),
@@ -399,6 +415,7 @@ def audit_export(
     limit: int = 200,
     status: Optional[str] = None,
     pr: Optional[int] = None,
+    tenant_id: Optional[str] = None,
     include_overrides: bool = False,
     verify_chain: bool = False,
     contract: str = "soc2_v1",
@@ -407,7 +424,14 @@ def audit_export(
     Export audit decisions in JSON or CSV.
     """
     from releasegate.audit.reader import AuditReader
-    rows = AuditReader.list_decisions(repo=repo, limit=limit, status=status, pr=pr)
+    effective_tenant = _require_tenant_id(tenant_id)
+    rows = AuditReader.list_decisions(
+        repo=repo,
+        limit=limit,
+        status=status,
+        pr=pr,
+        tenant_id=effective_tenant,
+    )
     payload = {"decisions": rows}
     overrides = []
     chain_result = None
@@ -417,10 +441,10 @@ def audit_export(
     if include_override_data:
         try:
             from releasegate.audit.overrides import list_overrides, verify_override_chain
-            overrides = list_overrides(repo=repo, limit=limit, pr=pr)
+            overrides = list_overrides(repo=repo, limit=limit, pr=pr, tenant_id=effective_tenant)
             payload["overrides"] = overrides if include_overrides else []
             if verify_chain:
-                chain_result = verify_override_chain(repo=repo, pr=pr)
+                chain_result = verify_override_chain(repo=repo, pr=pr, tenant_id=effective_tenant)
                 payload["override_chain"] = chain_result
         except Exception:
             payload["overrides"] = []
@@ -431,6 +455,7 @@ def audit_export(
         export_rows = _soc2_records(rows, overrides=overrides, chain_verified=chain_flag)
         payload = {
             "contract": "soc2_v1",
+            "tenant_id": effective_tenant,
             "repo": repo,
             "records": export_rows,
         }
@@ -457,6 +482,7 @@ def create_override_checkpoint(
     cadence: str = "daily",
     pr: Optional[int] = None,
     at: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ):
     from releasegate.audit.checkpoints import create_override_checkpoint as create_checkpoint
 
@@ -466,6 +492,7 @@ def create_override_checkpoint(
             cadence=cadence,
             pr=pr,
             at=at,
+            tenant_id=_require_tenant_id(tenant_id),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -478,6 +505,7 @@ def verify_override_checkpoint(
     period_id: str,
     cadence: str = "daily",
     pr: Optional[int] = None,
+    tenant_id: Optional[str] = None,
 ):
     from releasegate.audit.checkpoints import verify_override_checkpoint as verify_checkpoint
 
@@ -487,6 +515,7 @@ def verify_override_checkpoint(
             cadence=cadence,
             period_id=period_id,
             pr=pr,
+            tenant_id=_require_tenant_id(tenant_id),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -500,6 +529,7 @@ def simulate_policy_impact(
     repo: str,
     limit: int = 100,
     policy_dir: str = "releasegate/policy/compiled",
+    tenant_id: Optional[str] = None,
 ):
     from releasegate.policy.simulation import simulate_policy_impact as run_simulation
 
@@ -508,6 +538,7 @@ def simulate_policy_impact(
             repo=repo,
             limit=limit,
             policy_dir=policy_dir,
+            tenant_id=_require_tenant_id(tenant_id),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Policy simulation failed: {exc}") from exc
@@ -518,12 +549,15 @@ def audit_proof_pack(
     decision_id: str,
     format: str = "json",
     checkpoint_cadence: str = "daily",
+    tenant_id: Optional[str] = None,
 ):
     from releasegate.audit.reader import AuditReader
     from releasegate.audit.overrides import list_overrides, verify_override_chain
     from releasegate.audit.checkpoints import period_id_for_timestamp, verify_override_checkpoint
+    from releasegate.audit.proof_packs import record_proof_pack_generation
 
-    row = AuditReader.get_decision(decision_id)
+    effective_tenant = _require_tenant_id(tenant_id)
+    row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
 
@@ -548,9 +582,9 @@ def audit_proof_pack(
     checkpoint_proof = None
 
     if repo:
-        overrides = list_overrides(repo=repo, limit=500, pr=pr_number)
+        overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=effective_tenant)
         override_snapshot = next((o for o in overrides if o.get("decision_id") == decision_id), None)
-        chain_proof = verify_override_chain(repo=repo, pr=pr_number)
+        chain_proof = verify_override_chain(repo=repo, pr=pr_number, tenant_id=effective_tenant)
         try:
             period_id = period_id_for_timestamp(created_at, cadence=checkpoint_cadence)
             checkpoint_proof = verify_override_checkpoint(
@@ -558,6 +592,7 @@ def audit_proof_pack(
                 cadence=checkpoint_cadence,
                 period_id=period_id,
                 pr=pr_number,
+                tenant_id=effective_tenant,
             )
         except Exception as exc:
             checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
@@ -565,6 +600,7 @@ def audit_proof_pack(
     bundle = {
         "bundle_version": "audit_proof_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tenant_id": effective_tenant,
         "decision_id": decision_id,
         "repo": repo,
         "pr_number": pr_number,
@@ -577,6 +613,14 @@ def audit_proof_pack(
     }
 
     if format.lower() == "json":
+        record_proof_pack_generation(
+            decision_id=decision_id,
+            output_format="json",
+            bundle_version=bundle["bundle_version"],
+            repo=repo,
+            pr_number=pr_number,
+            tenant_id=effective_tenant,
+        )
         return bundle
     if format.lower() != "zip":
         raise HTTPException(status_code=400, detail="Unsupported format (expected json or zip)")
@@ -591,6 +635,14 @@ def audit_proof_pack(
         zf.writestr("chain_proof.json", json.dumps(bundle["chain_proof"], indent=2, default=str))
         zf.writestr("checkpoint_proof.json", json.dumps(bundle["checkpoint_proof"], indent=2, default=str))
     memory.seek(0)
+    record_proof_pack_generation(
+        decision_id=decision_id,
+        output_format="zip",
+        bundle_version=bundle["bundle_version"],
+        repo=repo,
+        pr_number=pr_number,
+        tenant_id=effective_tenant,
+    )
     return Response(
         content=memory.getvalue(),
         media_type="application/zip",
@@ -599,7 +651,7 @@ def audit_proof_pack(
 
 
 @app.post("/decisions/{decision_id}/replay")
-def replay_stored_decision(decision_id: str):
+def replay_stored_decision(decision_id: str, tenant_id: Optional[str] = None):
     """
     Deterministically replay a stored decision using saved input snapshot + policy bindings.
     """
@@ -607,7 +659,7 @@ def replay_stored_decision(decision_id: str):
     from releasegate.decision.types import Decision
     from releasegate.replay.decision_replay import replay_decision
 
-    row = AuditReader.get_decision(decision_id)
+    row = AuditReader.get_decision(decision_id, tenant_id=_require_tenant_id(tenant_id))
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
 

@@ -32,17 +32,18 @@ def test_audit_recording(clean_db):
     
     # Verify in DB directly
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM audit_decisions WHERE decision_id = ?", (decision.decision_id,))
     row = cursor.fetchone()
     conn.close()
     
     assert row is not None
-    assert row[2] == "repo1" # repo column
-    assert row[3] == 101 # pr_number
-    assert row[5] == "hash1" # policy_bundle_hash
-    assert row[6] == "0.1.0" # engine_version
-    assert row[7] is not None # decision_hash
+    assert row["repo"] == "repo1"
+    assert row["pr_number"] == 101
+    assert row["policy_bundle_hash"] == "hash1"
+    assert row["engine_version"] == "0.2.0"
+    assert row["decision_hash"] is not None
 
 def test_audit_query(clean_db):
     # Insert decisions
