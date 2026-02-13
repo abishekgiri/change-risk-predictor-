@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+
+import pytest
+from fastapi.testclient import TestClient
+
 from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, load_public_keys_map
 from releasegate.attestation.dsse import verify_dsse, wrap_dsse
 from releasegate.attestation.intoto import (
@@ -8,6 +13,23 @@ from releasegate.attestation.intoto import (
     build_intoto_statement,
 )
 from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_analysis_result
+from releasegate.audit.attestations import record_release_attestation
+from releasegate.config import DB_PATH
+from releasegate.server import app
+from releasegate.storage.schema import init_db
+
+
+client = TestClient(app)
+
+
+@pytest.fixture
+def clean_db():
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    init_db()
+    yield
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
 
 
 def _sample_attestation() -> dict:
@@ -95,3 +117,32 @@ def test_dsse_key_mismatch_fails():
     assert valid is False
     assert decoded is None
     assert error == "UNKNOWN_KEY_ID"
+
+
+def test_dsse_export_endpoint_returns_signed_envelope(clean_db):
+    attestation = _sample_attestation()
+    attestation_id = record_release_attestation(
+        decision_id=str(attestation["decision_id"]),
+        tenant_id="tenant-test",
+        repo=str(attestation["subject"]["repo"]),
+        pr_number=attestation["subject"].get("pr_number"),
+        attestation=attestation,
+    )
+
+    resp = client.get(f"/attestations/{attestation_id}.dsse", params={"tenant_id": "tenant-test"})
+    assert resp.status_code == 200
+    envelope = resp.json()
+    assert envelope["payloadType"] == "application/vnd.in-toto+json"
+    assert envelope["signatures"]
+
+    valid, decoded, error = verify_dsse(envelope, load_public_keys_map())
+    assert valid is True
+    assert error is None
+    assert decoded["_type"] == STATEMENT_TYPE_V1
+    assert decoded["predicateType"] == PREDICATE_TYPE_RELEASEGATE_V1
+    assert decoded["predicate"]["decision_id"] == attestation["decision_id"]
+
+
+def test_dsse_export_endpoint_404_when_missing(clean_db):
+    resp = client.get("/attestations/does-not-exist.dsse", params={"tenant_id": "tenant-test"})
+    assert resp.status_code == 404

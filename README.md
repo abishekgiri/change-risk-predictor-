@@ -211,6 +211,15 @@ Risk metadata is attached to Jira issue properties.
 - Merkle anchoring rules (leaf format, ordering, parent hash, proof verification):
   - `docs/transparency_merkle.md`
 - Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
+- DSSE + in-toto export is available for supply-chain interoperability:
+  - CLI: `releasegate analyze-pr --repo ORG/REPO --pr 15 --tenant default --emit-dsse att.dsse.json`
+  - API: `GET /attestations/{attestation_id}.dsse`
+  - Top-level DSSE fields:
+    - `payloadType: application/vnd.in-toto+json`
+    - `payload` (base64 canonical in-toto Statement)
+    - `signatures[{keyid,sig}]`
+  - SDK verification:
+    - `verify_dsse(envelope, public_keys_by_key_id)`
 
 ---
 

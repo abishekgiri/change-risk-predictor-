@@ -520,6 +520,38 @@ def verify_attestation_endpoint(payload: VerifyAttestationRequest):
     }
 
 
+@app.get("/attestations/{attestation_id}.dsse")
+def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None):
+    from releasegate.attestation import build_intoto_statement, wrap_dsse
+    from releasegate.attestation.crypto import MissingSigningKeyError, current_key_id, load_private_key_from_env
+    from releasegate.audit.attestations import get_release_attestation_by_id
+
+    try:
+        row = get_release_attestation_by_id(attestation_id=attestation_id, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="attestation not found")
+
+    attestation = row.get("attestation")
+    if not isinstance(attestation, dict):
+        raise HTTPException(status_code=500, detail="stored attestation payload is invalid")
+
+    try:
+        statement = build_intoto_statement(attestation)
+        envelope = wrap_dsse(
+            statement,
+            signing_key=load_private_key_from_env(),
+            key_id=current_key_id(),
+        )
+    except MissingSigningKeyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return envelope
+
+
 @app.get("/transparency/latest")
 def transparency_latest(limit: int = 50, tenant_id: Optional[str] = None):
     from releasegate.audit.transparency import list_transparency_latest

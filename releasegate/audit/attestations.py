@@ -174,3 +174,44 @@ def get_release_attestation_by_decision(
     payload = json.loads(raw) if isinstance(raw, str) else raw
     row["attestation"] = payload
     return row
+
+
+def get_release_attestation_by_id(
+    *,
+    attestation_id: str,
+    tenant_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    init_db()
+    _ensure_audit_attestations_table()
+    storage = get_storage_backend()
+    try:
+        if tenant_id is None:
+            row = storage.fetchone(
+                """
+                SELECT *
+                FROM audit_attestations
+                WHERE attestation_id = ?
+                LIMIT 1
+                """,
+                (attestation_id,),
+            )
+        else:
+            row = storage.fetchone(
+                """
+                SELECT *
+                FROM audit_attestations
+                WHERE tenant_id = ? AND attestation_id = ?
+                LIMIT 1
+                """,
+                (resolve_tenant_id(tenant_id), attestation_id),
+            )
+    except Exception as exc:
+        if "no such table" in str(exc).lower() and "audit_attestations" in str(exc).lower():
+            return None
+        raise
+    if not row:
+        return None
+    raw = row.get("attestation_json")
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    row["attestation"] = payload
+    return row
