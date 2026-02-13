@@ -520,6 +520,29 @@ def verify_attestation_endpoint(payload: VerifyAttestationRequest):
     }
 
 
+@app.get("/transparency/latest")
+def transparency_latest(limit: int = 50, tenant_id: Optional[str] = None):
+    from releasegate.audit.transparency import list_transparency_latest
+
+    try:
+        return list_transparency_latest(limit=limit, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/transparency/{attestation_id}")
+def transparency_by_attestation_id(attestation_id: str, tenant_id: Optional[str] = None):
+    from releasegate.audit.transparency import get_transparency_entry
+
+    try:
+        item = get_transparency_entry(attestation_id=attestation_id, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="transparency record not found")
+    return {"ok": True, "item": item}
+
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "ReleaseGate API"}

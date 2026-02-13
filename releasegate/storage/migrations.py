@@ -760,6 +760,85 @@ def _migration_20260212_010_phase4_idempotency_and_hashes(cursor) -> None:
     )
 
 
+def _migration_20260213_011_attestations_and_transparency_log(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_attestations (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT,
+            pr_number INTEGER,
+            schema_version TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            signed_payload_hash TEXT NOT NULL,
+            attestation_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
+        ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_transparency_log (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            pr_number INTEGER,
+            issued_at TEXT NOT NULL,
+            inserted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_transparency_attestation_id
+        ON audit_transparency_log(attestation_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_repo_commit
+        ON audit_transparency_log(repo, commit_sha)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_issued_at_desc
+        ON audit_transparency_log(issued_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_transparency_update
+        BEFORE UPDATE ON audit_transparency_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Transparency log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_transparency_delete
+        BEFORE DELETE ON audit_transparency_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Transparency log is append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -810,6 +889,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260212_010_phase4_idempotency_and_hashes",
         description="Add phase-4 idempotency key records, deterministic decision hashes, and chain-integrity indexes.",
         apply=_migration_20260212_010_phase4_idempotency_and_hashes,
+    ),
+    Migration(
+        migration_id="20260213_011_attestations_and_transparency_log",
+        description="Create tenant-scoped attestation and append-only transparency log tables.",
+        apply=_migration_20260213_011_attestations_and_transparency_log,
     ),
 ]
 

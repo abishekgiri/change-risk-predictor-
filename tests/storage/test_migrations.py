@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260212_")
+    assert current.startswith("20260213_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -27,6 +27,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260212_008_security_auth_tables" in migration_ids
         assert "20260212_009_security_hardening" in migration_ids
         assert "20260212_010_phase4_idempotency_and_hashes" in migration_ids
+        assert "20260213_011_attestations_and_transparency_log" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -85,11 +86,23 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         idem_pk = [row[1] for row in sorted((r for r in idem_info if r[5] > 0), key=lambda r: r[5])]
         assert idem_pk == ["tenant_id", "operation", "idem_key"]
 
+        cur.execute("PRAGMA table_info(audit_attestations)")
+        attestation_info = cur.fetchall()
+        attestation_pk = [row[1] for row in sorted((r for r in attestation_info if r[5] > 0), key=lambda r: r[5])]
+        assert attestation_pk == ["tenant_id", "attestation_id"]
+
+        cur.execute("PRAGMA table_info(audit_transparency_log)")
+        transparency_info = cur.fetchall()
+        transparency_cols = {row[1] for row in transparency_info}
+        transparency_pk = [row[1] for row in sorted((r for r in transparency_info if r[5] > 0), key=lambda r: r[5])]
+        assert "tenant_id" in transparency_cols
+        assert transparency_pk == ["tenant_id", "attestation_id"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260212_010_phase4_idempotency_and_hashes"
-        assert state[1] == "20260212_010_phase4_idempotency_and_hashes"
+        assert state[0] == "20260213_011_attestations_and_transparency_log"
+        assert state[1] == "20260213_011_attestations_and_transparency_log"
     finally:
         conn.close()
 

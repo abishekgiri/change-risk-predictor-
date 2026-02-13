@@ -193,6 +193,107 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_attestations (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT,
+            pr_number INTEGER,
+            schema_version TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            signed_payload_hash TEXT NOT NULL,
+            attestation_json JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
+        ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_transparency_log (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            pr_number INTEGER,
+            issued_at TIMESTAMPTZ NOT NULL,
+            inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_transparency_attestation_id
+        ON audit_transparency_log(attestation_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_repo_commit
+        ON audit_transparency_log(repo, commit_sha)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_issued_at_desc
+        ON audit_transparency_log(issued_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_transparency_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Transparency log is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_transparency_update'
+            ) THEN
+                CREATE TRIGGER prevent_transparency_update
+                BEFORE UPDATE ON audit_transparency_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_transparency_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_transparency_delete'
+            ) THEN
+                CREATE TRIGGER prevent_transparency_delete
+                BEFORE DELETE ON audit_transparency_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_transparency_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS policy_bundles (
             tenant_id TEXT NOT NULL,
             policy_bundle_hash TEXT NOT NULL,

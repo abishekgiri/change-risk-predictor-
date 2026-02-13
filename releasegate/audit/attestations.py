@@ -5,6 +5,7 @@ import string
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from releasegate.audit.transparency import record_transparency_for_attestation
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -85,10 +86,25 @@ def record_release_attestation(
         (effective_tenant, decision_id),
     )
     if existing and existing.get("attestation_id"):
-        return str(existing["attestation_id"])
+        existing_id = str(existing["attestation_id"])
+        signature = attestation.get("signature") or {}
+        signed_payload_hash = str(signature.get("signed_payload_hash") or "")
+        normalized_hash = _normalize_signed_payload_hash(signed_payload_hash)
+        payload_hash = f"sha256:{normalized_hash}"
+        record_transparency_for_attestation(
+            tenant_id=effective_tenant,
+            attestation_id=existing_id,
+            fallback_repo=repo,
+            fallback_pr_number=pr_number,
+            payload_hash=payload_hash,
+            attestation=attestation,
+        )
+        return existing_id
 
     signature = attestation.get("signature") or {}
     signed_payload_hash = str(signature.get("signed_payload_hash") or "")
+    normalized_hash = _normalize_signed_payload_hash(signed_payload_hash)
+    payload_hash = f"sha256:{normalized_hash}"
     algorithm = str(signature.get("algorithm") or "ed25519")
     key_id = str((attestation.get("issuer") or {}).get("key_id") or "")
     schema_version = str(attestation.get("schema_version") or "1.0.0")
@@ -113,10 +129,18 @@ def record_release_attestation(
             schema_version,
             key_id,
             algorithm,
-            signed_payload_hash,
+            payload_hash,
             json.dumps(attestation, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
             created_at,
         ),
+    )
+    record_transparency_for_attestation(
+        tenant_id=effective_tenant,
+        attestation_id=attestation_id,
+        fallback_repo=repo,
+        fallback_pr_number=pr_number,
+        payload_hash=payload_hash,
+        attestation=attestation,
     )
     return attestation_id
 
