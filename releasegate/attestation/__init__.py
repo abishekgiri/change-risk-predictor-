@@ -5,6 +5,8 @@ from releasegate.attestation.service import (
     build_bundle_from_analysis_result,
     build_bundle_from_decision,
 )
+from releasegate.attestation.intoto import build_intoto_statement
+from releasegate.attestation.dsse import wrap_dsse, verify_dsse
 from releasegate.attestation.key_manifest import (
     build_key_manifest,
     get_signed_key_manifest_cached,
@@ -20,6 +22,9 @@ __all__ = [
     "build_attestation_from_bundle",
     "build_bundle_from_analysis_result",
     "build_bundle_from_decision",
+    "build_intoto_statement",
+    "wrap_dsse",
+    "verify_dsse",
     "build_key_manifest",
     "get_signed_key_manifest_cached",
     "verify_key_manifest",

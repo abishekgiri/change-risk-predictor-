@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_p.add_argument("--no-bundle", action="store_true", help="(ignored) compatibility flag")
     analyze_p.add_argument("--tenant", help="Tenant/org identifier for attestation metadata")
     analyze_p.add_argument("--emit-attestation", help="Write signed release attestation JSON to file")
+    analyze_p.add_argument("--emit-dsse", help="Write DSSE wrapped in-toto statement JSON to file")
 
     eval_p = sub.add_parser("evaluate", help="Evaluate policies for a change (PR/release).")
     eval_p.add_argument("--repo", required=True)
@@ -249,7 +250,10 @@ def main() -> int:
             from releasegate.attestation import (
                 build_attestation_from_bundle,
                 build_bundle_from_analysis_result,
+                build_intoto_statement,
+                wrap_dsse,
             )
+            from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
             from releasegate.audit.attestations import record_release_attestation
 
             tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
@@ -295,8 +299,17 @@ def main() -> int:
             if args.emit_attestation:
                 with open(args.emit_attestation, "w", encoding="utf-8") as f:
                     json.dump(attestation, f, indent=2)
+            if args.emit_dsse:
+                statement = build_intoto_statement(attestation)
+                dsse_envelope = wrap_dsse(
+                    statement,
+                    signing_key=load_private_key_from_env(),
+                    key_id=current_key_id(),
+                )
+                with open(args.emit_dsse, "w", encoding="utf-8") as f:
+                    json.dump(dsse_envelope, f, indent=2)
         except Exception as e:
-            if args.emit_attestation:
+            if args.emit_attestation or args.emit_dsse:
                 print(f"Error generating attestation: {e}", file=sys.stderr)
                 return 1
             output["attestation_error"] = str(e)
