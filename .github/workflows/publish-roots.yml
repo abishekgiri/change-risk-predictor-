@@ -37,26 +37,45 @@ jobs:
           RELEASEGATE_ROOT_SIGNING_KEY: ${{ secrets.RELEASEGATE_ROOT_SIGNING_KEY }}
           RELEASEGATE_ROOT_KEY_ID: ${{ secrets.RELEASEGATE_ROOT_KEY_ID }}
           RELEASEGATE_TENANT_ID: ${{ vars.RELEASEGATE_TENANT_ID || 'default' }}
+          DATE_INPUT: ${{ github.event.inputs.date_utc }}
         run: |
-          set +e
-          DATE_INPUT="${{ github.event.inputs.date_utc }}"
-          if [ -n "$DATE_INPUT" ]; then
+          set -euo pipefail
+          YESTERDAY=$(date -u -d "yesterday" +%F)
+          TODAY=$(date -u +%F)
+
+          if [ -n "${DATE_INPUT:-}" ]; then
             DATE="$DATE_INPUT"
-          else
-            DATE=$(date -u -d "yesterday" +%F)
-          fi
-          echo "Exporting signed root for date: $DATE"
-          releasegate export-root --date "$DATE" --out "roots/$DATE.json"
-          RC=$?
-          set -e
-          if [ "$RC" -eq 2 ]; then
-            echo "No root available for $DATE. Skipping publish."
+            echo "Exporting signed root for explicit date: $DATE"
+            releasegate export-root --date "$DATE" --out "roots/$DATE.json"
             exit 0
           fi
-          exit "$RC"
+
+          echo "Trying yesterday first: $YESTERDAY"
+          if releasegate export-root --date "$YESTERDAY" --out "roots/$YESTERDAY.json"; then
+            exit 0
+          fi
+
+          rc=$?
+          if [ "$rc" -ne 2 ]; then
+            echo "export-root failed for $YESTERDAY with exit code $rc"
+            exit "$rc"
+          fi
+
+          echo "No root for yesterday ($YESTERDAY). Trying today: $TODAY"
+          if releasegate export-root --date "$TODAY" --out "roots/$TODAY.json"; then
+            exit 0
+          fi
+
+          rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "No root for today ($TODAY) either. Nothing to publish."
+            exit 0
+          fi
+          exit "$rc"
 
       - name: Commit and push roots
         run: |
+          ls -1 roots/*.json >/dev/null 2>&1 || { echo "No roots generated; skipping commit."; exit 0; }
           if git diff --quiet -- roots/; then
             echo "No root changes to commit."
             exit 0
