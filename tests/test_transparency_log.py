@@ -334,6 +334,8 @@ def test_transparency_proof_verification_and_tamper_failure(clean_db):
 
     proof_resp = client.get(f"/transparency/proof/{target_attestation_id}", params={"tenant_id": "tenant-a"})
     assert proof_resp.status_code == 200
+    assert proof_resp.headers.get("cache-control") == "public, max-age=3600"
+    assert proof_resp.headers.get("etag")
     proof_payload = proof_resp.json()
     assert proof_payload["ok"] is True
     assert proof_payload["leaf_version"] == LEAF_VERSION
@@ -396,6 +398,8 @@ def test_transparency_roots_table_is_immutable(clean_db):
     )
     root_resp = client.get("/transparency/root/2026-02-15", params={"tenant_id": "tenant-a"})
     assert root_resp.status_code == 200
+    assert root_resp.headers.get("cache-control") == "public, max-age=3600"
+    assert root_resp.headers.get("etag")
     root_hash = root_resp.json()["root_hash"]
 
     conn = sqlite3.connect(DB_PATH)

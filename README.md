@@ -208,6 +208,8 @@ Risk metadata is attached to Jira issue properties.
 - Transparency APIs:
   - `GET /transparency/latest` (default `50`, max clamp `500`, rejects `<= 0`)
   - `GET /transparency/{attestation_id}`
+- Merkle anchoring rules (leaf format, ordering, parent hash, proof verification):
+  - `docs/transparency_merkle.md`
 - Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
 
 ---

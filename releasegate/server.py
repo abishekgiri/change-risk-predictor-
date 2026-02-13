@@ -17,7 +17,7 @@ import os
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 import csv
 import io
 import zipfile
@@ -553,7 +553,14 @@ def transparency_root_by_date(date_utc: str, tenant_id: Optional[str] = None):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not root:
         raise HTTPException(status_code=404, detail="transparency root not found for date")
-    return root
+    etag = sha256_json(root)
+    return JSONResponse(
+        content=root,
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "ETag": f"\"{etag}\"",
+        },
+    )
 
 
 @app.get("/transparency/proof/{attestation_id}")
@@ -566,7 +573,14 @@ def transparency_inclusion_proof(attestation_id: str, tenant_id: Optional[str] =
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not proof:
         raise HTTPException(status_code=404, detail="transparency inclusion proof not found")
-    return proof
+    etag = sha256_json(proof)
+    return JSONResponse(
+        content=proof,
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "ETag": f"\"{etag}\"",
+        },
+    )
 
 
 @app.get("/")
