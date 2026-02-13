@@ -6,12 +6,18 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+from releasegate.attestation.merkle import LEAF_VERSION, TREE_RULE
+from releasegate.attestation.sdk import verify_inclusion_proof
 from releasegate.attestation.service import (
     build_attestation_from_bundle,
     build_bundle_from_analysis_result,
 )
 from releasegate.audit.attestations import record_release_attestation
-from releasegate.audit.transparency import get_transparency_entry, list_transparency_latest
+from releasegate.audit.transparency import (
+    get_or_compute_transparency_root,
+    get_transparency_entry,
+    list_transparency_latest,
+)
 from releasegate.config import DB_PATH
 from releasegate.server import app
 from releasegate.storage.schema import init_db
@@ -262,3 +268,152 @@ def test_transparency_engine_git_sha_null_when_env_unset(clean_db, monkeypatch):
     assert entry is not None
     assert entry["engine_build"]["git_sha"] is None
     assert entry["engine_build"]["version"] == "2.0.0"
+
+
+def test_transparency_daily_root_deterministic(clean_db):
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=23,
+        commit_sha="aaa111",
+        timestamp="2026-02-12T08:00:00Z",
+        decision_suffix="H1",
+    )
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=24,
+        commit_sha="bbb222",
+        timestamp="2026-02-12T09:00:00Z",
+        decision_suffix="H2",
+    )
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=25,
+        commit_sha="ccc333",
+        timestamp="2026-02-12T10:00:00Z",
+        decision_suffix="H3",
+    )
+
+    root_first = get_or_compute_transparency_root(date_utc="2026-02-12", tenant_id="tenant-a")
+    root_second = get_or_compute_transparency_root(date_utc="2026-02-12", tenant_id="tenant-a")
+
+    assert root_first is not None
+    assert root_second is not None
+    assert root_first["root_hash"] == root_second["root_hash"]
+    assert root_first["leaf_count"] == 3
+    assert root_second["leaf_count"] == 3
+
+
+def test_transparency_proof_verification_and_tamper_failure(clean_db):
+    target_attestation_id, _ = _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=26,
+        commit_sha="ddd444",
+        timestamp="2026-02-13T08:00:00Z",
+        decision_suffix="I1",
+    )
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=27,
+        commit_sha="eee555",
+        timestamp="2026-02-13T09:00:00Z",
+        decision_suffix="I2",
+    )
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=28,
+        commit_sha="fff666",
+        timestamp="2026-02-13T10:00:00Z",
+        decision_suffix="I3",
+    )
+
+    proof_resp = client.get(f"/transparency/proof/{target_attestation_id}", params={"tenant_id": "tenant-a"})
+    assert proof_resp.status_code == 200
+    proof_payload = proof_resp.json()
+    assert proof_payload["ok"] is True
+    assert proof_payload["leaf_version"] == LEAF_VERSION
+    assert proof_payload["tree_rule"] == TREE_RULE
+    assert verify_inclusion_proof(proof_payload) is True
+
+    tampered = dict(proof_payload)
+    tampered_steps = [dict(step) for step in proof_payload.get("proof") or []]
+    if tampered_steps:
+        tampered_steps[0]["hash"] = "sha256:" + ("0" * 64)
+        tampered["proof"] = tampered_steps
+    else:
+        tampered["leaf_hash"] = "sha256:" + ("0" * 64)
+    assert verify_inclusion_proof(tampered) is False
+
+
+def test_transparency_odd_leaf_count_duplicate_rule(clean_db):
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=29,
+        commit_sha="ggg777",
+        timestamp="2026-02-14T08:00:00Z",
+        decision_suffix="J1",
+    )
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=30,
+        commit_sha="hhh888",
+        timestamp="2026-02-14T09:00:00Z",
+        decision_suffix="J2",
+    )
+    last_id, _ = _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=31,
+        commit_sha="iii999",
+        timestamp="2026-02-14T10:00:00Z",
+        decision_suffix="J3",
+    )
+
+    proof_resp = client.get(f"/transparency/proof/{last_id}", params={"tenant_id": "tenant-a"})
+    assert proof_resp.status_code == 200
+    proof_payload = proof_resp.json()
+    assert proof_payload["tree_rule"] == TREE_RULE
+    # 3 leaves -> duplicate-last rule produces 2 proof nodes.
+    assert len(proof_payload["proof"]) == 2
+    assert verify_inclusion_proof(proof_payload) is True
+
+
+def test_transparency_roots_table_is_immutable(clean_db):
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=32,
+        commit_sha="jjj000",
+        timestamp="2026-02-15T10:00:00Z",
+        decision_suffix="K1",
+    )
+    root_resp = client.get("/transparency/root/2026-02-15", params={"tenant_id": "tenant-a"})
+    assert root_resp.status_code == 200
+    root_hash = root_resp.json()["root_hash"]
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        with pytest.raises(sqlite3.DatabaseError):
+            cur.execute(
+                "UPDATE audit_transparency_roots SET root_hash = ? WHERE tenant_id = ? AND date_utc = ?",
+                ("sha256:" + ("f" * 64), "tenant-a", "2026-02-15"),
+            )
+        with pytest.raises(sqlite3.DatabaseError):
+            cur.execute(
+                "DELETE FROM audit_transparency_roots WHERE tenant_id = ? AND date_utc = ?",
+                ("tenant-a", "2026-02-15"),
+            )
+    finally:
+        conn.close()
+
+    root_resp_again = client.get("/transparency/root/2026-02-15", params={"tenant_id": "tenant-a"})
+    assert root_resp_again.status_code == 200
+    assert root_resp_again.json()["root_hash"] == root_hash

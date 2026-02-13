@@ -543,6 +543,32 @@ def transparency_by_attestation_id(attestation_id: str, tenant_id: Optional[str]
     return {"ok": True, "item": item}
 
 
+@app.get("/transparency/root/{date_utc}")
+def transparency_root_by_date(date_utc: str, tenant_id: Optional[str] = None):
+    from releasegate.audit.transparency import get_or_compute_transparency_root
+
+    try:
+        root = get_or_compute_transparency_root(date_utc=date_utc, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not root:
+        raise HTTPException(status_code=404, detail="transparency root not found for date")
+    return root
+
+
+@app.get("/transparency/proof/{attestation_id}")
+def transparency_inclusion_proof(attestation_id: str, tenant_id: Optional[str] = None):
+    from releasegate.audit.transparency import get_transparency_inclusion_proof
+
+    try:
+        proof = get_transparency_inclusion_proof(attestation_id=attestation_id, tenant_id=tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not proof:
+        raise HTTPException(status_code=404, detail="transparency inclusion proof not found")
+    return proof
+
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "ReleaseGate API"}

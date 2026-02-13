@@ -846,6 +846,47 @@ def _migration_20260213_012_transparency_engine_build(cursor) -> None:
         cursor.execute("ALTER TABLE audit_transparency_log ADD COLUMN engine_version TEXT")
 
 
+def _migration_20260213_013_transparency_daily_roots(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_transparency_roots (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            leaf_count INTEGER NOT NULL,
+            root_hash TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            engine_build_git_sha TEXT,
+            engine_version TEXT,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_roots_computed_at_desc
+        ON audit_transparency_roots(computed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_transparency_roots_update
+        BEFORE UPDATE ON audit_transparency_roots
+        BEGIN
+            SELECT RAISE(FAIL, 'Transparency roots are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_transparency_roots_delete
+        BEFORE DELETE ON audit_transparency_roots
+        BEGIN
+            SELECT RAISE(FAIL, 'Transparency roots are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -906,6 +947,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260213_012_transparency_engine_build",
         description="Add engine git SHA/version metadata columns to transparency log entries.",
         apply=_migration_20260213_012_transparency_engine_build,
+    ),
+    Migration(
+        migration_id="20260213_013_transparency_daily_roots",
+        description="Create append-only tenant-scoped daily Merkle roots for transparency entries.",
+        apply=_migration_20260213_013_transparency_daily_roots,
     ),
 ]
 

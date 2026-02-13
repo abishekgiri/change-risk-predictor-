@@ -7,6 +7,10 @@ from releasegate.attestation.key_manifest import (
     public_keys_from_manifest,
     verify_key_manifest,
 )
+from releasegate.attestation.merkle import (
+    compute_transparency_leaf_hash,
+    verify_merkle_inclusion_proof,
+)
 from releasegate.attestation.verify import verify_attestation_payload
 
 
@@ -68,3 +72,19 @@ def get_subject(attestation: Dict[str, Any]) -> Dict[str, Any]:
 def get_decision(attestation: Dict[str, Any]) -> Dict[str, Any]:
     decision = attestation.get("decision") if isinstance(attestation, dict) else None
     return dict(decision) if isinstance(decision, dict) else {}
+
+
+def compute_leaf_hash(entry: Dict[str, Any]) -> str:
+    return compute_transparency_leaf_hash(entry)
+
+
+def verify_inclusion_proof(proof_payload: Dict[str, Any]) -> bool:
+    try:
+        return verify_merkle_inclusion_proof(
+            leaf_hash=str(proof_payload.get("leaf_hash") or ""),
+            root_hash=str(proof_payload.get("root_hash") or ""),
+            index=int(proof_payload.get("index")),
+            proof=proof_payload.get("proof") or [],
+        )
+    except Exception:
+        return False

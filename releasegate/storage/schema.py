@@ -252,10 +252,40 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_transparency_roots (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            leaf_count INTEGER NOT NULL,
+            root_hash TEXT NOT NULL,
+            computed_at TIMESTAMPTZ NOT NULL,
+            engine_build_git_sha TEXT,
+            engine_version TEXT,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_roots_computed_at_desc
+        ON audit_transparency_roots(computed_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE OR REPLACE FUNCTION releasegate_prevent_transparency_mutation()
         RETURNS trigger AS $$
         BEGIN
             RAISE EXCEPTION 'Transparency log is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_transparency_roots_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Transparency roots are append-only: % not allowed', TG_OP;
         END;
         $$ LANGUAGE plpgsql;
         """
@@ -273,6 +303,40 @@ def _init_postgres_schema() -> str:
                 BEFORE UPDATE ON audit_transparency_log
                 FOR EACH ROW
                 EXECUTE FUNCTION releasegate_prevent_transparency_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_transparency_roots_update'
+            ) THEN
+                CREATE TRIGGER prevent_transparency_roots_update
+                BEFORE UPDATE ON audit_transparency_roots
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_transparency_roots_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_transparency_roots_delete'
+            ) THEN
+                CREATE TRIGGER prevent_transparency_roots_delete
+                BEFORE DELETE ON audit_transparency_roots
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_transparency_roots_mutation();
             END IF;
         END $$;
         """
@@ -510,6 +574,28 @@ def _init_postgres_schema() -> str:
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS replay_hash TEXT")
     cur.execute("ALTER TABLE audit_transparency_log ADD COLUMN IF NOT EXISTS engine_git_sha TEXT")
     cur.execute("ALTER TABLE audit_transparency_log ADD COLUMN IF NOT EXISTS engine_version TEXT")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_transparency_roots (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            leaf_count INTEGER NOT NULL,
+            root_hash TEXT NOT NULL,
+            computed_at TIMESTAMPTZ NOT NULL,
+            engine_build_git_sha TEXT,
+            engine_version TEXT,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cur.execute("ALTER TABLE audit_transparency_roots ADD COLUMN IF NOT EXISTS engine_build_git_sha TEXT")
+    cur.execute("ALTER TABLE audit_transparency_roots ADD COLUMN IF NOT EXISTS engine_version TEXT")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_transparency_roots_computed_at_desc
+        ON audit_transparency_roots(computed_at DESC)
+        """
+    )
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_algorithm TEXT")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_iterations INTEGER")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_salt TEXT")
