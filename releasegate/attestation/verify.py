@@ -4,7 +4,7 @@ import hashlib
 from typing import Any, Dict, Optional
 
 from releasegate.attestation.canonicalize import canonicalize_json_bytes
-from releasegate.attestation.crypto import load_public_keys_map, parse_public_key, verify_signature
+from releasegate.attestation.crypto import parse_public_key, verify_signature
 from releasegate.attestation.types import ReleaseAttestation, VerifyResult
 
 
@@ -26,8 +26,11 @@ def _normalized_hash(value: str) -> str:
 def verify_attestation_payload(
     payload: Dict[str, Any],
     *,
-    public_keys_by_key_id: Optional[Dict[str, str]] = None,
+    public_keys_by_key_id: Dict[str, str],
 ) -> Dict[str, Any]:
+    if not isinstance(public_keys_by_key_id, dict):
+        raise TypeError("public_keys_by_key_id must be a dict of key_id -> public key")
+
     errors: list[str] = []
     schema_valid = True
     trusted_issuer = False
@@ -61,8 +64,7 @@ def verify_attestation_payload(
     if not payload_hash_match:
         errors.append("PAYLOAD_HASH_MISMATCH")
 
-    key_map = public_keys_by_key_id or load_public_keys_map()
-    public_key_material = (key_map or {}).get(key_id)
+    public_key_material = public_keys_by_key_id.get(key_id)
     if public_key_material:
         trusted_issuer = True
     else:
