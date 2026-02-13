@@ -12,6 +12,28 @@ from releasegate.signals.approvals.validator import (
 from releasegate.enforcement.approvals import ApprovalsControl
 from releasegate.enforcement.types import ControlContext
 
+
+class MockProvider:
+    def __init__(self, reviews, pr_author="author", codeowners="", team_members=None):
+        self._reviews = reviews
+        self._pr_author = pr_author
+        self._codeowners = codeowners
+        self._team_members = team_members or {}
+
+    def get_reviews(self, _repo, _pr_number):
+        return self._reviews
+
+    def get_pr_author(self, _repo, _pr_number):
+        return self._pr_author
+
+    def get_file_content(self, _repo, path, ref=None):
+        if path in (".github/CODEOWNERS", "CODEOWNERS"):
+            return self._codeowners
+        return None
+
+    def get_team_members(self, team_slug):
+        return self._team_members.get(team_slug, [])
+
 def test_stale_review_detection():
  """Test detection of stale reviews."""
  review = Review(
@@ -186,6 +208,83 @@ def test_approvals_control_with_requirements():
  assert result.signals["approvals.skipped"] is True
  assert result.signals["approvals.data_available"] is False
  assert len(result.findings) == 0
+
+
+def test_approvals_control_role_aware_signal_and_reasons():
+ control = ApprovalsControl()
+ now = datetime.now()
+ provider = MockProvider(
+ reviews=[
+ Review("alice", "APPROVED", now, "head123"),
+ Review("bob", "APPROVED", now, "head123"),
+ ],
+ pr_author="alice",
+ codeowners="* @alice @org/security",
+ team_members={"org/security": ["sec-user"]},
+ )
+
+ context = ControlContext(
+ repo="test/repo",
+ pr_number=123,
+ diff={},
+ config={
+ "head_sha": "head123",
+ "approvals": {
+ "min_total": 2,
+ "disallow_self_approval": True,
+ "require_codeowner": True,
+ "require_security_team": True,
+ "security_team_slugs": ["org/security"],
+ },
+ },
+ provider=provider,
+ )
+
+ result = control.execute(context)
+
+ assert result.signals["approvals.required"] is True
+ assert result.signals["approvals.satisfied"] is False
+ assert "approvals" in result.signals
+ assert result.signals["approvals"]["self_approval_detected"] is True
+ assert "APPROVALS_INSUFFICIENT" in result.signals["approvals"]["reason_codes"]
+ assert "SECURITY_APPROVAL_REQUIRED" in result.signals["approvals"]["reason_codes"]
+
+
+def test_approvals_control_role_aware_passes_with_required_roles():
+ control = ApprovalsControl()
+ now = datetime.now()
+ provider = MockProvider(
+ reviews=[
+ Review("owner-user", "APPROVED", now, "head123"),
+ Review("sec-user", "APPROVED", now, "head123"),
+ ],
+ pr_author="author",
+ codeowners="* @owner-user @org/security",
+ team_members={"org/security": ["sec-user"]},
+ )
+ context = ControlContext(
+ repo="test/repo",
+ pr_number=999,
+ diff={},
+ config={
+ "head_sha": "head123",
+ "approvals": {
+ "min_total": 2,
+ "disallow_self_approval": True,
+ "require_codeowner": True,
+ "require_security_team": True,
+ "security_team_slugs": ["org/security"],
+ },
+ },
+ provider=provider,
+ )
+
+ result = control.execute(context)
+ assert result.signals["approvals.satisfied"] is True
+ assert result.signals["approvals"]["reason_codes"] == []
+ assert result.signals["approvals"]["codeowner_approved"] is True
+ assert result.signals["approvals"]["security_team_approved"] is True
+ assert result.signals["approvals"]["approved_by"] == ["owner-user", "sec-user"]
 
 if __name__ == "__main__":
  pytest.main([__file__, "-v"])

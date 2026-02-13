@@ -155,6 +155,41 @@ class GitHubProvider(GitProvider):
             print(f"Error fetching GitHub reviews for PR {pr_number}: {e}")
             return None
 
+    def get_pr_author(self, repo_full_name: str, pr_number: int):
+        """
+        Fetch PR author login.
+        """
+        if not self.client or not repo_full_name:
+            return None
+        try:
+            repo = self.client.get_repo(repo_full_name)
+            pr = repo.get_pull(int(pr_number))
+            return pr.user.login if pr.user else None
+        except Exception:
+            return None
+
+    def get_team_members(self, team_slug: str):
+        """
+        Fetch organization team members by slug.
+        team_slug accepted as "org/team" or "team".
+        """
+        if not self.client:
+            return None
+        raw = str(team_slug or "").strip()
+        if not raw:
+            return None
+        try:
+            if "/" in raw:
+                org_name, slug = raw.split("/", 1)
+            else:
+                # Without org context, team lookup is ambiguous.
+                return None
+            org = self.client.get_organization(org_name)
+            team = org.get_team_by_slug(slug)
+            return [m.login for m in team.get_members() if getattr(m, "login", None)]
+        except Exception:
+            return None
+
     def get_file_content(self, repo_full_name: str, path: str, ref: str = None):
         """
         Fetch file content from GitHub. Returns decoded text or None.

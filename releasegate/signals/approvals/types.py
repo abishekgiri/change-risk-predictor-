@@ -2,6 +2,7 @@
 Approval validation types.
 """
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Optional
 from datetime import datetime
 
@@ -38,3 +39,30 @@ class ApprovalFinding:
     stale_reviewers: list[str] # Who provided stale approvals
     missing_count: int
 
+
+@dataclass
+class RoleAwareApprovalPolicy:
+    """Role-aware approval policy config."""
+
+    min_total: int = 1
+    disallow_self_approval: bool = True
+    require_codeowner: bool = False
+    require_security_team: bool = False
+    security_team_slugs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RoleAwareApprovalResult:
+    """Role-aware approval evaluation result."""
+
+    min_total_required: int
+    total_approvals: int
+    disallow_self_approval: bool
+    self_approval_detected: bool
+    codeowner_required: bool
+    codeowner_approved: Optional[bool]
+    security_team_required: bool
+    security_team_approved: Optional[bool]
+    approved_by: list[str]
+    reason_codes: list[str]
+    security_approvals_count: int = 0

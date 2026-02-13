@@ -116,6 +116,14 @@ class GitLabProvider(GitProvider):
         # Not implemented for GitLab in MVP (fail-open)
         return None
 
+    def get_pr_author(self, repo_full_name: str, pr_number: int):
+        # Not implemented for GitLab in MVP
+        return None
+
+    def get_team_members(self, team_slug: str):
+        # Not implemented for GitLab in MVP
+        return None
+
     def get_file_content(self, repo_full_name: str, path: str, ref: str = None):
         # Not implemented for GitLab in MVP
         return None
