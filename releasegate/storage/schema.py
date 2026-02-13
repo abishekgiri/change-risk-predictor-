@@ -224,6 +224,8 @@ def _init_postgres_schema() -> str:
             repo TEXT NOT NULL,
             commit_sha TEXT NOT NULL,
             pr_number INTEGER,
+            engine_git_sha TEXT,
+            engine_version TEXT,
             issued_at TIMESTAMPTZ NOT NULL,
             inserted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (tenant_id, attestation_id)
@@ -506,6 +508,8 @@ def _init_postgres_schema() -> str:
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS input_hash TEXT")
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS policy_hash TEXT")
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS replay_hash TEXT")
+    cur.execute("ALTER TABLE audit_transparency_log ADD COLUMN IF NOT EXISTS engine_git_sha TEXT")
+    cur.execute("ALTER TABLE audit_transparency_log ADD COLUMN IF NOT EXISTS engine_version TEXT")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_algorithm TEXT")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_iterations INTEGER")
     cur.execute("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_salt TEXT")

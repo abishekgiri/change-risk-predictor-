@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any, Dict, List, Optional
 
 from releasegate.storage import get_storage_backend
@@ -27,12 +28,38 @@ def _ensure_audit_transparency_log_table() -> None:
             repo TEXT NOT NULL,
             commit_sha TEXT NOT NULL,
             pr_number INTEGER,
+            engine_git_sha TEXT,
+            engine_version TEXT,
             issued_at TEXT NOT NULL,
             inserted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (tenant_id, attestation_id)
         )
         """
     )
+    if storage.name == "postgres":
+        storage.execute(
+            """
+            ALTER TABLE audit_transparency_log
+            ADD COLUMN IF NOT EXISTS engine_git_sha TEXT
+            """
+        )
+        storage.execute(
+            """
+            ALTER TABLE audit_transparency_log
+            ADD COLUMN IF NOT EXISTS engine_version TEXT
+            """
+        )
+    else:
+        try:
+            storage.execute("ALTER TABLE audit_transparency_log ADD COLUMN engine_git_sha TEXT")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
+        try:
+            storage.execute("ALTER TABLE audit_transparency_log ADD COLUMN engine_version TEXT")
+        except Exception as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
     storage.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_transparency_attestation_id
@@ -128,6 +155,8 @@ def _normalize_limit(limit: int) -> int:
 
 
 def _row_to_item(row: Dict[str, Any]) -> Dict[str, Any]:
+    git_sha = str(row.get("engine_git_sha") or "").strip() or None
+    version = str(row.get("engine_version") or "").strip() or None
     return {
         "tenant_id": row.get("tenant_id"),
         "attestation_id": row.get("attestation_id"),
@@ -136,6 +165,10 @@ def _row_to_item(row: Dict[str, Any]) -> Dict[str, Any]:
             "repo": row.get("repo"),
             "commit_sha": row.get("commit_sha"),
             "pr_number": row.get("pr_number"),
+        },
+        "engine_build": {
+            "git_sha": git_sha,
+            "version": version,
         },
         "issued_at": row.get("issued_at"),
         "inserted_at": row.get("inserted_at"),
@@ -151,6 +184,8 @@ def record_transparency_entry(
     commit_sha: str,
     pr_number: Optional[int],
     issued_at: Optional[str],
+    engine_git_sha: Optional[str],
+    engine_version: Optional[str],
 ) -> None:
     init_db()
     _ensure_audit_transparency_log_table()
@@ -167,8 +202,8 @@ def record_transparency_entry(
     storage.execute(
         """
         INSERT INTO audit_transparency_log (
-            tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, issued_at, inserted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, engine_git_sha, engine_version, issued_at, inserted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tenant_id, attestation_id) DO NOTHING
         """,
         (
@@ -178,6 +213,8 @@ def record_transparency_entry(
             effective_repo,
             effective_commit,
             pr_number,
+            str(engine_git_sha or "").strip() or None,
+            str(engine_version or "").strip() or None,
             effective_issued_at,
             datetime.now(timezone.utc).isoformat(),
         ),
@@ -201,6 +238,12 @@ def record_transparency_for_attestation(
     if pr_number is None:
         pr_number = fallback_pr_number
     issued_at = str(attestation.get("issued_at") or "") if isinstance(attestation, dict) else ""
+    engine_version = str(attestation.get("engine_version") or os.getenv("RELEASEGATE_VERSION") or "")
+    engine_git_sha = str(
+        os.getenv("RELEASEGATE_GIT_SHA")
+        or os.getenv("RELEASEGATE_ENGINE_GIT_SHA")
+        or ""
+    )
     record_transparency_entry(
         tenant_id=tenant_id,
         attestation_id=attestation_id,
@@ -209,6 +252,8 @@ def record_transparency_for_attestation(
         commit_sha=commit_sha,
         pr_number=pr_number,
         issued_at=issued_at,
+        engine_git_sha=engine_git_sha,
+        engine_version=engine_version,
     )
 
 
@@ -221,7 +266,7 @@ def list_transparency_latest(*, limit: int = DEFAULT_LIMIT, tenant_id: Optional[
     if tenant_id is None:
         rows = storage.fetchall(
             """
-            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, issued_at, inserted_at
+            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, engine_git_sha, engine_version, issued_at, inserted_at
             FROM audit_transparency_log
             ORDER BY issued_at DESC, inserted_at DESC
             LIMIT ?
@@ -231,7 +276,7 @@ def list_transparency_latest(*, limit: int = DEFAULT_LIMIT, tenant_id: Optional[
     else:
         rows = storage.fetchall(
             """
-            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, issued_at, inserted_at
+            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, engine_git_sha, engine_version, issued_at, inserted_at
             FROM audit_transparency_log
             WHERE tenant_id = ?
             ORDER BY issued_at DESC, inserted_at DESC
@@ -262,7 +307,7 @@ def get_transparency_entry(
     if tenant_id is None:
         row = storage.fetchone(
             """
-            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, issued_at, inserted_at
+            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, engine_git_sha, engine_version, issued_at, inserted_at
             FROM audit_transparency_log
             WHERE attestation_id = ?
             LIMIT 1
@@ -272,7 +317,7 @@ def get_transparency_entry(
     else:
         row = storage.fetchone(
             """
-            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, issued_at, inserted_at
+            SELECT tenant_id, attestation_id, payload_hash, repo, commit_sha, pr_number, engine_git_sha, engine_version, issued_at, inserted_at
             FROM audit_transparency_log
             WHERE tenant_id = ? AND attestation_id = ?
             LIMIT 1

@@ -64,7 +64,8 @@ def _record_attestation(
     return attestation_id, bundle.decision_id
 
 
-def test_transparency_entry_created_on_attestation_record(clean_db):
+def test_transparency_entry_created_on_attestation_record(clean_db, monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_GIT_SHA", "abcde12345")
     attestation_id, _ = _record_attestation(
         tenant_id="tenant-a",
         repo="org/service-api",
@@ -83,6 +84,8 @@ def test_transparency_entry_created_on_attestation_record(clean_db):
     assert entry["subject"]["repo"] == "org/service-api"
     assert entry["subject"]["commit_sha"] == "abc123"
     assert entry["subject"]["pr_number"] == 15
+    assert entry["engine_build"]["git_sha"] == "abcde12345"
+    assert entry["engine_build"]["version"] == "2.0.0"
 
 
 def test_transparency_log_is_immutable(clean_db):
@@ -216,3 +219,46 @@ def test_transparency_get_by_id_and_404(clean_db):
 
     not_found_resp = client.get("/transparency/not-found", params={"tenant_id": "tenant-a"})
     assert not_found_resp.status_code == 404
+
+
+def test_transparency_latest_limit_validation(clean_db):
+    _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=21,
+        commit_sha="stu901",
+        timestamp="2026-02-11T13:00:00Z",
+        decision_suffix="F",
+    )
+
+    default_resp = client.get("/transparency/latest", params={"tenant_id": "tenant-a"})
+    assert default_resp.status_code == 200
+    default_body = default_resp.json()
+    assert default_body["limit"] == 50
+
+    bad_resp = client.get("/transparency/latest", params={"tenant_id": "tenant-a", "limit": -1})
+    assert bad_resp.status_code == 400
+    assert "limit must be greater than 0" in str(bad_resp.json().get("detail", ""))
+
+    clamped_resp = client.get("/transparency/latest", params={"tenant_id": "tenant-a", "limit": 9999})
+    assert clamped_resp.status_code == 200
+    clamped_body = clamped_resp.json()
+    assert clamped_body["limit"] == 500
+
+
+def test_transparency_engine_git_sha_null_when_env_unset(clean_db, monkeypatch):
+    monkeypatch.delenv("RELEASEGATE_GIT_SHA", raising=False)
+    monkeypatch.delenv("RELEASEGATE_ENGINE_GIT_SHA", raising=False)
+    monkeypatch.delenv("RELEASEGATE_VERSION", raising=False)
+    attestation_id, _ = _record_attestation(
+        tenant_id="tenant-a",
+        repo="org/service-api",
+        pr_number=22,
+        commit_sha="vwx234",
+        timestamp="2026-02-11T14:00:00Z",
+        decision_suffix="G",
+    )
+    entry = get_transparency_entry(attestation_id=attestation_id, tenant_id="tenant-a")
+    assert entry is not None
+    assert entry["engine_build"]["git_sha"] is None
+    assert entry["engine_build"]["version"] == "2.0.0"

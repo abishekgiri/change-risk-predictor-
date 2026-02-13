@@ -28,6 +28,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260212_009_security_hardening" in migration_ids
         assert "20260212_010_phase4_idempotency_and_hashes" in migration_ids
         assert "20260213_011_attestations_and_transparency_log" in migration_ids
+        assert "20260213_012_transparency_engine_build" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -96,13 +97,15 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         transparency_cols = {row[1] for row in transparency_info}
         transparency_pk = [row[1] for row in sorted((r for r in transparency_info if r[5] > 0), key=lambda r: r[5])]
         assert "tenant_id" in transparency_cols
+        assert "engine_git_sha" in transparency_cols
+        assert "engine_version" in transparency_cols
         assert transparency_pk == ["tenant_id", "attestation_id"]
 
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260213_011_attestations_and_transparency_log"
-        assert state[1] == "20260213_011_attestations_and_transparency_log"
+        assert state[0] == "20260213_012_transparency_engine_build"
+        assert state[1] == "20260213_012_transparency_engine_build"
     finally:
         conn.close()
 

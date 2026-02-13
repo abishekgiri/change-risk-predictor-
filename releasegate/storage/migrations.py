@@ -839,6 +839,13 @@ def _migration_20260213_011_attestations_and_transparency_log(cursor) -> None:
     )
 
 
+def _migration_20260213_012_transparency_engine_build(cursor) -> None:
+    if not _column_exists(cursor, "audit_transparency_log", "engine_git_sha"):
+        cursor.execute("ALTER TABLE audit_transparency_log ADD COLUMN engine_git_sha TEXT")
+    if not _column_exists(cursor, "audit_transparency_log", "engine_version"):
+        cursor.execute("ALTER TABLE audit_transparency_log ADD COLUMN engine_version TEXT")
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -894,6 +901,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260213_011_attestations_and_transparency_log",
         description="Create tenant-scoped attestation and append-only transparency log tables.",
         apply=_migration_20260213_011_attestations_and_transparency_log,
+    ),
+    Migration(
+        migration_id="20260213_012_transparency_engine_build",
+        description="Add engine git SHA/version metadata columns to transparency log entries.",
+        apply=_migration_20260213_012_transparency_engine_build,
     ),
 ]
 
