@@ -1,0 +1,106 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ReleaseGate Signed Release Attestation",
+    "version": "v1",
+    "type": "object",
+    "properties": {
+        "attestation_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "schema_version": {
+            "const": "v1"
+        },
+        "issued_at": {
+            "type": "string",
+            "format": "date-time"
+        },
+        "issuer": {
+            "type": "object",
+            "properties": {
+                "tenant_id": {
+                    "type": "string"
+                },
+                "key_id": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "tenant_id",
+                "key_id"
+            ]
+        },
+        "subject": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string"
+                },
+                "pr_number": {
+                    "type": "integer"
+                },
+                "commit_sha": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "repo",
+                "pr_number"
+            ]
+        },
+        "assertion": {
+            "type": "object",
+            "properties": {
+                "release_status": {
+                    "enum": [
+                        "ALLOWED",
+                        "BLOCKED"
+                    ]
+                },
+                "decision_id": {
+                    "type": "string"
+                },
+                "policy_hash": {
+                    "type": "string"
+                },
+                "decision_hash": {
+                    "type": "string"
+                },
+                "replay_hash": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "release_status",
+                "decision_id",
+                "decision_hash"
+            ]
+        },
+        "signature": {
+            "type": "object",
+            "properties": {
+                "algorithm": {
+                    "enum": [
+                        "ed25519"
+                    ]
+                },
+                "value": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "algorithm",
+                "value"
+            ]
+        }
+    },
+    "required": [
+        "attestation_id",
+        "schema_version",
+        "issued_at",
+        "issuer",
+        "subject",
+        "assertion",
+        "signature"
+    ]
+}
