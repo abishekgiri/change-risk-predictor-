@@ -193,6 +193,71 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_attestations (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT,
+            pr_number INTEGER,
+            schema_version TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            signed_payload_hash TEXT NOT NULL,
+            attestation_json JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
+        ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_repo_created
+        ON audit_attestations(tenant_id, repo, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_created
+        ON audit_attestations(tenant_id, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_attestation_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Attestation ledger is immutable: mutation not allowed';
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute("DROP TRIGGER IF EXISTS prevent_attestation_update ON audit_attestations")
+    cur.execute("DROP TRIGGER IF EXISTS prevent_attestation_delete ON audit_attestations")
+    cur.execute(
+        """
+        CREATE TRIGGER prevent_attestation_update
+        BEFORE UPDATE ON audit_attestations
+        FOR EACH ROW
+        EXECUTE FUNCTION releasegate_prevent_attestation_mutation()
+        """
+    )
+    cur.execute(
+        """
+        CREATE TRIGGER prevent_attestation_delete
+        BEFORE DELETE ON audit_attestations
+        FOR EACH ROW
+        EXECUTE FUNCTION releasegate_prevent_attestation_mutation()
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS policy_bundles (
             tenant_id TEXT NOT NULL,
             policy_bundle_hash TEXT NOT NULL,
@@ -798,6 +863,24 @@ def init_db() -> str:
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_attestations (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT,
+            pr_number INTEGER,
+            schema_version TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            signed_payload_hash TEXT NOT NULL,
+            attestation_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS policy_bundles (
             tenant_id TEXT NOT NULL,
             policy_bundle_hash TEXT NOT NULL,
@@ -952,6 +1035,15 @@ def init_db() -> str:
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_proof_packs_tenant_proof_pack ON audit_proof_packs(tenant_id, proof_pack_id)"
     )
     cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision ON audit_attestations(tenant_id, decision_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_repo_created ON audit_attestations(tenant_id, repo, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_created ON audit_attestations(tenant_id, created_at)"
+    )
+    cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_metrics_events_tenant_metric_time ON metrics_events(tenant_id, metric_name, created_at)"
     )
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_tenant_key_hash ON api_keys(tenant_id, key_hash)")
@@ -1009,6 +1101,24 @@ def init_db() -> str:
         BEFORE DELETE ON audit_decisions
         BEGIN
             SELECT RAISE(FAIL, 'Audit logs are immutable: DELETE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_update
+        BEFORE UPDATE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation ledger is immutable: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_delete
+        BEFORE DELETE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation ledger is immutable: DELETE not allowed');
         END;
         """
     )

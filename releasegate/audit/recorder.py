@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from typing import Optional
 
+from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_decision
+from releasegate.audit.attestations import record_release_attestation
 from releasegate.audit.policy_bundles import store_policy_bundle
 from releasegate.decision.hashing import (
     compute_decision_hash,
@@ -106,10 +108,24 @@ class AuditRecorder:
                 binding.tenant_id = effective_tenant
 
         AuditRecorder._attach_hashes(decision)
-        canonical_json = AuditRecorder._canonical_decision(decision)
         created_at = decision.timestamp.astimezone(timezone.utc).isoformat()
 
         try:
+            bundle = build_bundle_from_decision(
+                decision,
+                repo=repo,
+                pr_number=pr_number,
+                engine_version=AuditRecorder.ENGINE_VERSION,
+            )
+            attestation = build_attestation_from_bundle(bundle)
+            decision.attestation_id = record_release_attestation(
+                decision_id=decision.decision_id,
+                tenant_id=effective_tenant,
+                repo=repo,
+                pr_number=pr_number,
+                attestation=attestation,
+            )
+            canonical_json = AuditRecorder._canonical_decision(decision)
             storage.execute(
                 """
                 INSERT INTO audit_decisions (

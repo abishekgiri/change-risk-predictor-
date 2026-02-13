@@ -760,6 +760,66 @@ def _migration_20260212_010_phase4_idempotency_and_hashes(cursor) -> None:
     )
 
 
+def _migration_20260213_011_release_attestations(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_attestations (
+            tenant_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT,
+            pr_number INTEGER,
+            schema_version TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            algorithm TEXT NOT NULL,
+            signed_payload_hash TEXT NOT NULL,
+            attestation_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, attestation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
+        ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_repo_created
+        ON audit_attestations(tenant_id, repo, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_created
+        ON audit_attestations(tenant_id, created_at)
+        """
+    )
+
+
+def _migration_20260213_012_attestation_immutability(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_update
+        BEFORE UPDATE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation ledger is immutable: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_delete
+        BEFORE DELETE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation ledger is immutable: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -810,6 +870,16 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260212_010_phase4_idempotency_and_hashes",
         description="Add phase-4 idempotency key records, deterministic decision hashes, and chain-integrity indexes.",
         apply=_migration_20260212_010_phase4_idempotency_and_hashes,
+    ),
+    Migration(
+        migration_id="20260213_011_release_attestations",
+        description="Add tenant-scoped signed release attestation storage.",
+        apply=_migration_20260213_011_release_attestations,
+    ),
+    Migration(
+        migration_id="20260213_012_attestation_immutability",
+        description="Enforce append-only attestation storage with immutable triggers.",
+        apply=_migration_20260213_012_attestation_immutability,
     ),
 ]
 
