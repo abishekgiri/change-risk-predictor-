@@ -4,6 +4,11 @@ Policy inheritance and configuration merging for multi-repo SaaS.
 from copy import deepcopy
 from typing import Dict, Any, Optional, List
 from sqlalchemy.orm import Session
+from releasegate.policy.inheritance import (
+    deep_merge_policies,
+    policy_resolution_hash,
+    resolve_policy_inheritance,
+)
 
 SCOPE_KEY_ALIASES = {
     "project": "project_key",
@@ -36,22 +41,7 @@ def merge_configs(org_config: Optional[Dict[str, Any]], repo_config: Optional[Di
     Returns:
         Merged configuration dictionary
     """
-    if not org_config:
-        return repo_config or {}
-    if not repo_config:
-        return org_config or {}
-    
-    result = deepcopy(org_config)
-    
-    for key, value in repo_config.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            # Recursive merge for nested dicts
-            result[key] = merge_configs(result[key], value)
-        else:
-            # Direct override (including lists)
-            result[key] = value
-    
-    return result
+    return deep_merge_policies(org_config, repo_config)
 
 
 def _canonical_scope_key(key: str) -> str:
@@ -185,19 +175,36 @@ def resolve_effective_policy(
     if repo.org_id:
         org = session.query(Organization).filter(Organization.id == repo.org_id).first()
     
-    # Merge configs
+    normalized_context = _normalize_scope_dict(context or {})
+    requested_env = str(normalized_context.get("environment") or "").strip()
+
+    # Merge org/repo/environment layers.
     org_config = org.default_policy_config if org else {}
     repo_config = repo.policy_override or {}
-    merged_config = merge_configs(org_config, repo_config)
-    scoped = resolve_scoped_policy(merged_config, context=context)
-    
+    combined_for_env = merge_configs(org_config, repo_config)
+    env_policies = combined_for_env.get("environment_policies") if isinstance(combined_for_env, dict) else {}
+    inherited = resolve_policy_inheritance(
+        org_policy=org_config,
+        repo_policy=repo_config,
+        environment=requested_env,
+        environment_policies=env_policies if isinstance(env_policies, dict) else None,
+    )
+    scoped = resolve_scoped_policy(inherited["resolved_policy"], context=normalized_context)
+    resolution_hash = policy_resolution_hash(scoped["config"])
+    policy_scope = list(inherited["policy_scope"])
+    if scoped["matched_scope_count"] > 0:
+        policy_scope.append("scope")
+
     return {
         "config": scoped["config"],
         "strictness": repo.strictness_level or "block",
         "org_id": repo.org_id,
         "repo_id": repo.id,
         "repo_name": repo.full_name or repo.name,
+        "policy_scope": policy_scope,
+        "policy_resolution_hash": resolution_hash,
+        "environment_scope": inherited["environment_scope"],
         "matched_scope_ids": scoped["matched_scope_ids"],
         "matched_scope_count": scoped["matched_scope_count"],
-        "context": _normalize_scope_dict(context or {}),
+        "context": normalized_context,
     }

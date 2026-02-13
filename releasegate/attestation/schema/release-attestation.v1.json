@@ -79,12 +79,26 @@
         },
         "policy_bundle_hash": {
           "type": "string"
+        },
+        "policy_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policy_resolution_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "policy_version",
         "policy_hash",
-        "policy_bundle_hash"
+        "policy_bundle_hash",
+        "policy_scope",
+        "policy_resolution_hash"
       ]
     },
     "decision": {

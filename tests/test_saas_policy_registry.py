@@ -131,7 +131,59 @@ def test_resolve_effective_policy_includes_context_and_scope_matches():
     assert effective["org_id"] == org.id
     assert effective["repo_name"] == "org/service"
     assert effective["strictness"] == "block"
+    assert "policy_resolution_hash" in effective
+    assert isinstance(effective["policy_resolution_hash"], str)
+    assert "repo" in effective["policy_scope"]
+    assert "scope" in effective["policy_scope"]
     assert effective["matched_scope_ids"] == ["repo-prod"]
     assert effective["matched_scope_count"] == 1
     assert effective["context"]["environment"] == "production"
     assert effective["config"]["required_approvals"] == 3
+
+
+def test_resolve_effective_policy_applies_environment_layer_after_repo():
+    repo = SimpleNamespace(
+        id=11,
+        org_id=101,
+        full_name="org/payments",
+        name="payments",
+        strictness_level="block",
+        policy_override={
+            "required_approvals": 2,
+            "environment_policies": {
+                "PRODUCTION": {"required_approvals": 4},
+            },
+        },
+    )
+    org = SimpleNamespace(
+        id=101,
+        default_policy_config={"required_approvals": 1},
+    )
+
+    class FakeQuery:
+        def __init__(self, result):
+            self.result = result
+
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return self.result
+
+    class FakeSession:
+        def query(self, model):
+            if model.__name__ == "Repository":
+                return FakeQuery(repo)
+            if model.__name__ == "Organization":
+                return FakeQuery(org)
+            raise AssertionError(f"unexpected model {model}")
+
+    effective = resolve_effective_policy(
+        session=FakeSession(),
+        repo_id=repo.id,
+        context={"environment": "production"},
+    )
+
+    assert effective["config"]["required_approvals"] == 4
+    assert effective["environment_scope"] == "PRODUCTION"
+    assert effective["policy_scope"][:3] == ["org", "repo", "environment"]

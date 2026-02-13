@@ -255,6 +255,7 @@ def main() -> int:
             )
             from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
             from releasegate.audit.attestations import record_release_attestation
+            from releasegate.policy.inheritance import resolve_policy_inheritance
 
             tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
             commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
@@ -263,14 +264,29 @@ def main() -> int:
                 or pr_data.get("created_at")
                 or "1970-01-01T00:00:00Z"
             )
+            env_name = str(os.getenv("RELEASEGATE_ENVIRONMENT") or "DEV")
+            inheritance_cfg = config.get("policy_inheritance", {}) if isinstance(config, dict) else {}
+            org_policy = inheritance_cfg.get("org_policy") if isinstance(inheritance_cfg, dict) else {}
+            repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
+            repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
+            env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
+            resolved_policy = resolve_policy_inheritance(
+                org_policy=org_policy if isinstance(org_policy, dict) else {},
+                repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
+                environment=env_name,
+                environment_policies=env_policies if isinstance(env_policies, dict) else None,
+            )
+            policy_resolution_hash = str(resolved_policy.get("policy_resolution_hash") or "heuristic-policy-v1")
+            policy_scope = list(resolved_policy.get("policy_scope") or [])
+
             bundle = build_bundle_from_analysis_result(
                 tenant_id=tenant_id,
                 repo=args.repo,
                 pr_number=pr_number,
                 commit_sha=commit_sha,
-                policy_hash="heuristic-policy",
+                policy_hash=policy_resolution_hash,
                 policy_version="1.0.0",
-                policy_bundle_hash="heuristic-policy-v1",
+                policy_bundle_hash=policy_resolution_hash,
                 risk_score=float(risk_score),
                 decision=decision,
                 reason_codes=reasons,
@@ -284,6 +300,8 @@ def main() -> int:
                 },
                 engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
                 timestamp=bundle_timestamp,
+                policy_scope=policy_scope,
+                policy_resolution_hash=policy_resolution_hash,
             )
             attestation = build_attestation_from_bundle(bundle)
             attestation_id = record_release_attestation(
@@ -295,6 +313,8 @@ def main() -> int:
             )
             output["attestation_id"] = attestation_id
             output["attestation"] = attestation
+            output["policy_scope"] = policy_scope
+            output["policy_resolution_hash"] = policy_resolution_hash
 
             if args.emit_attestation:
                 with open(args.emit_attestation, "w", encoding="utf-8") as f:

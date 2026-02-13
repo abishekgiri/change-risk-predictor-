@@ -24,6 +24,8 @@ class DecisionBundle(BaseModel):
     policy_version: str
     policy_hash: str
     policy_bundle_hash: str
+    policy_scope: List[str] = Field(default_factory=list)
+    policy_resolution_hash: Optional[str] = None
     signals: Dict[str, Any] = Field(default_factory=dict)
     risk_score: Optional[float] = None
     decision: Literal["ALLOW", "BLOCK"]
@@ -50,6 +52,8 @@ class AttestationPolicy(BaseModel):
     policy_version: str
     policy_hash: str
     policy_bundle_hash: str
+    policy_scope: List[str] = Field(default_factory=list)
+    policy_resolution_hash: Optional[str] = None
 
 
 class AttestationDecision(BaseModel):

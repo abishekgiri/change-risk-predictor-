@@ -68,19 +68,29 @@ def build_bundle_from_decision(
     if not reason_codes and decision.release_status == DecisionType.BLOCKED:
         reason_codes = ["POLICY_BLOCKED"]
 
+    input_snapshot = decision.input_snapshot if isinstance(decision.input_snapshot, dict) else {}
+    resolved_scope = input_snapshot.get("policy_scope")
+    if not isinstance(resolved_scope, list):
+        resolved_scope = []
+    resolution_hash = input_snapshot.get("policy_resolution_hash")
+    if not isinstance(resolution_hash, str):
+        resolution_hash = None
+
     return DecisionBundle(
         tenant_id=decision.tenant_id,
         decision_id=decision.decision_id,
         repo=repo,
         pr_number=pr_number,
         commit_sha=_extract_commit_sha(
-            decision.input_snapshot if isinstance(decision.input_snapshot, dict) else {},
+            input_snapshot,
             decision.enforcement_targets.ref,
         ),
         policy_version=policy_version,
         policy_hash=policy_hash or "unknown-policy-hash",
         policy_bundle_hash=decision.policy_bundle_hash or "unknown-policy-bundle",
-        signals=(decision.input_snapshot if isinstance(decision.input_snapshot, dict) else {}),
+        policy_scope=[str(item) for item in resolved_scope],
+        policy_resolution_hash=resolution_hash or policy_hash or "unknown-policy-hash",
+        signals=input_snapshot,
         risk_score=None,
         decision=_status_to_attestation_decision(decision.release_status),
         reason_codes=reason_codes,
@@ -106,6 +116,8 @@ def build_bundle_from_analysis_result(
     engine_version: str,
     timestamp: Optional[str] = None,
     checkpoint_hashes: Optional[list[str]] = None,
+    policy_scope: Optional[list[str]] = None,
+    policy_resolution_hash: Optional[str] = None,
 ) -> DecisionBundle:
     issued_at = str(timestamp or "").strip() or datetime.now(timezone.utc).isoformat()
     seed = {
@@ -130,6 +142,8 @@ def build_bundle_from_analysis_result(
         policy_version=policy_version,
         policy_hash=policy_hash,
         policy_bundle_hash=policy_bundle_hash,
+        policy_scope=[str(item) for item in (policy_scope or [])],
+        policy_resolution_hash=str(policy_resolution_hash or policy_hash or "").strip() or None,
         signals=signals or {},
         risk_score=float(risk_score),
         decision=_status_to_attestation_decision(decision),
@@ -170,6 +184,8 @@ def _payload_without_signature(
             policy_version=bundle.policy_version,
             policy_hash=bundle.policy_hash,
             policy_bundle_hash=bundle.policy_bundle_hash,
+            policy_scope=list(bundle.policy_scope),
+            policy_resolution_hash=bundle.policy_resolution_hash or bundle.policy_hash,
         ),
         decision=AttestationDecision(
             decision=bundle.decision,

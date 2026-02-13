@@ -3,6 +3,7 @@ import yaml
 from typing import List, Union, Optional
 from .types import PolicyDef
 from .policy_types import Policy
+from .inheritance import resolve_policy_inheritance
 
 class PolicyLoader:
     def __init__(self, policy_dir: Optional[str] = None, schema: str = "def", strict: bool = True):
@@ -64,6 +65,25 @@ class PolicyLoader:
     def load_all(self) -> List[Union[PolicyDef, Policy]]:
         """Alias for load_policies (legacy compatibility)."""
         return self.load_policies()
+
+    def resolve_policy_bundle(
+        self,
+        *,
+        org_policy: Optional[dict] = None,
+        repo_policy: Optional[dict] = None,
+        environment: Optional[str] = None,
+        environment_policies: Optional[dict] = None,
+    ) -> dict:
+        """
+        Resolve layered policy configuration:
+        org -> repo -> environment.
+        """
+        return resolve_policy_inheritance(
+            org_policy=org_policy,
+            repo_policy=repo_policy,
+            environment=environment,
+            environment_policies=environment_policies,
+        )
 
     def _parse_policy(self, data: dict) -> Union[PolicyDef, Policy]:
         schema = self.schema
