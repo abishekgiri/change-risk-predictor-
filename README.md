@@ -197,6 +197,26 @@ Risk metadata is attached to Jira issue properties.
 
 **Security posture is intentionally minimal.**
 
+### 10. Signed Release Attestation
+
+ReleaseGate emits a signed attestation for each evaluated decision. The attestation is generated from a single `DecisionBundle` contract (policy snapshot hash, input signals summary, decision, reason codes, engine version), canonicalized, hashed, signed with Ed25519, and stored for audit retrieval.
+
+**CLI demo (offline verification):**
+
+```bash
+releasegate analyze-pr --repo ORG/REPO --pr 123 --emit-attestation att.json
+releasegate verify-attestation att.json
+```
+
+**API demo:**
+
+```bash
+curl -s http://localhost:8000/keys
+curl -s -X POST http://localhost:8000/verify -d @att.json -H "Content-Type: application/json"
+```
+
+`/verify` accepts either the raw attestation JSON or `{ "attestation": { ... } }`.
+
 ---
 
 ## Architecture Overview

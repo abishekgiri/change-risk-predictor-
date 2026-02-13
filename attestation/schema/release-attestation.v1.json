@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://releasegate.dev/schemas/release-attestation.v1.json",
+  "title": "ReleaseGate Release Attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "attestation_type",
+    "issued_at",
+    "tenant_id",
+    "decision_id",
+    "engine_version",
+    "subject",
+    "policy",
+    "decision",
+    "evidence",
+    "issuer",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "attestation_type": {
+      "type": "string",
+      "const": "releasegate.release_attestation"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "engine_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "commit_sha"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit_sha": {
+          "type": "string",
+          "minLength": 1
+        },
+        "merge_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pr_number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "build_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_version",
+        "policy_hash",
+        "policy_bundle_hash"
+      ],
+      "properties": {
+        "policy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy_bundle_hash": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "reason_codes"
+      ],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": [
+            "ALLOW",
+            "BLOCK"
+          ]
+        },
+        "risk_score": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_hashes",
+        "decision_bundle_hash",
+        "signals_summary"
+      ],
+      "properties": {
+        "signals_summary": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "checkpoint_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "decision_bundle_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org_id",
+        "app_id",
+        "environment",
+        "key_id"
+      ],
+      "properties": {
+        "org_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "app_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "signed_payload_hash",
+        "signature_bytes"
+      ],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "const": "ed25519"
+        },
+        "signed_payload_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "signature_bytes": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://releasegate.dev/schemas/decision-bundle.v1.json",
+  "title": "ReleaseGate DecisionBundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tenant_id",
+    "decision_id",
+    "repo",
+    "commit_sha",
+    "policy_version",
+    "policy_hash",
+    "policy_bundle_hash",
+    "signals",
+    "decision",
+    "reason_codes",
+    "timestamp",
+    "engine_version"
+  ],
+  "properties": {
+    "tenant_id": {"type": "string", "minLength": 1},
+    "decision_id": {"type": "string", "minLength": 1},
+    "repo": {"type": "string", "minLength": 1},
+    "pr_number": {"type": ["integer", "null"]},
+    "release_id": {"type": ["string", "null"]},
+    "build_id": {"type": ["string", "null"]},
+    "commit_sha": {"type": "string", "minLength": 1},
+    "merge_sha": {"type": ["string", "null"]},
+    "policy_version": {"type": "string", "minLength": 1},
+    "policy_hash": {"type": "string", "minLength": 1},
+    "policy_bundle_hash": {"type": "string", "minLength": 1},
+    "signals": {"type": "object", "additionalProperties": true},
+    "risk_score": {"type": ["number", "null"]},
+    "decision": {"type": "string", "enum": ["ALLOW", "BLOCK"]},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "timestamp": {"type": "string", "format": "date-time"},
+    "engine_version": {"type": "string", "minLength": 1},
+    "checkpoint_hashes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

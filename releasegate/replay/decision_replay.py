@@ -165,6 +165,7 @@ def replay_decision(decision: Decision) -> Dict[str, Any]:
 
     return {
         "decision_id": decision.decision_id,
+        "attestation_id": decision.attestation_id,
         "tenant_id": decision.tenant_id,
         "replayed_at": datetime.now(timezone.utc).isoformat(),
         "original_status": original_status.value,

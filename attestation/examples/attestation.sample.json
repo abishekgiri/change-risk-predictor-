@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.0.0",
+  "attestation_type": "releasegate.release_attestation",
+  "issued_at": "2026-02-13T00:00:00Z",
+  "tenant_id": "demo-tenant",
+  "decision_id": "dec_demo_001",
+  "engine_version": "2.0.0",
+  "subject": {
+    "repo": "org/service-api",
+    "commit_sha": "abc123def456",
+    "merge_sha": null,
+    "pr_number": 184,
+    "build_id": null,
+    "release_id": null
+  },
+  "policy": {
+    "policy_version": "1.0.0",
+    "policy_hash": "sha256:policy-demo",
+    "policy_bundle_hash": "bundle-demo-hash"
+  },
+  "decision": {
+    "decision": "BLOCK",
+    "risk_score": 0.72,
+    "reason_codes": [
+      "POLICY_BLOCKED",
+      "APPROVALS_INSUFFICIENT"
+    ]
+  },
+  "evidence": {
+    "signals_summary": {
+      "approvals": {
+        "required": 2,
+        "actual": 1
+      },
+      "tests": {
+        "required": "pass",
+        "actual": "pass"
+      },
+      "criticality": "HIGH"
+    },
+    "checkpoint_hashes": [
+      "hash-a",
+      "hash-b"
+    ],
+    "decision_bundle_hash": "sha256:7dce48557dcb848360a7e247186f1bbbb53afc5183bcf218c08cbc8878ed43ee"
+  },
+  "issuer": {
+    "org_id": "demo-tenant",
+    "app_id": "releasegate",
+    "environment": "dev",
+    "key_id": "rg-local-2026-01"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signed_payload_hash": "sha256:07cf6d667f79afcc70041ecfc66bae2fd893ae17963baf86776770e65ebb5605",
+    "signature_bytes": "XGwNQrd9uavoOIP9cO/L7f0Q9qdwfqCdsqA77dnEeQPRhldPmvRDb42iLUOjpwpIsq7RavI3igzo4xxtxaJxBg=="
+  }
+}

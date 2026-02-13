@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0.0",
+  "attestation_type": "releasegate.release_attestation",
+  "issued_at": "1970-01-01T00:00:00Z",
+  "tenant_id": "default",
+  "decision_id": "ee82d14b74291765d45e1881e555b609",
+  "engine_version": "2.0.0",
+  "subject": {
+    "repo": "ORG/REPO",
+    "commit_sha": "unknown",
+    "merge_sha": null,
+    "pr_number": 123,
+    "build_id": null,
+    "release_id": null
+  },
+  "policy": {
+    "policy_version": "1.0.0",
+    "policy_hash": "heuristic-policy",
+    "policy_bundle_hash": "heuristic-policy-v1"
+  },
+  "decision": {
+    "decision": "ALLOW",
+    "risk_score": 25.01,
+    "reason_codes": [
+      "Heuristic classification from GitHub metadata: LOW"
+    ]
+  },
+  "evidence": {
+    "signals_summary": {
+      "metrics": {
+        "changed_files_count": 0,
+        "additions": 0,
+        "deletions": 0,
+        "total_churn": 0
+      }
+    },
+    "checkpoint_hashes": [],
+    "decision_bundle_hash": "sha256:f7fe1d8dd7a0b0b3640a7eacba56a778a3e83d880fd397ad6e87cbba7168e159"
+  },
+  "issuer": {
+    "org_id": "default",
+    "app_id": "releasegate",
+    "environment": "dev",
+    "key_id": "rg-local-2026-01"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signed_payload_hash": "sha256:2c97a6eb7e518979593744ef4dd274a4bbc0e90fc746a689b739b44a58e0c332",
+    "signature_bytes": "Q5LIvOJAZ7InXUkibdysE9hlWRY2C3ayw3os4rP3XqLmDQ893GwHBl3jvUuFSFtnSbCjCEK/MOMcl6srKuYfBA=="
+  }
+}

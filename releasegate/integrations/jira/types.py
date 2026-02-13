@@ -41,6 +41,7 @@ class TransitionCheckResponse(BaseModel):
     status: Literal["ALLOWED", "CONDITIONAL", "BLOCKED", "SKIPPED", "ERROR"] = Field(..., description="ReleaseGate Status")
     policy_hash: Optional[str] = Field(None, description="Hash fingerprint of compiled policy bundle")
     tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
+    attestation_id: Optional[str] = Field(None, description="Signed release attestation ID")
     
     requirements: List[str] = Field(default_factory=list, description="List of unsatisfied requirements")
     unlock_conditions: List[str] = Field(default_factory=list, description="Human readable unlock instructions")

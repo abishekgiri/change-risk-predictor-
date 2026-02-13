@@ -8,6 +8,9 @@
 releasegate_secrets.env
 *.key
 *.pem
+private.pem
+keys/private*
+!attestation/keys/public.pem
 secrets/
 credentials/
 

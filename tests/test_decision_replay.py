@@ -95,6 +95,7 @@ def test_replay_endpoint_recomputes_status_and_policy_hash():
     assert resp.status_code == 200
     body = resp.json()
     assert body["decision_id"] == stored.decision_id
+    assert body["attestation_id"] == stored.attestation_id
     assert body["original_status"] == "BLOCKED"
     assert body["replay_status"] == "BLOCKED"
     assert body["status_match"] is True

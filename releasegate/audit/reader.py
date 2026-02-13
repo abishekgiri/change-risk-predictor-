@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from releasegate.audit.attestations import get_release_attestation_by_decision
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -73,3 +74,13 @@ class AuditReader:
         from releasegate.audit.policy_bundles import get_latest_active_policy_bundle
 
         return get_latest_active_policy_bundle(tenant_id=tenant_id)
+
+    @staticmethod
+    def get_attestation_by_decision(
+        decision_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return get_release_attestation_by_decision(
+            decision_id=decision_id,
+            tenant_id=resolve_tenant_id(tenant_id),
+        )

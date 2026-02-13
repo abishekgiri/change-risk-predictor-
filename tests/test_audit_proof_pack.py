@@ -112,6 +112,7 @@ def test_audit_proof_pack_contains_evidence(monkeypatch, tmp_path):
     body = resp.json()
 
     assert body["bundle_version"] == "audit_proof_v1"
+    assert body["attestation_id"] == stored.attestation_id
     assert body["decision_snapshot"]["decision_id"] == stored.decision_id
     assert body["policy_snapshot"][0]["policy_id"] == "PROOF-001"
     assert body["input_snapshot"]["policies_requested"] == ["PROOF-001"]

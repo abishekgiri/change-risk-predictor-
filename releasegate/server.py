@@ -42,8 +42,6 @@ from releasegate.decision.hashing import (
     compute_policy_hash_from_bindings,
     compute_replay_hash,
 )
-from releasegate.attestation.engine import AttestationEngine
-from releasegate.attestation.key_manager import AttestationKeyManager
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
@@ -148,10 +146,6 @@ class CreateWebhookSigningKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
     rotate_existing: bool = True
     secret: Optional[str] = None
-
-
-class VerifyAttestationRequest(BaseModel):
-    attestation: Dict[str, Any]
 
 
 # --- Config ---
@@ -439,48 +433,29 @@ async def github_webhook(
 @app.get("/keys")
 def get_public_keys():
     """
-    Returns the current public signing key(s) in JWKS-like or simple format.
-    For v1, we return the active Ed25519 public key as PEM.
+    Returns active public attestation keys.
+    Includes both modern and legacy field aliases for compatibility.
     """
-    private_key, key_id = AttestationKeyManager.load_signing_key()
-    public_pem = AttestationKeyManager.get_public_key_pem(private_key)
-    return {
-        "keys": [
+    from releasegate.attestation.crypto import load_public_keys_map
+
+    keys = []
+    for key_id, public_key in sorted(load_public_keys_map().items()):
+        keys.append(
             {
+                "key_id": key_id,
+                "algorithm": "ed25519",
+                "public_key": public_key,
+                # Legacy aliases:
                 "kid": key_id,
                 "alg": "Ed25519",
                 "kty": "OKP",
                 "use": "sig",
-                "pem": public_pem.decode("utf-8")
+                "pem": public_key,
             }
-        ]
-    }
-
-
-@app.post("/attestations/verify")
-def verify_attestation_endpoint(payload: VerifyAttestationRequest):
-    """
-    Verifies a signed release attestation.
-    """
-    attestation = payload.attestation
-    
-    # In a real system, we'd lookup the key by kid.
-    # Here we assume we are the issuer and verify with our active key.
-    # Or strict verification against a known set.
-    private_key, key_id = AttestationKeyManager.load_signing_key()
-    public_pem = AttestationKeyManager.get_public_key_pem(private_key)
-    
-    is_valid = AttestationEngine.verify_attestation(attestation, public_pem)
-    
-    if not is_valid:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-
+        )
     return {
-        "valid": True,
-        "attestation_id": attestation.get("attestation_id"),
-        "issuer": attestation.get("issuer"),
-        "subject": attestation.get("subject"),
-         "assertion": attestation.get("assertion")
+        "issuer": "releasegate",
+        "keys": keys,
     }
 
 
@@ -1704,10 +1679,14 @@ def replay_stored_decision(
 def verify_release_attestation(
     payload: Dict[str, Any],
 ):
+    from releasegate.attestation.crypto import load_public_keys_map
     from releasegate.attestation.verify import verify_attestation_payload
 
     attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
-    report = verify_attestation_payload(attestation)
+    report = verify_attestation_payload(
+        attestation,
+        public_keys_by_key_id=load_public_keys_map(),
+    )
     report["ok"] = bool(
         report.get("schema_valid")
         and report.get("payload_hash_match")
@@ -1715,22 +1694,3 @@ def verify_release_attestation(
         and report.get("valid_signature")
     )
     return report
-
-
-@app.get("/keys")
-def list_attestation_public_keys(
-):
-    from releasegate.attestation.crypto import load_public_keys_map
-
-    keys = load_public_keys_map()
-    return {
-        "issuer": "releasegate",
-        "keys": [
-            {
-                "key_id": key_id,
-                "algorithm": "ed25519",
-                "public_key": key_value,
-            }
-            for key_id, key_value in sorted(keys.items())
-        ],
-    }

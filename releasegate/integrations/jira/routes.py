@@ -2,6 +2,7 @@ import json
 import logging
 
 from fastapi import APIRouter, Header, HTTPException
+from releasegate.audit.reader import AuditReader
 from releasegate.audit.idempotency import (
     claim_idempotency,
     complete_idempotency,
@@ -18,6 +19,15 @@ from releasegate.security.types import AuthContext
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _attach_attestation_id(response: TransitionCheckResponse, *, tenant_id: str) -> TransitionCheckResponse:
+    if response.attestation_id:
+        return response
+    row = AuditReader.get_attestation_by_decision(response.decision_id, tenant_id=tenant_id)
+    if row and row.get("attestation_id"):
+        return response.model_copy(update={"attestation_id": row["attestation_id"]})
+    return response
 
 @router.post("/transition/check", response_model=TransitionCheckResponse)
 async def check_transition(
@@ -115,7 +125,10 @@ async def check_transition(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if claim.state == "replay" and claim.response is not None:
-        replay = TransitionCheckResponse.model_validate(claim.response)
+        replay = _attach_attestation_id(
+            TransitionCheckResponse.model_validate(claim.response),
+            tenant_id=tenant_id,
+        )
         logger.info(
             json.dumps(
                 {
@@ -141,11 +154,14 @@ async def check_transition(
             idem_key=idem_key,
         )
         if replayed is not None:
-            return TransitionCheckResponse.model_validate(replayed)
+            return _attach_attestation_id(
+                TransitionCheckResponse.model_validate(replayed),
+                tenant_id=tenant_id,
+            )
         raise HTTPException(status_code=409, detail="Idempotent request is still in progress")
 
     gate = WorkflowGate()
-    response = gate.check_transition(request)
+    response = _attach_attestation_id(gate.check_transition(request), tenant_id=tenant_id)
     logger.info(
         json.dumps(
             {

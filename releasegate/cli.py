@@ -245,6 +245,8 @@ def main() -> int:
             "attached_issue_keys": attached_issue_keys,
         }
 
+        from releasegate.attestation.crypto import MissingSigningKeyError
+
         try:
             from releasegate.attestation.service import (
                 build_attestation_from_bundle,
@@ -254,6 +256,11 @@ def main() -> int:
 
             tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
             commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
+            bundle_timestamp = str(
+                pr_data.get("updated_at")
+                or pr_data.get("created_at")
+                or "1970-01-01T00:00:00Z"
+            )
             bundle = build_bundle_from_analysis_result(
                 tenant_id=tenant_id,
                 repo=args.repo,
@@ -274,6 +281,7 @@ def main() -> int:
                     }
                 },
                 engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
+                timestamp=bundle_timestamp,
             )
             attestation = build_attestation_from_bundle(bundle)
             attestation_id = record_release_attestation(
@@ -289,8 +297,12 @@ def main() -> int:
             if args.emit_attestation:
                 with open(args.emit_attestation, "w", encoding="utf-8") as f:
                     json.dump(attestation, f, indent=2)
+        except MissingSigningKeyError as e:
+            print(f"Error generating attestation: {e}", file=sys.stderr)
+            return 1
         except Exception as e:
-            output["attestation_error"] = str(e)
+            print(f"Error generating attestation: {e}", file=sys.stderr)
+            return 1
 
         # Write JSON output if requested
         if args.output:
@@ -635,54 +647,6 @@ def main() -> int:
             print(f"Would Newly Block: {report.get('would_newly_block')}")
             print(f"Would Unblock: {report.get('would_unblock')}")
         return 0
-
-    if args.cmd == "verify-attestation":
-        from releasegate.attestation.engine import AttestationEngine
-        from releasegate.attestation.key_manager import AttestationKeyManager
-        
-        try:
-            with open(args.file, "r") as f:
-                attestation = json.load(f)
-        except Exception as e:
-            print(f"Error loading attestation file: {e}", file=sys.stderr)
-            return 1
-
-        public_key_pem = None
-        if args.key_file:
-            try:
-                with open(args.key_file, "rb") as f:
-                    public_key_pem = f.read()
-            except Exception as e:
-                print(f"Error loading key file: {e}", file=sys.stderr)
-                return 1
-        else:
-            # Fallback to loading from env if no key file provided (e.g. verifying against self)
-            try:
-                private_key, _ = AttestationKeyManager.load_signing_key()
-                public_key_pem = AttestationKeyManager.get_public_key_pem(private_key)
-            except Exception as e:
-                 print(f"Error loading default key from env: {e}", file=sys.stderr)
-                 return 1
-
-        is_valid = AttestationEngine.verify_attestation(attestation, public_key_pem)
-        
-        result = {
-            "valid": is_valid,
-            "attestation_id": attestation.get("attestation_id"),
-            "subject": attestation.get("subject"),
-            "assertion": attestation.get("assertion")
-        }
-
-        if args.format == "json":
-            print(json.dumps(result, indent=2))
-        else:
-            status = "VALID" if is_valid else "INVALID"
-            print(f"Attestation Status: {status}")
-            print(f"ID: {result['attestation_id']}")
-            print(f"Subject: {result['subject']}")
-            print(f"Decision: {result['assertion'].get('release_status')}")
-            
-        return 0 if is_valid else 1
 
     if args.cmd == "proof-pack":
         from releasegate.audit.checkpoints import (
