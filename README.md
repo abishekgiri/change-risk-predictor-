@@ -197,6 +197,19 @@ Risk metadata is attached to Jira issue properties.
 
 **Security posture is intentionally minimal.**
 
+## Trust Guarantees
+
+- Signed attestations are deterministic (`Ed25519`) and verifiable offline.
+- Public signing keys are published via root-signed manifests:
+  - `/.well-known/releasegate-keys.json`
+  - `/.well-known/releasegate-keys.sig`
+- Key status semantics are explicit (`ACTIVE`, `DEPRECATED`, `REVOKED`).
+- Transparency log records every attestation issuance in append-only storage.
+- Transparency APIs:
+  - `GET /transparency/latest` (default `50`, max clamp `500`, rejects `<= 0`)
+  - `GET /transparency/{attestation_id}`
+- Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
+
 ---
 
 ## Architecture Overview
