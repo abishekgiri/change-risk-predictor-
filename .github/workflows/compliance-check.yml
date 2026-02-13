@@ -53,4 +53,5 @@ jobs:
           releasegate evaluate \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
+            --tenant "${{ github.repository_owner }}" \
             --format json > compliance_report.json
