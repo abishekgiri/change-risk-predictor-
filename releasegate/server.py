@@ -469,6 +469,30 @@ def get_public_keys():
     }
 
 
+@app.get("/.well-known/releasegate-keys.json")
+def get_signed_key_manifest():
+    from releasegate.attestation.crypto import MissingSigningKeyError
+    from releasegate.attestation.key_manifest import get_signed_key_manifest_cached
+
+    try:
+        manifest, _ = get_signed_key_manifest_cached()
+    except MissingSigningKeyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return manifest
+
+
+@app.get("/.well-known/releasegate-keys.sig")
+def get_signed_key_manifest_signature():
+    from releasegate.attestation.crypto import MissingSigningKeyError
+    from releasegate.attestation.key_manifest import get_signed_key_manifest_cached
+
+    try:
+        _, signature = get_signed_key_manifest_cached()
+    except MissingSigningKeyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return signature
+
+
 @app.post("/attestations/verify")
 def verify_attestation_endpoint(payload: VerifyAttestationRequest):
     """
@@ -1731,4 +1755,3 @@ def verify_release_attestation(
         and report.get("valid_signature")
     )
     return report
-
