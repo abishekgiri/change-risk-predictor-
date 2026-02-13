@@ -137,6 +137,9 @@
         "signals_summary": {
           "type": "object"
         },
+        "dependency_provenance": {
+          "type": "object"
+        },
         "checkpoint_hashes": {
           "type": "array",
           "items": {
@@ -149,6 +152,7 @@
       },
       "required": [
         "signals_summary",
+        "dependency_provenance",
         "checkpoint_hashes",
         "decision_bundle_hash"
       ]

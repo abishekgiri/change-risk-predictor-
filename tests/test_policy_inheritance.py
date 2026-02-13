@@ -27,6 +27,7 @@ def test_policy_inheritance_merges_org_repo_environment_in_order():
     assert config["labels"]["security"] is True
     assert config["labels"]["release"] is True
     assert config["freeze"] is True
+    assert config["dependency_provenance"]["lockfile_required"] is False
 
 
 def test_policy_inheritance_hash_is_deterministic():
@@ -42,3 +43,13 @@ def test_policy_inheritance_hash_is_deterministic():
 
     assert first["policy_resolution_hash"] == second["policy_resolution_hash"]
     assert first["resolved_policy"] == second["resolved_policy"]
+
+
+def test_policy_inheritance_preserves_dependency_provenance_rule():
+    resolved = resolve_policy_inheritance(
+        org_policy={"dependency_provenance": {"lockfile_required": False}},
+        repo_policy={"dependency_provenance": {"lockfile_required": True}},
+        environment="DEV",
+        environment_policies=None,
+    )
+    assert resolved["resolved_policy"]["dependency_provenance"]["lockfile_required"] is True

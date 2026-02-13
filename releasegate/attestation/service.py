@@ -194,6 +194,7 @@ def _payload_without_signature(
         ),
         evidence=AttestationEvidence(
             signals_summary=dict(bundle.signals),
+            dependency_provenance=dict(bundle.signals.get("dependency_provenance") or {}),
             checkpoint_hashes=list(bundle.checkpoint_hashes),
             decision_bundle_hash=f"sha256:{bundle_hash}",
         ),

@@ -209,6 +209,71 @@ def main() -> int:
         decision = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
 
         reasons = [f"Heuristic classification from GitHub metadata: {risk_level}"]
+        reason_codes: list[str] = []
+        if risk_level == "HIGH":
+            reason_codes.append("RISK_HIGH_HEURISTIC")
+        elif risk_level == "MEDIUM":
+            reason_codes.append("RISK_MEDIUM_HEURISTIC")
+        else:
+            reason_codes.append("RISK_LOW_HEURISTIC")
+
+        env_name = str(os.getenv("RELEASEGATE_ENVIRONMENT") or "DEV")
+        policy_scope = []
+        policy_resolution_hash = "heuristic-policy-v1"
+        resolved_policy = {}
+        try:
+            from releasegate.policy.inheritance import resolve_policy_inheritance
+
+            inheritance_cfg = config.get("policy_inheritance", {}) if isinstance(config, dict) else {}
+            org_policy = inheritance_cfg.get("org_policy") if isinstance(inheritance_cfg, dict) else {}
+            repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
+            repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
+            env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
+            resolved = resolve_policy_inheritance(
+                org_policy=org_policy if isinstance(org_policy, dict) else {},
+                repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
+                environment=env_name,
+                environment_policies=env_policies if isinstance(env_policies, dict) else None,
+            )
+            resolved_policy = resolved.get("resolved_policy", {}) if isinstance(resolved, dict) else {}
+            policy_resolution_hash = str(resolved.get("policy_resolution_hash") or policy_resolution_hash)
+            policy_scope = list(resolved.get("policy_scope") or [])
+        except Exception:
+            resolved_policy = {}
+            policy_scope = []
+            policy_resolution_hash = "heuristic-policy-v1"
+
+        dp_cfg = resolved_policy.get("dependency_provenance") if isinstance(resolved_policy, dict) else {}
+        lockfile_required = bool((dp_cfg or {}).get("lockfile_required", False))
+        commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
+        try:
+            from releasegate.ingestion.providers.github_provider import GitHubProvider
+            from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
+
+            dp_provider = GitHubProvider(config if isinstance(config, dict) else {})
+            dependency_provenance = build_dependency_provenance_signal(
+                provider=dp_provider,
+                repo=args.repo,
+                ref=commit_sha or None,
+                lockfile_required=lockfile_required,
+            )
+        except Exception:
+            from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
+
+            dependency_provenance = build_dependency_provenance_signal(
+                provider=None,
+                repo=args.repo,
+                ref=commit_sha or None,
+                lockfile_required=lockfile_required,
+            )
+
+        if not dependency_provenance.get("satisfied", True):
+            for code in dependency_provenance.get("reason_codes", []):
+                if code not in reason_codes:
+                    reason_codes.append(code)
+            if "LOCKFILE_REQUIRED_MISSING" in dependency_provenance.get("reason_codes", []):
+                reasons.append("LOCKFILE_REQUIRED_MISSING: policy requires at least one lockfile at PR head.")
+            decision = "BLOCK"
 
         issue_keys = sorted(extract_jira_issue_keys(pr_data.get("title"), pr_data.get("body")))
         attached_issue_keys = []
@@ -237,12 +302,14 @@ def main() -> int:
             "risk_level": risk_level,
             "decision": decision,
             "reasons": reasons,
+            "reason_codes": reason_codes,
             "metrics": {
                 "changed_files_count": metrics.changed_files,
                 "additions": metrics.additions,
                 "deletions": metrics.deletions,
                 "total_churn": metrics.total_churn,
             },
+            "dependency_provenance": dependency_provenance,
             "attached_issue_keys": attached_issue_keys,
         }
 
@@ -255,29 +322,13 @@ def main() -> int:
             )
             from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
             from releasegate.audit.attestations import record_release_attestation
-            from releasegate.policy.inheritance import resolve_policy_inheritance
 
             tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
-            commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
             bundle_timestamp = str(
                 pr_data.get("updated_at")
                 or pr_data.get("created_at")
                 or "1970-01-01T00:00:00Z"
             )
-            env_name = str(os.getenv("RELEASEGATE_ENVIRONMENT") or "DEV")
-            inheritance_cfg = config.get("policy_inheritance", {}) if isinstance(config, dict) else {}
-            org_policy = inheritance_cfg.get("org_policy") if isinstance(inheritance_cfg, dict) else {}
-            repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
-            repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
-            env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
-            resolved_policy = resolve_policy_inheritance(
-                org_policy=org_policy if isinstance(org_policy, dict) else {},
-                repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
-                environment=env_name,
-                environment_policies=env_policies if isinstance(env_policies, dict) else None,
-            )
-            policy_resolution_hash = str(resolved_policy.get("policy_resolution_hash") or "heuristic-policy-v1")
-            policy_scope = list(resolved_policy.get("policy_scope") or [])
 
             bundle = build_bundle_from_analysis_result(
                 tenant_id=tenant_id,
@@ -289,14 +340,15 @@ def main() -> int:
                 policy_bundle_hash=policy_resolution_hash,
                 risk_score=float(risk_score),
                 decision=decision,
-                reason_codes=reasons,
+                reason_codes=reason_codes or reasons,
                 signals={
                     "metrics": {
                         "changed_files_count": metrics.changed_files,
                         "additions": metrics.additions,
                         "deletions": metrics.deletions,
                         "total_churn": metrics.total_churn,
-                    }
+                    },
+                    "dependency_provenance": dependency_provenance,
                 },
                 engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
                 timestamp=bundle_timestamp,

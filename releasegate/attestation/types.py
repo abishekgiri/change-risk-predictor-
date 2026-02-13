@@ -68,6 +68,7 @@ class AttestationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     signals_summary: Dict[str, Any] = Field(default_factory=dict)
+    dependency_provenance: Dict[str, Any] = Field(default_factory=dict)
     checkpoint_hashes: List[str] = Field(default_factory=list)
     decision_bundle_hash: str
 

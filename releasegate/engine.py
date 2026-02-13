@@ -8,6 +8,7 @@ from releasegate.enforcement.types import ControlContext
 from releasegate.observability.internal_metrics import incr
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.ttl_cache import TTLCache, yaml_tree_fingerprint
+from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
 from releasegate.engine_core import (
     ComplianceRunResult,
     PolicyResult,
@@ -90,6 +91,18 @@ class ComplianceEngine:
             registry_result = self.control_registry.run_all(context)
             phase3_signals = registry_result.get("signals", {})
             phase3_findings = registry_result.get("findings", [])
+
+        dp_cfg = self.config.get("dependency_provenance", {}) if isinstance(self.config.get("dependency_provenance"), dict) else {}
+        lockfile_required = bool(dp_cfg.get("lockfile_required", False))
+        dependency_signal = build_dependency_provenance_signal(
+            provider=raw_signals.get("provider"),
+            repo=raw_signals.get("repo", "unknown"),
+            ref=raw_signals.get("head_sha") or raw_signals.get("ref"),
+            lockfile_required=lockfile_required,
+        )
+        phase3_signals["dependency_provenance"] = dependency_signal
+        phase3_signals["dependency_provenance.satisfied"] = bool(dependency_signal.get("satisfied", True))
+        phase3_signals["dependency_provenance.lockfile_required"] = bool(dependency_signal.get("lockfile_required", False))
         
         # 3. Flatten Signals (combine Phase 2 + Phase 3)
         signal_map = self._flatten_signals({
@@ -111,6 +124,9 @@ class ComplianceEngine:
                 overall_status = "BLOCK"
             elif p_res.status == "WARN" and overall_status != "BLOCK":
                 overall_status = "WARN"
+
+        if lockfile_required and not dependency_signal.get("satisfied", True):
+            overall_status = "BLOCK"
         
         # 5. Check for Overrides (Phase 2 Step 8)
         # Check raw signals for override labels
@@ -136,7 +152,8 @@ class ComplianceEngine:
                     "file_path": f.file_path
                 }
                 for f in phase3_findings
-            ]
+            ],
+            "dependency_provenance": dependency_signal,
         }
         
         if found_override:

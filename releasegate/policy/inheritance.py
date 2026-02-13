@@ -51,6 +51,17 @@ def policy_resolution_hash(resolved_policy: Dict[str, Any]) -> str:
     return sha256_json(resolved_policy or {})
 
 
+def normalize_policy_defaults(policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    resolved = deepcopy(policy or {})
+    dp = resolved.get("dependency_provenance")
+    if not isinstance(dp, dict):
+        dp = {}
+    resolved["dependency_provenance"] = {
+        "lockfile_required": bool(dp.get("lockfile_required", False)),
+    }
+    return resolved
+
+
 def resolve_policy_inheritance(
     *,
     org_policy: Optional[Dict[str, Any]],
@@ -72,6 +83,8 @@ def resolve_policy_inheritance(
         scope.append("repo")
     if env_layer:
         scope.append("environment")
+
+    resolved = normalize_policy_defaults(resolved)
 
     return {
         "resolved_policy": resolved,
