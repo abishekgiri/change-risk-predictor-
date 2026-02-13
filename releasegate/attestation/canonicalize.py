@@ -22,3 +22,8 @@ def canonicalize_json(value: Any) -> str:
 
 def canonicalize_json_bytes(value: Any) -> bytes:
     return canonicalize_json(value).encode("utf-8")
+
+
+# Backward/interop alias used by external root export path.
+def canonical_json_bytes(value: Any) -> bytes:
+    return canonicalize_json_bytes(value)

@@ -112,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     simulate_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
     simulate_p.add_argument("--format", default="text", choices=["text", "json"])
 
+    export_root_p = sub.add_parser("export-root", help="Export signed daily transparency Merkle root.")
+    export_root_p.add_argument("--date", required=True, help="UTC date in YYYY-MM-DD")
+    export_root_p.add_argument("--out", required=True, help="Output path for signed root JSON")
+    export_root_p.add_argument("--tenant", help="Tenant/org identifier (optional)")
+    export_root_p.add_argument("--format", default="text", choices=["text", "json"])
+
     proof_p = sub.add_parser("proof-pack", help="Export audit evidence bundle for a decision.")
     proof_p.add_argument("--decision-id", required=True)
     proof_p.add_argument("--format", default="json", choices=["json", "zip"])
@@ -729,6 +735,51 @@ def main() -> int:
             print(f"Would Newly Block: {report.get('would_newly_block')}")
             print(f"Would Unblock: {report.get('would_unblock')}")
         return 0
+
+    if args.cmd == "export-root":
+        from releasegate.attestation.crypto import MissingRootSigningKeyError
+        from releasegate.audit.root_export import export_daily_root_to_path
+
+        try:
+            signed = export_daily_root_to_path(
+                date_utc=args.date,
+                out_path=args.out,
+                tenant_id=getattr(args, "tenant", None),
+            )
+            if not signed:
+                payload = {
+                    "ok": False,
+                    "error_code": "NO_ROOT_FOR_DATE",
+                    "date_utc": args.date,
+                    "out": args.out,
+                }
+                if args.format == "json":
+                    print(json.dumps(payload, indent=2))
+                else:
+                    print(f"No transparency root available for date {args.date}", file=sys.stderr)
+                return 2
+            payload = {
+                "ok": True,
+                "date_utc": signed.get("date_utc"),
+                "leaf_count": signed.get("leaf_count"),
+                "root_hash": signed.get("root_hash"),
+                "out": args.out,
+                "signature": signed.get("signature"),
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print(f"Exported signed root: {args.out}")
+                print(f"Date: {payload['date_utc']}")
+                print(f"Leaf count: {payload['leaf_count']}")
+                print(f"Root hash: {payload['root_hash']}")
+            return 0
+        except MissingRootSigningKeyError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print(f"Failed to export root: {exc}", file=sys.stderr)
+            return 1
 
     if args.cmd == "proof-pack":
         from releasegate.audit.checkpoints import (

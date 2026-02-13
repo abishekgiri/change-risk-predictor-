@@ -17,6 +17,10 @@ class MissingSigningKeyError(RuntimeError):
     """Raised when attestation signing key material is not configured."""
 
 
+class MissingRootSigningKeyError(MissingSigningKeyError):
+    """Raised when root signing key material is not configured."""
+
+
 def _load_ed25519_private_key_from_text(raw: str, *, env_var_name: str) -> Ed25519PrivateKey:
     if raw.startswith("-----BEGIN"):
         try:
@@ -77,13 +81,23 @@ def root_key_id() -> str:
     return (os.getenv("RELEASEGATE_ROOT_KEY_ID") or "rg-root-2026-01").strip()
 
 
+def get_root_key_id() -> str:
+    return root_key_id()
+
+
 def load_root_private_key_from_env() -> Ed25519PrivateKey:
     raw = (os.getenv("RELEASEGATE_ROOT_SIGNING_KEY") or "").strip()
     if raw:
         return _load_ed25519_private_key_from_text(raw, env_var_name="RELEASEGATE_ROOT_SIGNING_KEY")
-    raise MissingSigningKeyError(
-        "MISSING_ROOT_SIGNING_KEY: RELEASEGATE_ROOT_SIGNING_KEY is required for key-manifest signing"
+    raise MissingRootSigningKeyError(
+        "MISSING_ROOT_SIGNING_KEY: RELEASEGATE_ROOT_SIGNING_KEY is required for root signing operations "
+        "(key manifest + external root export). Expected Ed25519 PEM or 32-byte raw key (hex/base64)."
     )
+
+
+def sign_bytes_with_root_key(message: bytes) -> bytes:
+    private_key = load_root_private_key_from_env()
+    return private_key.sign(bytes(message))
 
 
 def public_key_pem_from_private(private_key: Ed25519PrivateKey) -> str:

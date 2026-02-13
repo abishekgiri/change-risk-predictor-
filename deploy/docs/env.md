@@ -11,6 +11,8 @@
 | `RELEASEGATE_JWT_AUDIENCE` | JWT audience claim (`aud`) that API validates. |
 | `RELEASEGATE_CHECKPOINT_SIGNING_KEY` | Checkpoint signing secret (current HMAC model). |
 | `RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID` | Identifier attached to checkpoint signatures. |
+| `RELEASEGATE_ROOT_SIGNING_KEY` | Ed25519 root signing key (PEM or 32-byte raw key in hex/base64) for manifest/root exports. |
+| `RELEASEGATE_ROOT_KEY_ID` | Root key identifier embedded in key manifests and signed daily roots. |
 
 ## Recommended
 
