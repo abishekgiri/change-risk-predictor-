@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from releasegate.attestation.verify import verify_attestation_payload
 
 
-def verify(attestation: Dict[str, Any], public_keys_by_key_id: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def verify(attestation: Dict[str, Any], public_keys_by_key_id: Dict[str, str]) -> Dict[str, Any]:
     return verify_attestation_payload(attestation, public_keys_by_key_id=public_keys_by_key_id)
 
 

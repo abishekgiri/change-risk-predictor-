@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +11,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+
+
+class MissingSigningKeyError(RuntimeError):
+    """Raised when attestation signing key material is not configured."""
 
 
 def _decode_key_material(raw_value: str) -> bytes:
@@ -42,19 +45,22 @@ def load_private_key_from_env() -> Ed25519PrivateKey:
     raw = (os.getenv("RELEASEGATE_SIGNING_KEY") or "").strip()
     if raw:
         if raw.startswith("-----BEGIN"):
-            loaded = serialization.load_pem_private_key(raw.encode("utf-8"), password=None)
+            try:
+                loaded = serialization.load_pem_private_key(raw.encode("utf-8"), password=None)
+            except Exception as exc:
+                raise ValueError("Invalid signing key format: expected Ed25519 PEM or 32-byte raw key") from exc
             if not isinstance(loaded, Ed25519PrivateKey):
                 raise ValueError("RELEASEGATE_SIGNING_KEY must be an Ed25519 private key")
             return loaded
 
         material = _decode_key_material(raw)
         if len(material) != 32:
-            raise ValueError("RELEASEGATE_SIGNING_KEY must decode to 32 raw bytes for Ed25519")
+            raise ValueError("Invalid signing key format: RELEASEGATE_SIGNING_KEY must decode to 32 raw bytes for Ed25519")
         return Ed25519PrivateKey.from_private_bytes(material)
 
-    # Stable local-dev fallback so attestations are always generated in non-prod environments.
-    seed = (os.getenv("RELEASEGATE_JWT_SECRET") or "releasegate-local-dev").encode("utf-8")
-    return Ed25519PrivateKey.from_private_bytes(hashlib.sha256(seed).digest())
+    raise MissingSigningKeyError(
+        "MISSING_SIGNING_KEY: RELEASEGATE_SIGNING_KEY is required for attestation signing"
+    )
 
 
 def current_key_id() -> str:
@@ -125,8 +131,9 @@ def load_public_keys_map(*, key_file: Optional[str] = None) -> Dict[str, str]:
             _consume_payload(configured)
         return key_map
 
-    # Default trust material mirrors active signer key so verify works out-of-the-box.
-    key_map[key_id] = public_key_pem_from_private(load_private_key_from_env()).strip()
+    default_public_path = Path("attestation/keys/public.pem")
+    if default_public_path.exists():
+        key_map[key_id] = default_public_path.read_text(encoding="utf-8").strip()
 
     return key_map
 

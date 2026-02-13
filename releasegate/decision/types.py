@@ -74,6 +74,7 @@ class Decision(BaseModel):
     policy_hash: Optional[str] = None
     decision_hash: Optional[str] = None
     replay_hash: Optional[str] = None
+    attestation_id: Optional[str] = None
     
     # UX
     message: str

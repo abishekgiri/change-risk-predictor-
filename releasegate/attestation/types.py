@@ -65,6 +65,7 @@ class AttestationEvidence(BaseModel):
 
     signals_summary: Dict[str, Any] = Field(default_factory=dict)
     checkpoint_hashes: List[str] = Field(default_factory=list)
+    decision_bundle_hash: str
 
 
 class AttestationIssuer(BaseModel):

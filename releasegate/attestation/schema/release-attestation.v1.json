@@ -1,106 +1,201 @@
 {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "title": "ReleaseGate Signed Release Attestation",
-    "version": "v1",
-    "type": "object",
-    "properties": {
-        "attestation_id": {
-            "type": "string",
-            "format": "uuid"
-        },
-        "schema_version": {
-            "const": "v1"
-        },
-        "issued_at": {
-            "type": "string",
-            "format": "date-time"
-        },
-        "issuer": {
-            "type": "object",
-            "properties": {
-                "tenant_id": {
-                    "type": "string"
-                },
-                "key_id": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "tenant_id",
-                "key_id"
-            ]
-        },
-        "subject": {
-            "type": "object",
-            "properties": {
-                "repo": {
-                    "type": "string"
-                },
-                "pr_number": {
-                    "type": "integer"
-                },
-                "commit_sha": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "repo",
-                "pr_number"
-            ]
-        },
-        "assertion": {
-            "type": "object",
-            "properties": {
-                "release_status": {
-                    "enum": [
-                        "ALLOWED",
-                        "BLOCKED"
-                    ]
-                },
-                "decision_id": {
-                    "type": "string"
-                },
-                "policy_hash": {
-                    "type": "string"
-                },
-                "decision_hash": {
-                    "type": "string"
-                },
-                "replay_hash": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "release_status",
-                "decision_id",
-                "decision_hash"
-            ]
-        },
-        "signature": {
-            "type": "object",
-            "properties": {
-                "algorithm": {
-                    "enum": [
-                        "ed25519"
-                    ]
-                },
-                "value": {
-                    "type": "string"
-                }
-            },
-            "required": [
-                "algorithm",
-                "value"
-            ]
-        }
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseGate Release Attestation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
     },
-    "required": [
-        "attestation_id",
-        "schema_version",
-        "issued_at",
-        "issuer",
-        "subject",
-        "assertion",
-        "signature"
-    ]
+    "attestation_type": {
+      "const": "releasegate.release_attestation"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "tenant_id": {
+      "type": "string"
+    },
+    "decision_id": {
+      "type": "string"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "commit_sha": {
+          "type": "string"
+        },
+        "merge_sha": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pr_number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "build_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "repo",
+        "commit_sha",
+        "merge_sha",
+        "pr_number",
+        "build_id",
+        "release_id"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy_version": {
+          "type": "string"
+        },
+        "policy_hash": {
+          "type": "string"
+        },
+        "policy_bundle_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_version",
+        "policy_hash",
+        "policy_bundle_hash"
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "decision": {
+          "enum": [
+            "ALLOW",
+            "BLOCK"
+          ]
+        },
+        "risk_score": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "decision",
+        "risk_score",
+        "reason_codes"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "signals_summary": {
+          "type": "object"
+        },
+        "checkpoint_hashes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "decision_bundle_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "signals_summary",
+        "checkpoint_hashes",
+        "decision_bundle_hash"
+      ]
+    },
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "org_id": {
+          "type": "string"
+        },
+        "app_id": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "key_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "org_id",
+        "app_id",
+        "environment",
+        "key_id"
+      ]
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "signed_payload_hash": {
+          "type": "string"
+        },
+        "signature_bytes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "algorithm",
+        "signed_payload_hash",
+        "signature_bytes"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "attestation_type",
+    "issued_at",
+    "tenant_id",
+    "decision_id",
+    "engine_version",
+    "subject",
+    "policy",
+    "decision",
+    "evidence",
+    "issuer",
+    "signature"
+  ]
 }

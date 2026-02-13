@@ -439,21 +439,33 @@ async def github_webhook(
 @app.get("/keys")
 def get_public_keys():
     """
-    Returns the current public signing key(s) in JWKS-like or simple format.
-    For v1, we return the active Ed25519 public key as PEM.
+    Returns active public attestation keys.
+    Includes both modern and legacy field aliases for compatibility.
     """
-    private_key, key_id = AttestationKeyManager.load_signing_key()
-    public_pem = AttestationKeyManager.get_public_key_pem(private_key)
-    return {
-        "keys": [
+    from releasegate.attestation.crypto import load_public_keys_map
+
+    key_map = load_public_keys_map()
+    keys = []
+    public_keys_by_key_id: Dict[str, str] = {}
+    for key_id, public_key in sorted(key_map.items()):
+        public_keys_by_key_id[key_id] = public_key
+        keys.append(
             {
+                "key_id": key_id,
+                "algorithm": "ed25519",
+                "public_key": public_key,
+                # legacy aliases
                 "kid": key_id,
                 "alg": "Ed25519",
                 "kty": "OKP",
                 "use": "sig",
-                "pem": public_pem.decode("utf-8")
+                "pem": public_key,
             }
-        ]
+        )
+    return {
+        "issuer": "releasegate",
+        "keys": keys,
+        "public_keys_by_key_id": public_keys_by_key_id,
     }
 
 
@@ -1704,10 +1716,14 @@ def replay_stored_decision(
 def verify_release_attestation(
     payload: Dict[str, Any],
 ):
+    from releasegate.attestation.crypto import load_public_keys_map
     from releasegate.attestation.verify import verify_attestation_payload
 
     attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
-    report = verify_attestation_payload(attestation)
+    report = verify_attestation_payload(
+        attestation,
+        public_keys_by_key_id=load_public_keys_map(),
+    )
     report["ok"] = bool(
         report.get("schema_valid")
         and report.get("payload_hash_match")
@@ -1716,21 +1732,3 @@ def verify_release_attestation(
     )
     return report
 
-
-@app.get("/keys")
-def list_attestation_public_keys(
-):
-    from releasegate.attestation.crypto import load_public_keys_map
-
-    keys = load_public_keys_map()
-    return {
-        "issuer": "releasegate",
-        "keys": [
-            {
-                "key_id": key_id,
-                "algorithm": "ed25519",
-                "public_key": key_value,
-            }
-            for key_id, key_value in sorted(keys.items())
-        ],
-    }
