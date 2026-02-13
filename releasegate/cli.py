@@ -21,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_p.add_argument("--post-comment", action="store_true", help="Post PR comment")
     analyze_p.add_argument("--create-check", action="store_true", help="Create GitHub check run")
     analyze_p.add_argument("--no-bundle", action="store_true", help="(ignored) compatibility flag")
+    analyze_p.add_argument("--tenant", help="Tenant/org identifier for attestation metadata")
+    analyze_p.add_argument("--emit-attestation", help="Write signed release attestation JSON to file")
 
     eval_p = sub.add_parser("evaluate", help="Evaluate policies for a change (PR/release).")
     eval_p.add_argument("--repo", required=True)
@@ -124,6 +126,14 @@ def build_parser() -> argparse.ArgumentParser:
     verify_proof_pack_p.add_argument("--format", default="text", choices=["text", "json"])
     verify_proof_pack_p.add_argument("--signing-key", help="Checkpoint signing key for verification (HMAC)")
     verify_proof_pack_p.add_argument("--key-file", help="Path to trusted key file/key map for verification")
+
+    verify_attestation_p = sub.add_parser(
+        "verify-attestation",
+        help="Verify signed release attestation offline.",
+    )
+    verify_attestation_p.add_argument("file", help="Path to release attestation JSON file")
+    verify_attestation_p.add_argument("--format", default="text", choices=["text", "json"])
+    verify_attestation_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
 
     sub.add_parser("db-migrate", help="Apply forward-only DB migrations.")
     sub.add_parser("db-migration-status", help="Show applied DB migrations.")
@@ -234,6 +244,53 @@ def main() -> int:
             },
             "attached_issue_keys": attached_issue_keys,
         }
+
+        try:
+            from releasegate.attestation.service import (
+                build_attestation_from_bundle,
+                build_bundle_from_analysis_result,
+            )
+            from releasegate.audit.attestations import record_release_attestation
+
+            tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
+            commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
+            bundle = build_bundle_from_analysis_result(
+                tenant_id=tenant_id,
+                repo=args.repo,
+                pr_number=pr_number,
+                commit_sha=commit_sha,
+                policy_hash="heuristic-policy",
+                policy_version="1.0.0",
+                policy_bundle_hash="heuristic-policy-v1",
+                risk_score=float(risk_score),
+                decision=decision,
+                reason_codes=reasons,
+                signals={
+                    "metrics": {
+                        "changed_files_count": metrics.changed_files,
+                        "additions": metrics.additions,
+                        "deletions": metrics.deletions,
+                        "total_churn": metrics.total_churn,
+                    }
+                },
+                engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
+            )
+            attestation = build_attestation_from_bundle(bundle)
+            attestation_id = record_release_attestation(
+                decision_id=bundle.decision_id,
+                tenant_id=tenant_id,
+                repo=args.repo,
+                pr_number=pr_number,
+                attestation=attestation,
+            )
+            output["attestation_id"] = attestation_id
+            output["attestation"] = attestation
+
+            if args.emit_attestation:
+                with open(args.emit_attestation, "w", encoding="utf-8") as f:
+                    json.dump(attestation, f, indent=2)
+        except Exception as e:
+            output["attestation_error"] = str(e)
 
         # Write JSON output if requested
         if args.output:
@@ -579,6 +636,54 @@ def main() -> int:
             print(f"Would Unblock: {report.get('would_unblock')}")
         return 0
 
+    if args.cmd == "verify-attestation":
+        from releasegate.attestation.engine import AttestationEngine
+        from releasegate.attestation.key_manager import AttestationKeyManager
+        
+        try:
+            with open(args.file, "r") as f:
+                attestation = json.load(f)
+        except Exception as e:
+            print(f"Error loading attestation file: {e}", file=sys.stderr)
+            return 1
+
+        public_key_pem = None
+        if args.key_file:
+            try:
+                with open(args.key_file, "rb") as f:
+                    public_key_pem = f.read()
+            except Exception as e:
+                print(f"Error loading key file: {e}", file=sys.stderr)
+                return 1
+        else:
+            # Fallback to loading from env if no key file provided (e.g. verifying against self)
+            try:
+                private_key, _ = AttestationKeyManager.load_signing_key()
+                public_key_pem = AttestationKeyManager.get_public_key_pem(private_key)
+            except Exception as e:
+                 print(f"Error loading default key from env: {e}", file=sys.stderr)
+                 return 1
+
+        is_valid = AttestationEngine.verify_attestation(attestation, public_key_pem)
+        
+        result = {
+            "valid": is_valid,
+            "attestation_id": attestation.get("attestation_id"),
+            "subject": attestation.get("subject"),
+            "assertion": attestation.get("assertion")
+        }
+
+        if args.format == "json":
+            print(json.dumps(result, indent=2))
+        else:
+            status = "VALID" if is_valid else "INVALID"
+            print(f"Attestation Status: {status}")
+            print(f"ID: {result['attestation_id']}")
+            print(f"Subject: {result['subject']}")
+            print(f"Decision: {result['assertion'].get('release_status')}")
+            
+        return 0 if is_valid else 1
+
     if args.cmd == "proof-pack":
         from releasegate.audit.checkpoints import (
             load_override_checkpoint,
@@ -786,6 +891,53 @@ def main() -> int:
             print(json.dumps(report, indent=2))
         else:
             print(format_verification_summary(report))
+        return 0 if report.get("ok") else 2
+
+    if args.cmd == "verify-attestation":
+        from releasegate.attestation.crypto import load_public_keys_map
+        from releasegate.attestation.verify import verify_attestation_payload
+
+        try:
+            with open(args.file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            error = {
+                "ok": False,
+                "schema_valid": False,
+                "payload_hash_match": False,
+                "trusted_issuer": False,
+                "valid_signature": False,
+                "errors": [f"FILE_INVALID: {exc}"],
+            }
+            if args.format == "json":
+                print(json.dumps(error, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error: {error['errors'][0]}")
+            return 3
+
+        key_map = load_public_keys_map(key_file=args.key_file)
+        report = verify_attestation_payload(payload, public_keys_by_key_id=key_map)
+        report["ok"] = bool(
+            report.get("schema_valid")
+            and report.get("payload_hash_match")
+            and report.get("trusted_issuer")
+            and report.get("valid_signature")
+        )
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            print(
+                "\n".join(
+                    [
+                        f"schema_valid: {'OK' if report.get('schema_valid') else 'FAIL'}",
+                        f"payload_hash_match: {'OK' if report.get('payload_hash_match') else 'FAIL'}",
+                        f"trusted_issuer: {'OK' if report.get('trusted_issuer') else 'FAIL'}",
+                        f"valid_signature: {'OK' if report.get('valid_signature') else 'FAIL'}",
+                        f"errors: {', '.join(report.get('errors') or []) if report.get('errors') else 'none'}",
+                    ]
+                )
+            )
         return 0 if report.get("ok") else 2
 
     return 2

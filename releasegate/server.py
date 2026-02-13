@@ -42,6 +42,8 @@ from releasegate.decision.hashing import (
     compute_policy_hash_from_bindings,
     compute_replay_hash,
 )
+from releasegate.attestation.engine import AttestationEngine
+from releasegate.attestation.key_manager import AttestationKeyManager
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
@@ -146,6 +148,10 @@ class CreateWebhookSigningKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
     rotate_existing: bool = True
     secret: Optional[str] = None
+
+
+class VerifyAttestationRequest(BaseModel):
+    attestation: Dict[str, Any]
 
 
 # --- Config ---
@@ -427,6 +433,54 @@ async def github_webhook(
         "severity": risk_level,
         "attached_issue_keys": attached_issue_keys,
         "metrics": features,
+    }
+
+
+@app.get("/keys")
+def get_public_keys():
+    """
+    Returns the current public signing key(s) in JWKS-like or simple format.
+    For v1, we return the active Ed25519 public key as PEM.
+    """
+    private_key, key_id = AttestationKeyManager.load_signing_key()
+    public_pem = AttestationKeyManager.get_public_key_pem(private_key)
+    return {
+        "keys": [
+            {
+                "kid": key_id,
+                "alg": "Ed25519",
+                "kty": "OKP",
+                "use": "sig",
+                "pem": public_pem.decode("utf-8")
+            }
+        ]
+    }
+
+
+@app.post("/attestations/verify")
+def verify_attestation_endpoint(payload: VerifyAttestationRequest):
+    """
+    Verifies a signed release attestation.
+    """
+    attestation = payload.attestation
+    
+    # In a real system, we'd lookup the key by kid.
+    # Here we assume we are the issuer and verify with our active key.
+    # Or strict verification against a known set.
+    private_key, key_id = AttestationKeyManager.load_signing_key()
+    public_pem = AttestationKeyManager.get_public_key_pem(private_key)
+    
+    is_valid = AttestationEngine.verify_attestation(attestation, public_pem)
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    return {
+        "valid": True,
+        "attestation_id": attestation.get("attestation_id"),
+        "issuer": attestation.get("issuer"),
+        "subject": attestation.get("subject"),
+         "assertion": attestation.get("assertion")
     }
 
 
@@ -732,6 +786,7 @@ def _soc2_records(
                 "policy_bundle_hash": full.get("policy_bundle_hash") or r.get("policy_bundle_hash"),
             },
             "decision_id": r.get("decision_id"),
+            "attestation_id": full.get("attestation_id"),
             "decision": decision,
             "reason_code": _derive_reason_code(decision, message, explicit_reason),
             "human_message": message,
@@ -752,6 +807,23 @@ def _soc2_records(
             ),
         })
     return records
+
+
+def _attach_attestation_to_rows(rows: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for row in rows:
+        copy_row = dict(row)
+        attestation_id = None
+        raw_full = row.get("full_decision_json")
+        if raw_full:
+            try:
+                full = json.loads(raw_full) if isinstance(raw_full, str) else (raw_full or {})
+                attestation_id = full.get("attestation_id")
+            except Exception:
+                attestation_id = None
+        copy_row["attestation_id"] = attestation_id
+        enriched.append(copy_row)
+    return enriched
 
 
 def _proof_pack_export_key(
@@ -817,6 +889,7 @@ def audit_export(
         pr=pr,
         tenant_id=effective_tenant,
     )
+    rows = _attach_attestation_to_rows(rows)
     payload = {"decisions": rows}
     overrides = []
     chain_result = None
@@ -1150,6 +1223,7 @@ def audit_proof_pack(
             signing_key_id=signing_key_id,
         ),
         "decision_id": decision_id,
+        "attestation_id": decision_snapshot.get("attestation_id"),
         "repo": repo,
         "pr_number": pr_number,
         "decision_snapshot": decision_snapshot,
@@ -1293,6 +1367,11 @@ def create_manual_override(
             "target_type": existing.get("target_type") or effective_target_type,
             "target_id": existing.get("target_id") or effective_target_id,
         }
+        existing_decision_id = str(response_payload.get("decision_id") or "")
+        if existing_decision_id:
+            from releasegate.audit.reader import AuditReader
+            att = AuditReader.get_attestation_by_decision(existing_decision_id, tenant_id=effective_tenant)
+            response_payload["attestation_id"] = att.get("attestation_id") if att else None
         complete_idempotency(
             tenant_id=effective_tenant,
             operation=operation,
@@ -1325,6 +1404,10 @@ def create_manual_override(
         metadata={"repo": payload.repo, "pr_number": payload.pr_number, "decision_id": payload.decision_id},
     )
     response_payload = {**override, "idempotency_key": idempotency_key}
+    if payload.decision_id:
+        from releasegate.audit.reader import AuditReader
+        att = AuditReader.get_attestation_by_decision(payload.decision_id, tenant_id=effective_tenant)
+        response_payload["attestation_id"] = att.get("attestation_id") if att else None
     complete_idempotency(
         tenant_id=effective_tenant,
         operation=operation,
@@ -1604,6 +1687,7 @@ def replay_stored_decision(
     report["created_at"] = row.get("created_at")
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
+    report["attestation_id"] = decision.attestation_id
     log_security_event(
         tenant_id=decision.tenant_id,
         principal_id=auth.principal_id,
@@ -1614,3 +1698,39 @@ def replay_stored_decision(
         metadata={"repo": report.get("repo"), "pr_number": report.get("pr_number")},
     )
     return report
+
+
+@app.post("/verify")
+def verify_release_attestation(
+    payload: Dict[str, Any],
+):
+    from releasegate.attestation.verify import verify_attestation_payload
+
+    attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
+    report = verify_attestation_payload(attestation)
+    report["ok"] = bool(
+        report.get("schema_valid")
+        and report.get("payload_hash_match")
+        and report.get("trusted_issuer")
+        and report.get("valid_signature")
+    )
+    return report
+
+
+@app.get("/keys")
+def list_attestation_public_keys(
+):
+    from releasegate.attestation.crypto import load_public_keys_map
+
+    keys = load_public_keys_map()
+    return {
+        "issuer": "releasegate",
+        "keys": [
+            {
+                "key_id": key_id,
+                "algorithm": "ed25519",
+                "public_key": key_value,
+            }
+            for key_id, key_value in sorted(keys.items())
+        ],
+    }
