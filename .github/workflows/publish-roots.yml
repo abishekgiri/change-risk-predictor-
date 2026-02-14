@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   publish-root:
@@ -49,6 +50,8 @@ jobs:
             DATE="$DATE_INPUT"
             echo "Exporting signed root for explicit date: $DATE"
             releasegate export-root --date "$DATE" --out "roots/$DATE.json"
+            echo "ROOTS_PUBLISHED=1" >> "$GITHUB_ENV"
+            echo "ROOTS_PUBLISHED_DATE=$DATE" >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -56,6 +59,8 @@ jobs:
           rc=0
           releasegate export-root --date "$YESTERDAY" --out "roots/$YESTERDAY.json" || rc=$?
           if [ "$rc" -eq 0 ]; then
+            echo "ROOTS_PUBLISHED=1" >> "$GITHUB_ENV"
+            echo "ROOTS_PUBLISHED_DATE=$YESTERDAY" >> "$GITHUB_ENV"
             exit 0
           fi
 
@@ -68,20 +73,28 @@ jobs:
           rc=0
           releasegate export-root --date "$TODAY" --out "roots/$TODAY.json" || rc=$?
           if [ "$rc" -eq 0 ]; then
+            echo "ROOTS_PUBLISHED=1" >> "$GITHUB_ENV"
+            echo "ROOTS_PUBLISHED_DATE=$TODAY" >> "$GITHUB_ENV"
             exit 0
           fi
 
           if [ "$rc" -eq 2 ]; then
             echo "No root for today ($TODAY) either. Nothing to publish."
+            echo "ROOTS_PUBLISHED=0" >> "$GITHUB_ENV"
             exit 0
           fi
           exit "$rc"
 
-      - name: Commit and push roots
-        run: |
-          ls -1 roots/*.json >/dev/null 2>&1 || { echo "No roots generated; skipping commit."; exit 0; }
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add roots/
-          git commit -m "chore(roots): publish signed daily root" || { echo "No root changes to commit."; exit 0; }
-          git push
+      - name: Create pull request for roots
+        if: env.ROOTS_PUBLISHED == '1'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: bot/publish-roots-${{ env.ROOTS_PUBLISHED_DATE }}
+          delete-branch: true
+          title: "chore(roots): publish signed daily root (${{ env.ROOTS_PUBLISHED_DATE }})"
+          commit-message: "chore(roots): publish signed daily root (${{ env.ROOTS_PUBLISHED_DATE }})"
+          body: |
+            Automated publication of signed daily transparency root for `${{ env.ROOTS_PUBLISHED_DATE }}`.
+          add-paths: |
+            roots/${{ env.ROOTS_PUBLISHED_DATE }}.json
