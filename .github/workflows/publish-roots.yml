@@ -51,22 +51,24 @@ jobs:
           fi
 
           echo "Trying yesterday first: $YESTERDAY"
-          if releasegate export-root --date "$YESTERDAY" --out "roots/$YESTERDAY.json"; then
+          rc=0
+          releasegate export-root --date "$YESTERDAY" --out "roots/$YESTERDAY.json" || rc=$?
+          if [ "$rc" -eq 0 ]; then
             exit 0
           fi
 
-          rc=$?
           if [ "$rc" -ne 2 ]; then
             echo "export-root failed for $YESTERDAY with exit code $rc"
             exit "$rc"
           fi
 
           echo "No root for yesterday ($YESTERDAY). Trying today: $TODAY"
-          if releasegate export-root --date "$TODAY" --out "roots/$TODAY.json"; then
+          rc=0
+          releasegate export-root --date "$TODAY" --out "roots/$TODAY.json" || rc=$?
+          if [ "$rc" -eq 0 ]; then
             exit 0
           fi
 
-          rc=$?
           if [ "$rc" -eq 2 ]; then
             echo "No root for today ($TODAY) either. Nothing to publish."
             exit 0
