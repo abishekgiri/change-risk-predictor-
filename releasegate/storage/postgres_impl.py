@@ -46,21 +46,36 @@ class PostgresStorageBackend(StorageBackend):
     def execute(self, query: str, params: Sequence[Any] = ()) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(self._adapt_sql(query), tuple(params))
+                q = self._adapt_sql(query)
+                # psycopg2 treats '%' as interpolation markers when a params tuple is
+                # provided (even an empty one). Some DDL (e.g., plpgsql RAISE strings)
+                # legitimately contains '%' characters, so avoid passing params when
+                # there are none.
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
                 conn.commit()
                 return cur.rowcount
 
     def fetchone(self, query: str, params: Sequence[Any] = ()) -> Optional[Dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(self._adapt_sql(query), tuple(params))
+                q = self._adapt_sql(query)
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
                 row = cur.fetchone()
                 return dict(row) if row else None
 
     def fetchall(self, query: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(self._adapt_sql(query), tuple(params))
+                q = self._adapt_sql(query)
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
                 rows = cur.fetchall()
                 return [dict(r) for r in rows]
-
