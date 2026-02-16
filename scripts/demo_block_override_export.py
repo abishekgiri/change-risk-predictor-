@@ -170,8 +170,24 @@ def main() -> int:
         csv_rows.append({"record_type": "override", **o})
     _write_csv(csv_path, csv_rows)
 
+    summary = {
+        "ok": True,
+        "repo": args.repo,
+        "pr_number": args.pr,
+        "issue_key": args.issue,
+        "blocked_decision_id": blocked_decision.decision_id,
+        "override_decision_id": override_decision.decision_id,
+        "override_event_id": override_event.get("override_id"),
+        "policy_hash": policy_hash,
+        "override_chain_valid": bool(chain.get("valid")),
+        "override_chain_checked": chain.get("checked"),
+        "json_export": str(json_path),
+        "csv_export": str(csv_path),
+    }
+
     if args.format == "json":
-        print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+        # Keep stdout machine-friendly; full details are written to json_export.
+        print(json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False))
     else:
         print("ReleaseGate Demo Complete")
         print(f"Jira issue key: {args.issue}")
