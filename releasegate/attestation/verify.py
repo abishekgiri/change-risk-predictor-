@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, Optional
 
-from releasegate.attestation.canonicalize import canonicalize_json_bytes
+from releasegate.attestation.canonicalize import canonicalize_attestation_payload
 from releasegate.attestation.crypto import parse_public_key, verify_signature
 from releasegate.attestation.types import ReleaseAttestation, VerifyResult
 
@@ -58,7 +58,7 @@ def verify_attestation_payload(
     signature = attestation.signature
     signed_hash_value = _normalized_hash(signature.signed_payload_hash)
 
-    canonical = canonicalize_json_bytes(_payload_without_signature(normalized))
+    canonical = canonicalize_attestation_payload(_payload_without_signature(normalized))
     computed_hash_value = hashlib.sha256(canonical).hexdigest()
     payload_hash_match = computed_hash_value == signed_hash_value
     if not payload_hash_match:

@@ -12,6 +12,10 @@ from releasegate.attestation.key_manifest import (
     get_signed_key_manifest_cached,
     verify_key_manifest,
 )
+from releasegate.attestation.canonicalize import (
+    canonicalize_attestation,
+    canonicalize_attestation_payload,
+)
 from releasegate.attestation.verify import verify_attestation_payload
 from releasegate.attestation.crypto import load_public_keys_map
 from releasegate.attestation.sdk import compute_leaf_hash, verify_inclusion_proof
@@ -28,6 +32,8 @@ __all__ = [
     "build_key_manifest",
     "get_signed_key_manifest_cached",
     "verify_key_manifest",
+    "canonicalize_attestation",
+    "canonicalize_attestation_payload",
     "verify_attestation_payload",
     "load_public_keys_map",
     "compute_leaf_hash",

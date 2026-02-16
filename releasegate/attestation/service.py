@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from releasegate.attestation.canonicalize import canonicalize_json_bytes
+from releasegate.attestation.canonicalize import canonicalize_attestation_payload, canonicalize_json_bytes
 from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, sign_bytes
 from releasegate.attestation.types import (
     AttestationDecision,
@@ -219,7 +219,7 @@ def build_attestation_from_bundle(bundle: DecisionBundle | Dict[str, Any]) -> Di
     model = bundle if isinstance(bundle, DecisionBundle) else DecisionBundle.model_validate(bundle)
     key_id = current_key_id()
     payload_wo_signature = _payload_without_signature(bundle=model, key_id=key_id)
-    payload_hash = hashlib.sha256(canonicalize_json_bytes(payload_wo_signature)).hexdigest()
+    payload_hash = hashlib.sha256(canonicalize_attestation_payload(payload_wo_signature)).hexdigest()
 
     private_key = load_private_key_from_env()
     signature_b64 = sign_bytes(private_key, payload_hash)
