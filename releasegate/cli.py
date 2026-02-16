@@ -142,6 +142,32 @@ def build_parser() -> argparse.ArgumentParser:
     verify_attestation_p.add_argument("--format", default="text", choices=["text", "json"])
     verify_attestation_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
 
+    proofpack_v1_p = sub.add_parser(
+        "proofpack",
+        help="Create deterministic proofpack v1 zip artifact.",
+    )
+    proofpack_v1_p.add_argument("--decision-id", required=True)
+    proofpack_v1_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    proofpack_v1_p.add_argument("--out", required=True, help="Output path for proofpack.zip")
+    proofpack_v1_p.add_argument(
+        "--include-timestamp",
+        action="store_true",
+        help="Include RFC3161 timestamp token when configured.",
+    )
+    proofpack_v1_p.add_argument("--tsa-url", help="RFC3161 TSA URL override")
+    proofpack_v1_p.add_argument("--tsa-timeout-seconds", type=int, default=10)
+    proofpack_v1_p.add_argument("--format", default="text", choices=["text", "json"])
+
+    verify_pack_p = sub.add_parser(
+        "verify-pack",
+        help="Verify deterministic proofpack v1 artifact.",
+    )
+    verify_pack_p.add_argument("file", help="Path to proofpack zip")
+    verify_pack_p.add_argument("--format", default="text", choices=["text", "json"])
+    verify_pack_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
+    verify_pack_p.add_argument("--expected-hash", help="Expected proofpack sha256 hash (sha256:<hex> or <hex>)")
+    verify_pack_p.add_argument("--tsa-ca-bundle", help="CA bundle for RFC3161 timestamp verification")
+
     sub.add_parser("db-migrate", help="Apply forward-only DB migrations.")
     sub.add_parser("db-migration-status", help="Show applied DB migrations.")
     sub.add_parser("version", help="Print version.")
@@ -1035,6 +1061,170 @@ def main() -> int:
                     ]
                 )
             )
+        return 0 if report.get("ok") else 2
+
+    if args.cmd == "proofpack":
+        from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_decision
+        from releasegate.audit.attestations import record_release_attestation
+        from releasegate.audit.proofpack_v1 import write_proofpack_v1_zip
+        from releasegate.audit.rfc3161 import (
+            RFC3161Error,
+            default_rfc3161_tsa_url,
+            is_rfc3161_enabled,
+            mint_rfc3161_artifact,
+        )
+        from releasegate.audit.reader import AuditReader
+        from releasegate.decision.types import Decision, DecisionType
+
+        tenant_id = resolve_tenant_id(args.tenant)
+        row = AuditReader.get_decision(args.decision_id, tenant_id=tenant_id)
+        if not row:
+            print("Decision not found.", file=sys.stderr)
+            return 1
+
+        raw = row.get("full_decision_json")
+        if not raw:
+            print("Decision payload missing full_decision_json.", file=sys.stderr)
+            return 1
+
+        decision_snapshot = json.loads(raw) if isinstance(raw, str) else raw
+        decision_model = Decision(**decision_snapshot)
+        repo = str(row.get("repo") or decision_model.enforcement_targets.repository or "")
+        pr_number = row.get("pr_number")
+        engine_version = str(row.get("engine_version") or decision_model.policy_bundle_hash or "unknown")
+
+        attestation_row = AuditReader.get_attestation_by_decision(args.decision_id, tenant_id=tenant_id)
+        if attestation_row and isinstance(attestation_row.get("attestation"), dict):
+            attestation = dict(attestation_row["attestation"])
+            attestation_id = str(attestation_row.get("attestation_id") or "")
+        else:
+            bundle = build_bundle_from_decision(
+                decision_model,
+                repo=repo,
+                pr_number=pr_number,
+                engine_version=engine_version,
+            )
+            attestation = build_attestation_from_bundle(bundle)
+            attestation_id = record_release_attestation(
+                decision_id=args.decision_id,
+                tenant_id=tenant_id,
+                repo=repo,
+                pr_number=pr_number,
+                attestation=attestation,
+            )
+
+        signature_text = str(((attestation.get("signature") or {}).get("signature_bytes")) or "")
+        if not signature_text:
+            print("Attestation signature is missing; cannot build deterministic proofpack.", file=sys.stderr)
+            return 1
+
+        status = decision_model.release_status
+        allow_block = "BLOCK" if status in {DecisionType.BLOCKED, DecisionType.ERROR} else "ALLOW"
+        inputs_payload = {
+            "repo": repo,
+            "pr_number": pr_number,
+            "commit_sha": ((attestation.get("subject") or {}).get("commit_sha") or ""),
+            "policy_hash": decision_model.policy_hash,
+            "policy_bundle_hash": decision_model.policy_bundle_hash,
+            "input_snapshot": decision_model.input_snapshot,
+        }
+        decision_payload = {
+            "decision_id": decision_model.decision_id,
+            "decision": allow_block,
+            "release_status": str(status.value if hasattr(status, "value") else status),
+            "reason_code": decision_model.reason_code,
+            "message": decision_model.message,
+            "decision_hash": decision_model.decision_hash,
+            "replay_hash": decision_model.replay_hash,
+        }
+
+        inclusion = None
+        receipt = None
+
+        timestamp_metadata = None
+        rfc3161_token = None
+        if args.include_timestamp or is_rfc3161_enabled():
+            tsa_url = str(args.tsa_url or default_rfc3161_tsa_url()).strip()
+            signed_hash = str(((attestation.get("signature") or {}).get("signed_payload_hash")) or "").strip()
+            if not tsa_url:
+                print(
+                    "RFC3161 timestamping requested but TSA URL is missing "
+                    "(--tsa-url or RELEASEGATE_RFC3161_TSA_URL).",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                timestamp_metadata, rfc3161_token = mint_rfc3161_artifact(
+                    payload_hash=signed_hash,
+                    tsa_url=tsa_url,
+                    timeout_seconds=max(1, int(args.tsa_timeout_seconds)),
+                )
+            except RFC3161Error as exc:
+                print(f"Failed to mint RFC3161 timestamp token: {exc}", file=sys.stderr)
+                return 1
+
+        result = write_proofpack_v1_zip(
+            out_path=args.out,
+            attestation=attestation,
+            signature_text=signature_text,
+            inputs=inputs_payload,
+            decision=decision_payload,
+            created_by=str(attestation.get("engine_version") or engine_version),
+            receipt=receipt,
+            inclusion_proof=inclusion,
+            timestamp_metadata=timestamp_metadata,
+            rfc3161_token=rfc3161_token,
+        )
+        payload = {
+            "ok": True,
+            "decision_id": args.decision_id,
+            "attestation_id": attestation_id,
+            **result,
+        }
+        if args.format == "json":
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"Wrote proofpack: {args.out}")
+            print(f"proofpack_hash: {payload['proofpack_hash']}")
+            print(f"attestation_id: {attestation_id}")
+        return 0
+
+    if args.cmd == "verify-pack":
+        from releasegate.audit.proofpack_v1 import verify_proofpack_v1_file
+
+        report = verify_proofpack_v1_file(
+            args.file,
+            key_file=args.key_file,
+            tsa_ca_bundle=args.tsa_ca_bundle,
+        )
+        if report.get("ok") and args.expected_hash:
+            expected = str(args.expected_hash).strip().lower()
+            actual = str(report.get("proofpack_hash") or "").strip().lower()
+            if expected.startswith("sha256:"):
+                expected = expected.split(":", 1)[1]
+            if actual.startswith("sha256:"):
+                actual = actual.split(":", 1)[1]
+            if expected != actual:
+                report = {
+                    "ok": False,
+                    "error_code": "PROOFPACK_HASH_MISMATCH",
+                    "details": {
+                        "expected": f"sha256:{expected}",
+                        "actual": f"sha256:{actual}",
+                    },
+                }
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            if report.get("ok"):
+                print("verification: OK")
+                print(f"proofpack_version: {report.get('proofpack_version')}")
+                print(f"proofpack_hash: {report.get('proofpack_hash')}")
+                if report.get("timestamp_verified") is True:
+                    print("rfc3161_timestamp: OK")
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {report.get('error_code')}")
         return 0 if report.get("ok") else 2
 
     return 2
