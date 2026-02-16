@@ -217,6 +217,50 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_attestation_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Attestation log is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestations_update'
+            ) THEN
+                CREATE TRIGGER prevent_attestations_update
+                BEFORE UPDATE ON audit_attestations
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestations_delete'
+            ) THEN
+                CREATE TRIGGER prevent_attestations_delete
+                BEFORE DELETE ON audit_attestations
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS audit_transparency_log (
             tenant_id TEXT NOT NULL,
             attestation_id TEXT NOT NULL,
@@ -1203,7 +1247,6 @@ def init_db() -> str:
         END;
         """
     )
-
     conn.commit()
     auto_migrate = (os.getenv("RELEASEGATE_AUTO_MIGRATE", "true").strip().lower() in {"1", "true", "yes", "on"})
     current_version = apply_sqlite_migrations(conn, auto_apply=auto_migrate)

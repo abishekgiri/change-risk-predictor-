@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260213_")
+    assert current.startswith("20260214_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -30,6 +30,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260213_011_attestations_and_transparency_log" in migration_ids
         assert "20260213_012_transparency_engine_build" in migration_ids
         assert "20260213_013_transparency_daily_roots" in migration_ids
+        assert "20260214_014_attestation_immutability" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -115,8 +116,8 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260213_013_transparency_daily_roots"
-        assert state[1] == "20260213_013_transparency_daily_roots"
+        assert state[0] == "20260214_014_attestation_immutability"
+        assert state[1] == "20260214_014_attestation_immutability"
     finally:
         conn.close()
 

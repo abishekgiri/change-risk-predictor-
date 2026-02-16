@@ -50,6 +50,20 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
 - Revocation is supported.
 - Rotation is supported (new key issuance + old key revocation).
 
+## Attestation Key Lifecycle
+
+- Key environments are separated by deployment tier:
+  - `RELEASEGATE_SIGNING_KEY` / `RELEASEGATE_ATTESTATION_KEY_ID` for attestation signing.
+  - `RELEASEGATE_ROOT_SIGNING_KEY` / `RELEASEGATE_ROOT_KEY_ID` for key-manifest and daily-root signing.
+  - Distinct values must be used for dev, staging, and prod.
+- Rotation model:
+  - Introduce a new `key_id`, publish it in `/keys` and the signed manifest.
+  - Keep old public keys available for verification until retention windows expire.
+  - Revoke compromised keys by setting status `REVOKED` in the signed key manifest.
+- Revocation list artifact:
+  - Source of truth: `/.well-known/releasegate-keys.json` (signed by `/.well-known/releasegate-keys.sig`).
+  - Revoked keys remain verifiable cryptographically, but are marked untrusted by verifier policy.
+
 ## Request Signatures (Webhook Security)
 
 - HMAC signature check for webhook endpoints using key lookup by `X-Key-Id`.

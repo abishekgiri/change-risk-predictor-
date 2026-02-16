@@ -1,4 +1,3 @@
-from pathlib import Path
 import os
 from dotenv import load_dotenv
 
@@ -47,3 +46,25 @@ TEST_PATHS = [
  "test/",
  "__tests__/",
 ]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "true" if default else "false")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def is_anchoring_enabled() -> bool:
+    """
+    Controls optional external anchoring integrations.
+    Defaults to enabled to preserve existing behavior.
+    """
+    return _env_bool("RELEASEGATE_ANCHORING_ENABLED", True)
+
+
+def get_anchor_provider_name() -> str:
+    """
+    Runtime anchor provider selector.
+    Current supported providers:
+    - local_transparency
+    """
+    return str(os.getenv("RELEASEGATE_ANCHOR_PROVIDER", "local_transparency")).strip().lower()

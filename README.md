@@ -10,6 +10,12 @@ ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g.,
 
 See also: [Contributing](CONTRIBUTING.md), [Security Policy](SECURITY.md), [Changelog](CHANGELOG.md).
 
+Attestation and audit verification docs:
+- [Attestation Contract](docs/ATTESTATION.md)
+- [Verification Guide](docs/VERIFICATION.md)
+- [Auditor Quickstart](docs/AUDITOR_QUICKSTART.md)
+- [External Anchoring Wave Plan (55-step)](docs/external-anchoring-wave-plan-55.md)
+
 ---
 
 ## Why ReleaseGate Exists
@@ -408,6 +414,24 @@ python -m releasegate.cli proof-pack --decision-id <id> --tenant demo --format j
 
 ```bash
 python -m releasegate.cli verify-proof-pack /path/to/proof-pack.json
+```
+
+### Export deterministic proofpack v1 zip
+
+```bash
+python -m releasegate.cli proofpack --decision-id <id> --tenant demo --out proofpack.zip
+```
+
+### Verify deterministic proofpack v1 zip
+
+```bash
+python -m releasegate.cli verify-pack proofpack.zip --format json
+```
+
+### Verify Merkle inclusion for an attestation
+
+```bash
+python -m releasegate.cli verify-inclusion --attestation-id <attestation_id> --tenant demo --format json
 ```
 
 ### Run policy simulation

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from releasegate.audit.transparency import record_transparency_for_attestation
+from releasegate.config import is_anchoring_enabled
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -39,6 +40,75 @@ def _ensure_audit_attestations_table() -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
         ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    _ensure_attestation_append_only(storage)
+
+
+def _ensure_attestation_append_only(storage) -> None:
+    if storage.name == "postgres":
+        storage.execute(
+            """
+            CREATE OR REPLACE FUNCTION releasegate_prevent_attestation_mutation()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'Attestation log is append-only: % not allowed', TG_OP;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+        )
+        storage.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'prevent_attestations_update'
+                ) THEN
+                    CREATE TRIGGER prevent_attestations_update
+                    BEFORE UPDATE ON audit_attestations
+                    FOR EACH ROW
+                    EXECUTE FUNCTION releasegate_prevent_attestation_mutation();
+                END IF;
+            END $$;
+            """
+        )
+        storage.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = 'prevent_attestations_delete'
+                ) THEN
+                    CREATE TRIGGER prevent_attestations_delete
+                    BEFORE DELETE ON audit_attestations
+                    FOR EACH ROW
+                    EXECUTE FUNCTION releasegate_prevent_attestation_mutation();
+                END IF;
+            END $$;
+            """
+        )
+        return
+
+    storage.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestations_update
+        BEFORE UPDATE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    storage.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestations_delete
+        BEFORE DELETE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation log is append-only: DELETE not allowed');
+        END;
         """
     )
 
@@ -91,14 +161,15 @@ def record_release_attestation(
         signed_payload_hash = str(signature.get("signed_payload_hash") or "")
         normalized_hash = _normalize_signed_payload_hash(signed_payload_hash)
         payload_hash = f"sha256:{normalized_hash}"
-        record_transparency_for_attestation(
-            tenant_id=effective_tenant,
-            attestation_id=existing_id,
-            fallback_repo=repo,
-            fallback_pr_number=pr_number,
-            payload_hash=payload_hash,
-            attestation=attestation,
-        )
+        if is_anchoring_enabled():
+            record_transparency_for_attestation(
+                tenant_id=effective_tenant,
+                attestation_id=existing_id,
+                fallback_repo=repo,
+                fallback_pr_number=pr_number,
+                payload_hash=payload_hash,
+                attestation=attestation,
+            )
         return existing_id
 
     signature = attestation.get("signature") or {}
@@ -134,14 +205,15 @@ def record_release_attestation(
             created_at,
         ),
     )
-    record_transparency_for_attestation(
-        tenant_id=effective_tenant,
-        attestation_id=attestation_id,
-        fallback_repo=repo,
-        fallback_pr_number=pr_number,
-        payload_hash=payload_hash,
-        attestation=attestation,
-    )
+    if is_anchoring_enabled():
+        record_transparency_for_attestation(
+            tenant_id=effective_tenant,
+            attestation_id=attestation_id,
+            fallback_repo=repo,
+            fallback_pr_number=pr_number,
+            payload_hash=payload_hash,
+            attestation=attestation,
+        )
     return attestation_id
 
 
@@ -215,3 +287,103 @@ def get_release_attestation_by_id(
     payload = json.loads(raw) if isinstance(raw, str) else raw
     row["attestation"] = payload
     return row
+
+
+def list_release_attestations(
+    *,
+    tenant_id: Optional[str] = None,
+    repo: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    init_db()
+    _ensure_audit_attestations_table()
+    storage = get_storage_backend()
+
+    try:
+        effective_limit = max(1, min(int(limit), 500))
+    except Exception as exc:
+        raise ValueError("limit must be an integer") from exc
+
+    since_dt = None
+    if since:
+        text = str(since).strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            since_dt = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("since must be ISO8601 date-time") from exc
+        if since_dt.tzinfo is None:
+            since_dt = since_dt.replace(tzinfo=timezone.utc)
+        else:
+            since_dt = since_dt.astimezone(timezone.utc)
+
+    filters = []
+    params = []
+    if tenant_id is not None:
+        filters.append("tenant_id = ?")
+        params.append(resolve_tenant_id(tenant_id))
+    if repo is not None:
+        filters.append("repo = ?")
+        params.append(str(repo))
+
+    where_clause = ""
+    if filters:
+        where_clause = "WHERE " + " AND ".join(filters)
+
+    rows = storage.fetchall(
+        f"""
+        SELECT tenant_id, attestation_id, decision_id, repo, pr_number,
+               schema_version, key_id, algorithm, signed_payload_hash,
+               attestation_json, created_at
+        FROM audit_attestations
+        {where_clause}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        tuple(params + [effective_limit]),
+    )
+
+    items = []
+    for row in rows:
+        created_at = str(row.get("created_at") or "")
+        created_dt = None
+        if created_at:
+            raw = created_at[:-1] + "+00:00" if created_at.endswith("Z") else created_at
+            try:
+                created_dt = datetime.fromisoformat(raw)
+            except ValueError:
+                created_dt = None
+        if created_dt is not None:
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = created_dt.astimezone(timezone.utc)
+        if since_dt is not None and created_dt is not None and created_dt < since_dt:
+            continue
+
+        payload_raw = row.get("attestation_json")
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        items.append(
+            {
+                "tenant_id": row.get("tenant_id"),
+                "attestation_id": row.get("attestation_id"),
+                "decision_id": row.get("decision_id"),
+                "repo": row.get("repo"),
+                "pr_number": row.get("pr_number"),
+                "schema_version": row.get("schema_version"),
+                "key_id": row.get("key_id"),
+                "algorithm": row.get("algorithm"),
+                "signed_payload_hash": row.get("signed_payload_hash"),
+                "created_at": row.get("created_at"),
+                "attestation": payload,
+            }
+        )
+
+    return {
+        "ok": True,
+        "limit": effective_limit,
+        "count": len(items),
+        "items": items,
+    }

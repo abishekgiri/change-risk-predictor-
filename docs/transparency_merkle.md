@@ -35,6 +35,23 @@ Leaves for a UTC day are ordered by:
 
 Both responses are cacheable and include ETag headers.
 
+## External Root Publication
+
+Daily signed roots are exported to repository path:
+
+- `roots/YYYY-MM-DD.json`
+
+via workflow:
+
+- `.github/workflows/publish-roots.yml`
+
+Publication behavior:
+
+1. Try yesterday (UTC).
+2. If no root exists for yesterday, try today (UTC).
+3. If neither day has entries, workflow exits successfully without commit.
+4. Root payload is signed with the root Ed25519 key (`RELEASEGATE_ROOT_SIGNING_KEY`).
+
 ## Inclusion Proof Verification
 To verify proof offline:
 
@@ -42,3 +59,11 @@ To verify proof offline:
 2. Apply proof steps in order (`left`/`right`) using `sha256(left || right)`.
 3. Compare final computed hash with `root_hash`.
 4. Verification succeeds only if hashes match exactly.
+
+## Public Root Verification Procedure
+
+1. Load `roots/<date>.json`.
+2. Split payload and `signature`.
+3. Canonicalize payload bytes with attestation canonical JSON rules.
+4. Verify `signature.sig` using trusted root public key for `signature.root_key_id`.
+5. Compare included `root_hash` with root returned by `/transparency/root/<date>` when online verification is desired.

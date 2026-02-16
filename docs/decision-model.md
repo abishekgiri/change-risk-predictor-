@@ -8,6 +8,12 @@ This file is the single source of truth for decision semantics.
 
 Other docs must reference this file and must not redefine these semantics.
 
+## Related Contract Sources
+
+- Attestation schema source of truth: `releasegate/attestation/schema/release-attestation.v1.json`
+- Attestation canonicalization source of truth: `releasegate/attestation/canonicalize.py`
+- Proofpack schema contract: `docs/contracts/proof_pack_v1.md`
+
 ## Inputs
 Evaluator input is a 4-part snapshot:
 

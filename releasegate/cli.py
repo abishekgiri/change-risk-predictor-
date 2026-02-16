@@ -118,6 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
     export_root_p.add_argument("--tenant", help="Tenant/org identifier (optional)")
     export_root_p.add_argument("--format", default="text", choices=["text", "json"])
 
+    verify_inclusion_p = sub.add_parser(
+        "verify-inclusion",
+        help="Verify transparency inclusion proof from file or by attestation id.",
+    )
+    inclusion_src = verify_inclusion_p.add_mutually_exclusive_group(required=True)
+    inclusion_src.add_argument("--proof-file", help="Path to inclusion proof JSON payload")
+    inclusion_src.add_argument("--attestation-id", help="Attestation id to resolve proof from local storage")
+    verify_inclusion_p.add_argument("--tenant", help="Tenant/org identifier")
+    verify_inclusion_p.add_argument("--format", default="text", choices=["text", "json"])
+
     proof_p = sub.add_parser("proof-pack", help="Export audit evidence bundle for a decision.")
     proof_p.add_argument("--decision-id", required=True)
     proof_p.add_argument("--format", default="json", choices=["json", "zip"])
@@ -806,6 +816,66 @@ def main() -> int:
         except Exception as exc:
             print(f"Failed to export root: {exc}", file=sys.stderr)
             return 1
+
+    if args.cmd == "verify-inclusion":
+        from releasegate.attestation.sdk import verify_inclusion_proof
+        from releasegate.audit.transparency import get_transparency_inclusion_proof
+
+        payload = None
+        if args.proof_file:
+            try:
+                with open(args.proof_file, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception as exc:
+                error = {
+                    "ok": False,
+                    "error_code": "PROOF_FILE_INVALID",
+                    "error": str(exc),
+                }
+                if args.format == "json":
+                    print(json.dumps(error, indent=2))
+                else:
+                    print(f"verification: FAIL\\nerror: {error['error_code']}", file=sys.stderr)
+                return 3
+        else:
+            try:
+                tenant_id = resolve_tenant_id(getattr(args, "tenant", None))
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            payload = get_transparency_inclusion_proof(
+                attestation_id=str(args.attestation_id),
+                tenant_id=tenant_id,
+            )
+            if not payload:
+                error = {
+                    "ok": False,
+                    "error_code": "PROOF_NOT_FOUND",
+                    "attestation_id": args.attestation_id,
+                }
+                if args.format == "json":
+                    print(json.dumps(error, indent=2))
+                else:
+                    print("verification: FAIL\\nerror: PROOF_NOT_FOUND", file=sys.stderr)
+                return 3
+
+        ok = bool(verify_inclusion_proof(payload))
+        result = {
+            "ok": ok,
+            "attestation_id": payload.get("attestation_id") if isinstance(payload, dict) else None,
+            "root_hash": payload.get("root_hash") if isinstance(payload, dict) else None,
+            "leaf_hash": payload.get("leaf_hash") if isinstance(payload, dict) else None,
+            "date_utc": payload.get("date_utc") if isinstance(payload, dict) else None,
+        }
+        if args.format == "json":
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"verification: {'OK' if ok else 'FAIL'}")
+            if result.get("attestation_id"):
+                print(f"attestation_id: {result['attestation_id']}")
+            if result.get("root_hash"):
+                print(f"root_hash: {result['root_hash']}")
+        return 0 if ok else 2
 
     if args.cmd == "proof-pack":
         from releasegate.audit.checkpoints import (

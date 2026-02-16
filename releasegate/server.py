@@ -520,6 +520,26 @@ def verify_attestation_endpoint(payload: VerifyAttestationRequest):
     }
 
 
+@app.get("/attestations")
+def list_attestations(
+    limit: int = 50,
+    tenant_id: Optional[str] = None,
+    repo: Optional[str] = None,
+    since: Optional[str] = None,
+):
+    from releasegate.audit.attestations import list_release_attestations
+
+    try:
+        return list_release_attestations(
+            tenant_id=tenant_id,
+            repo=repo,
+            since=since,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/attestations/{attestation_id}.dsse")
 def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None):
     from releasegate.attestation import build_intoto_statement, wrap_dsse
@@ -550,6 +570,25 @@ def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return envelope
+
+
+@app.get("/attestations/{attestation_id}")
+def get_attestation_by_id(attestation_id: str, tenant_id: Optional[str] = None):
+    from releasegate.audit.attestations import get_release_attestation_by_id
+
+    try:
+        item = get_release_attestation_by_id(
+            attestation_id=attestation_id,
+            tenant_id=tenant_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not item:
+        raise HTTPException(status_code=404, detail="attestation not found")
+    return {
+        "ok": True,
+        "item": item,
+    }
 
 
 @app.get("/transparency/latest")

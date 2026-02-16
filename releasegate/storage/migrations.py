@@ -887,6 +887,27 @@ def _migration_20260213_013_transparency_daily_roots(cursor) -> None:
     )
 
 
+def _migration_20260214_014_attestation_immutability(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestations_update
+        BEFORE UPDATE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestations_delete
+        BEFORE DELETE ON audit_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation log is append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -952,6 +973,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260213_013_transparency_daily_roots",
         description="Create append-only tenant-scoped daily Merkle roots for transparency entries.",
         apply=_migration_20260213_013_transparency_daily_roots,
+    ),
+    Migration(
+        migration_id="20260214_014_attestation_immutability",
+        description="Enforce append-only immutability triggers for attestation records.",
+        apply=_migration_20260214_014_attestation_immutability,
     ),
 ]
 
