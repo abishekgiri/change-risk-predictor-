@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import os
 from datetime import datetime, timezone
+from math import isfinite
 from typing import Any, Dict, Optional
 
 from releasegate.attestation.canonicalize import canonicalize_attestation_payload, canonicalize_json_bytes
 from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, sign_bytes
+from releasegate.attestation.config import get_policy_schema_version
 from releasegate.attestation.types import (
     AttestationDecision,
     AttestationEvidence,
@@ -50,6 +52,64 @@ def _bundle_hash(bundle: DecisionBundle) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _normalize_utc_timestamp(value: Any) -> str:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            dt = datetime.now(timezone.utc)
+        else:
+            if raw.endswith("Z"):
+                raw = f"{raw[:-1]}+00:00"
+            dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _normalized_risk_score(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    score = float(value)
+    if not isfinite(score):
+        raise ValueError("risk_score must be finite")
+    return round(score, 6)
+
+
+def _risk_level(score: Optional[float], decision: str) -> str:
+    if str(decision).upper() == "BLOCK":
+        if score is None:
+            return "HIGH"
+        if score >= 0.66:
+            return "HIGH"
+    if score is not None:
+        if score >= 0.66:
+            return "HIGH"
+        if score >= 0.33:
+            return "MEDIUM"
+    return "LOW"
+
+
+def _signal_hash(signals: Dict[str, Any]) -> str:
+    canonical = canonicalize_json_bytes(signals or {})
+    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _dependency_combined_hash(signals: Dict[str, Any]) -> Optional[str]:
+    provenance = signals.get("dependency_provenance") if isinstance(signals, dict) else None
+    if not isinstance(provenance, dict):
+        return None
+    value = str(provenance.get("combined_hash") or "").strip()
+    if not value:
+        return None
+    if value.startswith("sha256:"):
+        return value
+    return f"sha256:{value}"
+
+
 def _deterministic_decision_id(seed: Dict[str, Any]) -> str:
     digest = hashlib.sha256(canonicalize_json_bytes(seed)).hexdigest()
     return f"analysis-{digest[:24]}"
@@ -86,15 +146,18 @@ def build_bundle_from_decision(
             decision.enforcement_targets.ref,
         ),
         policy_version=policy_version,
+        policy_schema_version=get_policy_schema_version(),
         policy_hash=policy_hash or "unknown-policy-hash",
         policy_bundle_hash=decision.policy_bundle_hash or "unknown-policy-bundle",
         policy_scope=[str(item) for item in resolved_scope],
         policy_resolution_hash=resolution_hash or policy_hash or "unknown-policy-hash",
         signals=input_snapshot,
         risk_score=None,
+        risk_level=_risk_level(None, _status_to_attestation_decision(decision.release_status)),
+        override_flags=[],
         decision=_status_to_attestation_decision(decision.release_status),
         reason_codes=reason_codes,
-        timestamp=decision.timestamp.astimezone(timezone.utc).isoformat(),
+        timestamp=_normalize_utc_timestamp(decision.timestamp),
         engine_version=engine_version,
         checkpoint_hashes=[],
     )
@@ -114,21 +177,26 @@ def build_bundle_from_analysis_result(
     reason_codes: list[str],
     signals: Dict[str, Any],
     engine_version: str,
+    policy_schema_version: Optional[str] = None,
     timestamp: Optional[str] = None,
     checkpoint_hashes: Optional[list[str]] = None,
     policy_scope: Optional[list[str]] = None,
     policy_resolution_hash: Optional[str] = None,
 ) -> DecisionBundle:
-    issued_at = str(timestamp or "").strip() or datetime.now(timezone.utc).isoformat()
+    issued_at = _normalize_utc_timestamp(timestamp)
+    normalized_score = _normalized_risk_score(risk_score)
+    normalized_decision = _status_to_attestation_decision(decision)
+    override_flags_raw = signals.get("override_flags") if isinstance(signals, dict) else None
+    override_flags = [str(item) for item in (override_flags_raw or []) if str(item).strip()]
     seed = {
         "tenant_id": tenant_id,
         "repo": repo,
         "pr_number": pr_number,
         "commit_sha": commit_sha,
         "policy_bundle_hash": policy_bundle_hash,
-        "decision": decision,
+        "decision": normalized_decision,
         "reason_codes": reason_codes,
-        "risk_score": risk_score,
+        "risk_score": normalized_score,
         "signals": signals,
         "issued_at": issued_at,
     }
@@ -140,13 +208,16 @@ def build_bundle_from_analysis_result(
         pr_number=pr_number,
         commit_sha=commit_sha or "unknown",
         policy_version=policy_version,
+        policy_schema_version=str(policy_schema_version or get_policy_schema_version()),
         policy_hash=policy_hash,
         policy_bundle_hash=policy_bundle_hash,
         policy_scope=[str(item) for item in (policy_scope or [])],
         policy_resolution_hash=str(policy_resolution_hash or policy_hash or "").strip() or None,
         signals=signals or {},
-        risk_score=float(risk_score),
-        decision=_status_to_attestation_decision(decision),
+        risk_score=normalized_score,
+        risk_level=_risk_level(normalized_score, normalized_decision),
+        override_flags=override_flags,
+        decision=normalized_decision,
         reason_codes=[str(code) for code in (reason_codes or [])],
         timestamp=issued_at,
         engine_version=engine_version,
@@ -162,13 +233,21 @@ def _payload_without_signature(
     environment = (os.getenv("RELEASEGATE_ENVIRONMENT") or "dev").strip().lower()
     org_id = (os.getenv("RELEASEGATE_ISSUER_ORG_ID") or bundle.tenant_id).strip()
     app_id = (os.getenv("RELEASEGATE_ISSUER_APP_ID") or "releasegate").strip()
-    issued_at = str(bundle.timestamp or "").strip() or datetime.now(timezone.utc).isoformat()
+    issued_at = _normalize_utc_timestamp(bundle.timestamp)
     bundle_hash = _bundle_hash(bundle)
+    signals_summary = dict(bundle.signals)
+    dependency_provenance = dict(signals_summary.get("dependency_provenance") or {})
+    dependency_combined_hash = _dependency_combined_hash(signals_summary)
+    override_flags = [str(item) for item in (bundle.override_flags or []) if str(item).strip()]
+    signal_hash = _signal_hash(signals_summary)
+    normalized_score = _normalized_risk_score(bundle.risk_score)
+    risk_level = bundle.risk_level or _risk_level(normalized_score, bundle.decision)
 
     attestation = ReleaseAttestation(
         schema_version="1.0.0",
         attestation_type="releasegate.release_attestation",
         issued_at=issued_at,
+        policy_schema_version=str(bundle.policy_schema_version or get_policy_schema_version()),
         tenant_id=bundle.tenant_id,
         decision_id=bundle.decision_id,
         engine_version=bundle.engine_version,
@@ -189,12 +268,16 @@ def _payload_without_signature(
         ),
         decision=AttestationDecision(
             decision=bundle.decision,
-            risk_score=bundle.risk_score,
+            risk_score=normalized_score,
+            risk_level=risk_level,
             reason_codes=list(bundle.reason_codes),
         ),
         evidence=AttestationEvidence(
-            signals_summary=dict(bundle.signals),
-            dependency_provenance=dict(bundle.signals.get("dependency_provenance") or {}),
+            signals_summary=signals_summary,
+            signal_hash=signal_hash,
+            dependency_provenance=dependency_provenance,
+            dependency_combined_hash=dependency_combined_hash,
+            override_flags=override_flags,
             checkpoint_hashes=list(bundle.checkpoint_hashes),
             decision_bundle_hash=f"sha256:{bundle_hash}",
         ),

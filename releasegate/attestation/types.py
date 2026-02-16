@@ -22,12 +22,15 @@ class DecisionBundle(BaseModel):
     commit_sha: str = "unknown"
     merge_sha: Optional[str] = None
     policy_version: str
+    policy_schema_version: str = "v1"
     policy_hash: str
     policy_bundle_hash: str
     policy_scope: List[str] = Field(default_factory=list)
     policy_resolution_hash: Optional[str] = None
     signals: Dict[str, Any] = Field(default_factory=dict)
     risk_score: Optional[float] = None
+    risk_level: Optional[str] = None
+    override_flags: List[str] = Field(default_factory=list)
     decision: Literal["ALLOW", "BLOCK"]
     reason_codes: List[str] = Field(default_factory=list)
     timestamp: str
@@ -61,6 +64,7 @@ class AttestationDecision(BaseModel):
 
     decision: Literal["ALLOW", "BLOCK"]
     risk_score: Optional[float] = None
+    risk_level: Optional[str] = None
     reason_codes: List[str] = Field(default_factory=list)
 
 
@@ -68,7 +72,10 @@ class AttestationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     signals_summary: Dict[str, Any] = Field(default_factory=dict)
+    signal_hash: Optional[str] = None
     dependency_provenance: Dict[str, Any] = Field(default_factory=dict)
+    dependency_combined_hash: Optional[str] = None
+    override_flags: Optional[List[str]] = None
     checkpoint_hashes: List[str] = Field(default_factory=list)
     decision_bundle_hash: str
 
@@ -96,6 +103,7 @@ class ReleaseAttestation(BaseModel):
     schema_version: Literal["1.0.0"]
     attestation_type: Literal["releasegate.release_attestation"]
     issued_at: str
+    policy_schema_version: Optional[str] = None
     tenant_id: str
     decision_id: str
     engine_version: str

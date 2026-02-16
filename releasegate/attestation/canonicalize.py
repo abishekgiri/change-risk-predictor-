@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping
 
 from releasegate.attestation.types import ReleaseAttestation
@@ -84,6 +86,38 @@ def _validate_attestation_top_level(
 
     # Lock constants at top-level contract fields.
     _validate_const_fields(payload, schema, fields=("schema_version", "attestation_type"))
+    _validate_issued_at(payload.get("issued_at"))
+    _validate_numeric_contract(payload, path=())
+
+
+def _validate_issued_at(value: Any) -> None:
+    text = str(value or "").strip()
+    if not text:
+        raise AttestationContractError("Attestation field 'issued_at' is required")
+    raw = text
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise AttestationContractError("Attestation field 'issued_at' must be ISO8601") from exc
+    if parsed.tzinfo is None:
+        raise AttestationContractError("Attestation field 'issued_at' must include timezone")
+
+
+def _validate_numeric_contract(value: Any, *, path: tuple[str, ...]) -> None:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            dotted = ".".join(path) or "<root>"
+            raise AttestationContractError(f"Attestation float at '{dotted}' must be finite")
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _validate_numeric_contract(child, path=(*path, str(key)))
+        return
+    if isinstance(value, list):
+        for idx, child in enumerate(value):
+            _validate_numeric_contract(child, path=(*path, str(idx)))
 
 
 def canonicalize_json(value: Any) -> str:
@@ -119,7 +153,10 @@ def canonicalize_attestation(attestation: Mapping[str, Any]) -> bytes:
     schema = _load_attestation_schema()
     _validate_attestation_top_level(attestation, include_signature=True, schema=schema)
     try:
-        normalized = ReleaseAttestation.model_validate(dict(attestation)).model_dump(mode="json")
+        normalized = ReleaseAttestation.model_validate(dict(attestation)).model_dump(
+            mode="json",
+            exclude_unset=True,
+        )
     except Exception as exc:
         raise AttestationContractError(f"Attestation payload failed strict model validation: {exc}") from exc
     return canonicalize_json_bytes(normalized)

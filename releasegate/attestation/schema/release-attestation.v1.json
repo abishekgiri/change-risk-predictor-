@@ -14,6 +14,9 @@
       "type": "string",
       "format": "date-time"
     },
+    "policy_schema_version": {
+      "type": "string"
+    },
     "tenant_id": {
       "type": "string"
     },
@@ -117,6 +120,12 @@
             "null"
           ]
         },
+        "risk_level": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "reason_codes": {
           "type": "array",
           "items": {
@@ -137,8 +146,23 @@
         "signals_summary": {
           "type": "object"
         },
+        "signal_hash": {
+          "type": "string"
+        },
         "dependency_provenance": {
           "type": "object"
+        },
+        "dependency_combined_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "override_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "checkpoint_hashes": {
           "type": "array",

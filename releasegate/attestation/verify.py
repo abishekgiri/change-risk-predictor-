@@ -42,7 +42,7 @@ def verify_attestation_payload(
 
     try:
         attestation = ReleaseAttestation.model_validate(payload)
-        normalized = attestation.model_dump(mode="json")
+        normalized = attestation.model_dump(mode="json", exclude_unset=True)
     except Exception as exc:
         schema_valid = False
         errors.append(f"SCHEMA_INVALID: {exc}")
