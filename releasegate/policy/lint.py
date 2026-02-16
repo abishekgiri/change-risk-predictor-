@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
+from releasegate.utils.paths import safe_join_under
 
 
 def _issue(
@@ -32,17 +34,23 @@ def _issue(
 
 def _iter_policy_yaml(policy_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
     docs: List[Tuple[str, Dict[str, Any]]] = []
-    if not os.path.exists(policy_dir):
+    policy_base = Path(policy_dir).resolve(strict=False)
+    if not policy_base.exists():
         return docs
-    for root, _, files in os.walk(policy_dir):
+    for root, _, files in os.walk(policy_base):
+        root_path = Path(root)
         for file_name in sorted(files):
             if file_name.startswith("_") or not file_name.endswith((".yaml", ".yml")):
                 continue
-            full_path = os.path.join(root, file_name)
-            with open(full_path, "r", encoding="utf-8") as f:
+            try:
+                rel_root = root_path.relative_to(policy_base)
+                full_path = safe_join_under(policy_base, rel_root, file_name)
+            except ValueError:
+                continue
+            with full_path.open("r", encoding="utf-8") as f:
                 loaded = yaml.safe_load(f) or {}
             if isinstance(loaded, dict):
-                docs.append((full_path, loaded))
+                docs.append((str(full_path), loaded))
     return docs
 
 

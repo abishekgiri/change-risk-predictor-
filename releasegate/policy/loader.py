@@ -1,9 +1,12 @@
 import os
 import yaml
+from pathlib import Path
 from typing import List, Union, Optional
 from .types import PolicyDef
 from .policy_types import Policy
 from .inheritance import resolve_policy_inheritance
+
+from releasegate.utils.paths import safe_join_under
 
 class PolicyLoader:
     def __init__(self, policy_dir: Optional[str] = None, schema: str = "def", strict: bool = True):
@@ -22,19 +25,35 @@ class PolicyLoader:
         """
         policies = []
         
-        if not os.path.exists(self.policy_dir):
+        policy_base = Path(self.policy_dir).resolve(strict=False)
+        if not policy_base.exists():
             if self.strict:
-                raise FileNotFoundError(f"Policy directory not found: {self.policy_dir}")
+                raise FileNotFoundError(f"Policy directory not found: {policy_base}")
             return []
 
-        for root, _, files in os.walk(self.policy_dir):
+        for root, _, files in os.walk(policy_base):
+            root_path = Path(root)
             for file in files:
                 if file.startswith("_"):
                     continue
                 if file.endswith(".yaml") or file.endswith(".yml"):
-                    full_path = os.path.join(root, file)
                     try:
-                        with open(full_path, "r") as f:
+                        rel_root = root_path.relative_to(policy_base)
+                    except Exception:
+                        # os.walk should stay under policy_base, but be defensive.
+                        if self.strict:
+                            raise ValueError(f"Policy path escapes base directory: {root_path}")
+                        continue
+                    try:
+                        full_path = safe_join_under(policy_base, rel_root, file)
+                    except ValueError as e:
+                        if self.strict:
+                            raise ValueError(f"Policy path escapes base directory: {e}") from e
+                        import sys
+                        print(f"WARN: Skipping unsafe policy path: {e}", file=sys.stderr)
+                        continue
+                    try:
+                        with full_path.open("r", encoding="utf-8") as f:
                             data = yaml.safe_load(f)
                             # Handle empty files
                             if not data:
@@ -44,7 +63,7 @@ class PolicyLoader:
                             policy = self._parse_policy(data)
                             # Attach source_file only for PolicyDef (compiled Policy doesn't define it)
                             if isinstance(policy, PolicyDef):
-                                policy.source_file = full_path
+                                policy.source_file = str(full_path)
                             policies.append(policy)
                     except Exception as e:
                         if self.strict:

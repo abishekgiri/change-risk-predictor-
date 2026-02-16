@@ -2,6 +2,10 @@ from typing import List, Dict, Any, Optional
 import os
 import json
 import hashlib
+import re
+from pathlib import Path
+
+from releasegate.utils.paths import safe_join_under
 from releasegate.audit.types import TraceableFinding
 from releasegate.engine import PolicyResult
 
@@ -16,6 +20,14 @@ class TraceabilityInjector:
     def __init__(self, compiled_root: str = COMPILED_ROOT):
         self.compiled_root = compiled_root
         self.policy_cache = {}
+
+    _POLICY_ID_SAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+    @classmethod
+    def _safe_policy_filename(cls, policy_id: str) -> str:
+        # Policy IDs should be identifiers, not paths. Normalize to a safe filename.
+        cleaned = cls._POLICY_ID_SAFE.sub("_", str(policy_id or "")).strip("._-")
+        return f"{cleaned}.yaml"
     
     def _load_policy(self, policy_id: str) -> Optional[Dict]:
         """Loads compiled YAML for a rule ID."""
@@ -24,18 +36,25 @@ class TraceabilityInjector:
         
         # Try to find file (Phase 4 compilation naming convention: POLICY_ID.yaml)
         # Note: Rule IDs are unique files in Phase 4 output
-        path = os.path.join(self.compiled_root, f"{policy_id}.yaml")
-        if not os.path.exists(path):
+        base = Path(self.compiled_root).resolve(strict=False)
+        filename = self._safe_policy_filename(policy_id)
+        path = safe_join_under(base, filename)
+        if not path.exists():
             # Try searching subdirs (e.g. standards/soc2/) 
-            for root, _, files in os.walk(self.compiled_root):
-                if f"{policy_id}.yaml" in files:
-                    path = os.path.join(root, f"{policy_id}.yaml")
+            for root, _, files in os.walk(base):
+                if filename in files:
+                    root_path = Path(root)
+                    try:
+                        rel_root = root_path.relative_to(base)
+                        path = safe_join_under(base, rel_root, filename)
+                    except ValueError:
+                        return None
                     break
             else:
                 return None
         
         try:
-            with open(path) as f:
+            with path.open("r", encoding="utf-8") as f:
                 data = json.load(f) # It's JSON-compatible YAML (loaded as dict)
                 self.policy_cache[policy_id] = data
                 return data
