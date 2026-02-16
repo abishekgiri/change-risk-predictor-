@@ -379,6 +379,58 @@ GET /integrations/jira/metrics/internal
 make demo
 ```
 
+### Quick Demo (Deterministic Proofpack v1)
+
+This is the fastest end-to-end “auditor moment” path:
+
+- Generate a decision trail
+- Emit a signed attestation
+- Export a deterministic proofpack v1 ZIP
+- Verify the pack offline
+- Verify Merkle inclusion
+
+```bash
+set -euo pipefail
+
+# 0) temp demo DB + tenant
+export COMPLIANCE_DB_PATH=/tmp/rg_phase3_demo.db
+export RELEASEGATE_STORAGE_BACKEND=sqlite
+export RELEASEGATE_TENANT_ID=demo
+
+python -m releasegate.cli db-migrate >/dev/null
+
+# 1) generate an Ed25519 signing keypair for attestations (local demo only)
+openssl genpkey -algorithm ED25519 -out /tmp/releasegate_attest_private.pem
+openssl pkey -in /tmp/releasegate_attest_private.pem -pubout -out /tmp/releasegate_attest_public.pem
+export RELEASEGATE_SIGNING_KEY="$(cat /tmp/releasegate_attest_private.pem)"
+
+# 2) create demo decisions and capture a decision_id to export
+DEMO_JSON="$(make demo-json)"
+DECISION_ID="$(printf '%s' "$DEMO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"blocked_decision_id\"])')"
+echo "DECISION_ID=$DECISION_ID"
+
+# 3) build deterministic proofpack v1 zip
+OUT_JSON="$(python -m releasegate.cli proofpack --decision-id "$DECISION_ID" --tenant demo --out /tmp/proofpack.zip --format json)"
+ATT_ID="$(printf '%s' "$OUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"attestation_id\"])')"
+echo "ATTESTATION_ID=$ATT_ID"
+
+# 4) offline verification: no server/DB required (only the proofpack + public key)
+python -m releasegate.cli verify-pack /tmp/proofpack.zip --format json --key-file /tmp/releasegate_attest_public.pem
+
+# 5) inclusion verification (this demo reads the transparency log from the local DB)
+python -m releasegate.cli verify-inclusion --attestation-id "$ATT_ID" --tenant demo --format json
+
+# Clean up
+rm -f /tmp/rg_phase3_demo.db /tmp/proofpack.zip /tmp/releasegate_attest_private.pem /tmp/releasegate_attest_public.pem
+unset RELEASEGATE_SIGNING_KEY
+```
+
+What success looks like:
+
+- `proofpack` JSON includes `"ok": true` and `"attestation_id"`.
+- `verify-pack` JSON includes `"ok": true`.
+- `verify-inclusion` JSON includes `"ok": true` and `"root_hash"`.
+
 ### Validate deploy-time policy bundle
 
 ```bash

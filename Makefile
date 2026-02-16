@@ -1,4 +1,4 @@
-.PHONY: test verify phase6 demo golden validate-policy-bundle validate-jira-config clean
+.PHONY: test verify phase6 demo demo-json golden validate-policy-bundle validate-jira-config clean
 
 GOLDEN_ENV=COMPLIANCE_DB_PATH=out/golden/releasegate_golden.db RELEASEGATE_STORAGE_BACKEND=sqlite RELEASEGATE_TENANT_ID=golden-demo RELEASEGATE_STRICT_MODE=true RELEASEGATE_CHECKPOINT_SIGNING_KEY=golden-demo-checkpoint-signing-key RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID=golden-demo-key
 
@@ -13,7 +13,10 @@ phase6:
 	./scripts/run_phase6.sh
 
 demo:
-	python3 scripts/demo_block_override_export.py
+	RELEASEGATE_TENANT_ID=$${RELEASEGATE_TENANT_ID:-demo} python3 scripts/demo_block_override_export.py
+
+demo-json:
+	@RELEASEGATE_TENANT_ID=$${RELEASEGATE_TENANT_ID:-demo} python3 scripts/demo_block_override_export.py --format json
 
 golden:
 	mkdir -p out/golden

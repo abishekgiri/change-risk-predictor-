@@ -86,6 +86,7 @@ def main() -> int:
     parser.add_argument("--actor", default="release-manager@example.com")
     parser.add_argument("--reason", default="Emergency release override approved")
     parser.add_argument("--out-dir", default="audit_bundles/demo_flow")
+    parser.add_argument("--format", default="text", choices=["text", "json"])
     args = parser.parse_args()
 
     run_nonce = uuid.uuid4().hex
@@ -146,6 +147,7 @@ def main() -> int:
     csv_path = out_dir / f"{safe_repo}__pr_{args.pr}__{now}.csv"
 
     payload = {
+        "ok": True,
         "repo": args.repo,
         "pr_number": args.pr,
         "issue_key": args.issue,
@@ -156,6 +158,8 @@ def main() -> int:
         "override_chain": chain,
         "decisions": decisions,
         "overrides": overrides,
+        "json_export": str(json_path),
+        "csv_export": str(csv_path),
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -166,18 +170,21 @@ def main() -> int:
         csv_rows.append({"record_type": "override", **o})
     _write_csv(csv_path, csv_rows)
 
-    print("ReleaseGate Demo Complete")
-    print(f"Jira issue key: {args.issue}")
-    print(f"Transition attempted: {args.transition}")
-    print(f"Exact block reason: {blocked_decision.message}")
-    print(f"Override actor: {args.actor}")
-    print(f"Override reason: {args.reason}")
-    print(f"Blocked decision_id: {blocked_decision.decision_id}")
-    print(f"Override decision_id: {override_decision.decision_id}")
-    print(f"Override ledger id: {override_event.get('override_id')}")
-    print(f"JSON export: {json_path}")
-    print(f"CSV export:  {csv_path}")
-    print(f"Override chain verified: {chain.get('valid')} (checked={chain.get('checked')})")
+    if args.format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+    else:
+        print("ReleaseGate Demo Complete")
+        print(f"Jira issue key: {args.issue}")
+        print(f"Transition attempted: {args.transition}")
+        print(f"Exact block reason: {blocked_decision.message}")
+        print(f"Override actor: {args.actor}")
+        print(f"Override reason: {args.reason}")
+        print(f"Blocked decision_id: {blocked_decision.decision_id}")
+        print(f"Override decision_id: {override_decision.decision_id}")
+        print(f"Override ledger id: {override_event.get('override_id')}")
+        print(f"JSON export: {json_path}")
+        print(f"CSV export:  {csv_path}")
+        print(f"Override chain verified: {chain.get('valid')} (checked={chain.get('checked')})")
     return 0
 
 
