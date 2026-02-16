@@ -39,7 +39,8 @@ jobs:
           RELEASEGATE_POSTGRES_DSN: ${{ secrets.RELEASEGATE_POSTGRES_DSN }}
           RELEASEGATE_ROOT_SIGNING_KEY: ${{ secrets.RELEASEGATE_ROOT_SIGNING_KEY }}
           RELEASEGATE_ROOT_KEY_ID: ${{ secrets.RELEASEGATE_ROOT_KEY_ID }}
-          RELEASEGATE_TENANT_ID: ${{ vars.RELEASEGATE_TENANT_ID || 'default' }}
+          # Match the tenant used by PR checks by default; override via repo variable if needed.
+          RELEASEGATE_TENANT_ID: ${{ vars.RELEASEGATE_TENANT_ID || github.repository_owner }}
           DATE_INPUT: ${{ github.event.inputs.date_utc }}
         run: |
           set -euo pipefail

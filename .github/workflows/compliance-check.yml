@@ -30,6 +30,8 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -e .
+          # Needed for Postgres-backed storage (Neon / RDS / etc.)
+          pip install "psycopg2-binary>=2.9.0"
 
       - name: Debug Environment
         run: |
@@ -49,11 +51,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Report-only mode for now
           COMPLIANCEBOT_ENFORCEMENT: report_only
+          # Persist attestations + transparency entries to Postgres so daily roots can be published.
+          RELEASEGATE_STORAGE_BACKEND: postgres
+          RELEASEGATE_POSTGRES_DSN: ${{ secrets.RELEASEGATE_POSTGRES_DSN }}
+          # Fail-closed attestation signing key (Ed25519 private key; PEM or base64/hex raw 32 bytes).
+          RELEASEGATE_SIGNING_KEY: ${{ secrets.RELEASEGATE_SIGNING_KEY }}
         run: |
           echo "Running ReleaseGate analysis for PR #${{ github.event.pull_request.number }}"
           
-          releasegate evaluate \
+          # Use analyze-pr (not evaluate) so we generate + persist signed attestations.
+          releasegate analyze-pr \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --tenant "${{ github.repository_owner }}" \
+            --emit-attestation attestation.json \
             --format json > compliance_report.json
