@@ -406,12 +406,12 @@ export RELEASEGATE_SIGNING_KEY="$(cat /tmp/releasegate_attest_private.pem)"
 
 # 2) create demo decisions and capture a decision_id to export
 DEMO_JSON="$(make demo-json)"
-DECISION_ID="$(printf '%s' "$DEMO_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"blocked_decision_id\"])')"
+DECISION_ID="$(printf '%s' "$DEMO_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)[\"blocked_decision_id\"])')"
 echo "DECISION_ID=$DECISION_ID"
 
 # 3) build deterministic proofpack v1 zip
 OUT_JSON="$(python -m releasegate.cli proofpack --decision-id "$DECISION_ID" --tenant demo --out /tmp/proofpack.zip --format json)"
-ATT_ID="$(printf '%s' "$OUT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"attestation_id\"])')"
+ATT_ID="$(printf '%s' "$OUT_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)[\"attestation_id\"])')"
 echo "ATTESTATION_ID=$ATT_ID"
 
 # 4) offline verification: no server/DB required (only the proofpack + public key)
