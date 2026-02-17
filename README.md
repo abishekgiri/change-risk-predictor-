@@ -209,6 +209,7 @@ Risk metadata is attached to Jira issue properties.
 - Public signing keys are published via root-signed manifests:
   - `/.well-known/releasegate-keys.json`
   - `/.well-known/releasegate-keys.sig`
+  - Alias: `/.well-known/releasegate/keys.json` and `/.well-known/releasegate/keys.sig`
 - Key status semantics are explicit (`ACTIVE`, `DEPRECATED`, `REVOKED`).
 - Transparency log records every attestation issuance in append-only storage.
 - Transparency APIs:
@@ -231,14 +232,21 @@ Risk metadata is attached to Jira issue properties.
 - Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
 - DSSE + in-toto export is available for supply-chain interoperability:
   - CLI: `releasegate analyze-pr --repo ORG/REPO --pr 15 --tenant default --emit-dsse att.dsse.json`
-  - Verify CLI: `releasegate verify-dsse --dsse att.dsse.json --key-file attestation/keys/public.pem`
+  - Optional Sigstore keyless DSSE signing: `--dsse-signing-mode sigstore` (writes `<dsse>.sigstore.bundle.json`)
+  - Verify CLI: `releasegate verify-dsse --dsse att.dsse.json --key-file attestation/keys/public.pem --require-keyid <keyid>`
+  - Verify Sigstore bundle: `releasegate verify-dsse --dsse att.dsse.json --sigstore-bundle <bundle.json> --sigstore-identity <...> --sigstore-issuer <...>`
   - API: `GET /attestations/{attestation_id}.dsse`
   - Top-level DSSE fields:
     - `payloadType: application/vnd.in-toto+json`
-    - `payload` (base64 canonical in-toto Statement)
+    - `payload` (base64 canonical in-toto Statement; JCS/RFC8785 subset)
     - `signatures[{keyid,sig}]`
   - SDK verification:
     - `verify_dsse(envelope, public_keys_by_key_id)`
+  - Optional internal index log:
+    - `releasegate log-dsse --dsse att.dsse.json --log attestations.log`
+    - `releasegate verify-log --dsse att.dsse.json --log attestations.log`
+  - Threat model:
+    - `docs/security/threat-model.md`
 
 ---
 

@@ -84,10 +84,11 @@ jobs:
               json.dump({key_id: public_key}, f)
           PY
           releasegate verify-dsse --dsse releasegate.dsse.json --key-file releasegate.public_keys.json --require-keyid rg-ci-2026-02 --format json
+          releasegate log-dsse --dsse releasegate.dsse.json --log attestations.log --format json
 
       - name: Generate artifact sha256 sums
         run: |
-          sha256sum releasegate.dsse.json attestation.json compliance_report.json > releasegate.artifacts.sha256
+          sha256sum releasegate.dsse.json attestation.json compliance_report.json attestations.log > releasegate.artifacts.sha256
 
       - name: Upload ReleaseGate artifacts
         uses: actions/upload-artifact@v4
@@ -98,3 +99,4 @@ jobs:
             attestation.json
             releasegate.dsse.json
             releasegate.artifacts.sha256
+            attestations.log
