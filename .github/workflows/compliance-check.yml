@@ -56,6 +56,8 @@ jobs:
           RELEASEGATE_POSTGRES_DSN: ${{ secrets.RELEASEGATE_POSTGRES_DSN }}
           # Fail-closed attestation signing key (Ed25519 private key; PEM or base64/hex raw 32 bytes).
           RELEASEGATE_SIGNING_KEY: ${{ secrets.RELEASEGATE_SIGNING_KEY }}
+          # Stable key id for CI-issued attestations (used for DSSE keyid pinning).
+          RELEASEGATE_ATTESTATION_KEY_ID: rg-ci-2026-02
         run: |
           echo "Running ReleaseGate analysis for PR #${{ github.event.pull_request.number }}"
           
@@ -68,6 +70,25 @@ jobs:
             --emit-dsse releasegate.dsse.json \
             --format json > compliance_report.json
 
+      - name: Verify DSSE artifact
+        env:
+          RELEASEGATE_SIGNING_KEY: ${{ secrets.RELEASEGATE_SIGNING_KEY }}
+          RELEASEGATE_ATTESTATION_KEY_ID: rg-ci-2026-02
+        run: |
+          python - <<'PY'
+          import json
+          from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, public_key_pem_from_private
+          key_id = current_key_id()
+          public_key = public_key_pem_from_private(load_private_key_from_env()).strip()
+          with open("releasegate.public_keys.json", "w", encoding="utf-8") as f:
+              json.dump({key_id: public_key}, f)
+          PY
+          releasegate verify-dsse --dsse releasegate.dsse.json --key-file releasegate.public_keys.json --require-keyid rg-ci-2026-02 --format json
+
+      - name: Generate artifact sha256 sums
+        run: |
+          sha256sum releasegate.dsse.json attestation.json compliance_report.json > releasegate.artifacts.sha256
+
       - name: Upload ReleaseGate artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -76,3 +97,4 @@ jobs:
             compliance_report.json
             attestation.json
             releasegate.dsse.json
+            releasegate.artifacts.sha256

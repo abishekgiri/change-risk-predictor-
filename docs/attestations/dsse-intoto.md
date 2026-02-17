@@ -20,7 +20,7 @@ This is **additive** interoperability: it does not change core signing, transpar
 - `predicateType`: `https://releasegate.dev/attestation/v1`
 - `predicate`: the native ReleaseGate attestation JSON
 - `subject[0]`:
-  - `name`: `<repo>@<commit_sha>`
+  - `name`: `git+https://github.com/<repo>@<commit_sha>`
   - `digest.sha256`: derived from `predicate.signature.signed_payload_hash`
 
 ## Generate DSSE
@@ -40,13 +40,14 @@ You need the trusted public key material (single PEM, or a key-id map).
 ```bash
 releasegate verify-dsse \
   --dsse releasegate.dsse.json \
-  --key-file attestation/keys/public.pem
+  --key-file attestation/keys/public.pem \
+  --require-keyid "<keyid>"
 ```
 
 Exit codes:
 
 - `0`: verified
-- `2`: signature invalid or key id unknown
+- `2`: signature invalid, key id unknown, or key id does not match `--require-keyid`
 - `3`: invalid file/envelope format
 
 ## Public Key Distribution
@@ -64,3 +65,9 @@ For offline-only demos, `attestation/keys/public.pem` can be used as the pinned 
 
 - `signed_payload_hash`: `sha256:<hex>`
 - `attestation_id`: `<hex>` (64 lowercase hex chars)
+
+## Compatibility Notes
+
+- `proofpack_v1` does not embed DSSE envelopes by design; it has a fixed file contract.
+- DSSE is distributed as a parallel artifact (for example `releasegate.dsse.json`).
+- The DSSE + in-toto contract is intended to remain stable across minor versions.
