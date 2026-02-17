@@ -160,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_dsse_p.add_argument("--format", default="text", choices=["text", "json"])
     verify_dsse_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
     verify_dsse_p.add_argument("--key", dest="key_file", help="Alias for --key-file")
+    verify_dsse_p.add_argument("--require-keyid", help="Require DSSE signature keyid to match this value")
 
     proofpack_v1_p = sub.add_parser(
         "proofpack",
@@ -1145,6 +1146,7 @@ def main() -> int:
     if args.cmd == "verify-dsse":
         from releasegate.attestation.crypto import load_public_keys_map
         from releasegate.attestation.dsse import verify_dsse
+        from releasegate.attestation.intoto import PREDICATE_TYPE_RELEASEGATE_V1, STATEMENT_TYPE_V1
 
         try:
             with open(args.dsse, "r", encoding="utf-8") as f:
@@ -1164,16 +1166,120 @@ def main() -> int:
                 print(f"error_message: {payload['error_message']}")
             return 3
 
-        key_map = load_public_keys_map(key_file=args.key_file)
-        valid, statement, error = verify_dsse(envelope, key_map)
-
         key_id = None
         signatures = envelope.get("signatures") if isinstance(envelope, dict) else None
         if isinstance(signatures, list) and signatures and isinstance(signatures[0], dict):
-            key_id = signatures[0].get("keyid")
+            key_id = str(signatures[0].get("keyid") or "").strip() or None
+
+        require_key_id = str(getattr(args, "require_keyid", "") or "").strip() or None
+        if require_key_id and str(key_id or "") != require_key_id:
+            report = {
+                "ok": False,
+                "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                "key_id": key_id,
+                "error_code": "KEYID_PIN_MISMATCH",
+            }
+            if args.format == "json":
+                print(json.dumps(report, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {report['error_code']}")
+                if report.get("payload_type") is not None:
+                    print(f"payloadType: {report.get('payload_type')}")
+                if report.get("key_id") is not None:
+                    print(f"keyid: {report.get('key_id')}")
+            return 2
+
+        key_map = None
+        if args.key_file:
+            try:
+                key_text = open(args.key_file, "r", encoding="utf-8").read().strip()
+            except Exception as exc:
+                payload = {
+                    "ok": False,
+                    "error_code": "KEY_FILE_INVALID",
+                    "error_message": str(exc),
+                    "file": args.key_file,
+                }
+                if args.format == "json":
+                    print(json.dumps(payload, indent=2))
+                else:
+                    print("verification: FAIL")
+                    print(f"error_code: {payload['error_code']}")
+                    print(f"error_message: {payload['error_message']}")
+                return 3
+
+            if key_text.startswith("{"):
+                try:
+                    parsed = json.loads(key_text)
+                except Exception as exc:
+                    payload = {
+                        "ok": False,
+                        "error_code": "KEY_MAP_INVALID",
+                        "error_message": str(exc),
+                        "file": args.key_file,
+                    }
+                    if args.format == "json":
+                        print(json.dumps(payload, indent=2))
+                    else:
+                        print("verification: FAIL")
+                        print(f"error_code: {payload['error_code']}")
+                        print(f"error_message: {payload['error_message']}")
+                    return 3
+                if not isinstance(parsed, dict):
+                    payload = {
+                        "ok": False,
+                        "error_code": "KEY_MAP_INVALID",
+                        "error_message": "key map must be a JSON object",
+                        "file": args.key_file,
+                    }
+                    if args.format == "json":
+                        print(json.dumps(payload, indent=2))
+                    else:
+                        print("verification: FAIL")
+                        print(f"error_code: {payload['error_code']}")
+                        print(f"error_message: {payload['error_message']}")
+                    return 3
+                key_map = {str(k): str(v).strip() for k, v in parsed.items() if isinstance(v, str) and v.strip()}
+                if key_id and key_id not in key_map:
+                    report = {
+                        "ok": False,
+                        "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                        "key_id": key_id,
+                        "error_code": "KEYID_NOT_FOUND",
+                    }
+                    if args.format == "json":
+                        print(json.dumps(report, indent=2))
+                    else:
+                        print("verification: FAIL")
+                        print(f"error_code: {report['error_code']}")
+                        if report.get("payload_type") is not None:
+                            print(f"payloadType: {report.get('payload_type')}")
+                        if report.get("key_id") is not None:
+                            print(f"keyid: {report.get('key_id')}")
+                    return 2
+            else:
+                if not key_id:
+                    report = {
+                        "ok": False,
+                        "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                        "key_id": None,
+                        "error_code": "MISSING_KEY_ID",
+                    }
+                    if args.format == "json":
+                        print(json.dumps(report, indent=2))
+                    else:
+                        print("verification: FAIL")
+                        print(f"error_code: {report.get('error_code')}")
+                    return 3
+                key_map = {str(key_id): key_text}
+        else:
+            key_map = load_public_keys_map(key_file=None)
+
+        valid, statement, error = verify_dsse(envelope, key_map)
 
         report: dict = {
-            "ok": bool(valid),
+            "ok": False,
             "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
             "key_id": key_id,
             "error_code": error,
@@ -1184,6 +1290,11 @@ def main() -> int:
         predicate_type = None
         statement_type = None
         attestation_id = None
+        conformance_errors: list[str] = []
+        predicate = None
+        predicate_repo = ""
+        predicate_commit_sha = ""
+        signed_payload_hash = ""
 
         if isinstance(statement, dict):
             statement_type = statement.get("_type")
@@ -1196,7 +1307,13 @@ def main() -> int:
                     subject_digest_sha256 = digest.get("sha256")
 
             predicate = statement.get("predicate") if isinstance(statement.get("predicate"), dict) else None
-            if isinstance(predicate, dict):
+            if not isinstance(predicate, dict):
+                conformance_errors.append("PREDICATE_MISSING")
+            else:
+                predicate_subject = predicate.get("subject") if isinstance(predicate.get("subject"), dict) else {}
+                predicate_repo = str(predicate_subject.get("repo") or "").strip()
+                predicate_commit_sha = str(predicate_subject.get("commit_sha") or "").strip()
+
                 signature = predicate.get("signature") if isinstance(predicate.get("signature"), dict) else {}
                 signed_payload_hash = str(signature.get("signed_payload_hash") or "").strip()
                 if signed_payload_hash:
@@ -1206,6 +1323,33 @@ def main() -> int:
                     if len(signed_payload_hash) == 64:
                         attestation_id = signed_payload_hash
 
+            if statement_type != STATEMENT_TYPE_V1:
+                conformance_errors.append("STATEMENT_TYPE_MISMATCH")
+            if predicate_type != PREDICATE_TYPE_RELEASEGATE_V1:
+                conformance_errors.append("PREDICATE_TYPE_MISMATCH")
+            if not (isinstance(subject, list) and subject and isinstance(subject[0], dict)):
+                conformance_errors.append("SUBJECT_MISSING")
+            else:
+                if predicate_repo and predicate_commit_sha:
+                    expected_subject_name = f"git+https://github.com/{predicate_repo}@{predicate_commit_sha}"
+                    if subject_name != expected_subject_name:
+                        conformance_errors.append("SUBJECT_NAME_MISMATCH")
+                else:
+                    conformance_errors.append("PREDICATE_SUBJECT_MISSING")
+
+                if not signed_payload_hash:
+                    conformance_errors.append("SIGNED_PAYLOAD_HASH_MISSING")
+                elif len(str(signed_payload_hash)) != 64:
+                    conformance_errors.append("SIGNED_PAYLOAD_HASH_INVALID")
+
+                if not attestation_id:
+                    conformance_errors.append("ATTESTATION_ID_MISSING")
+                if not subject_digest_sha256:
+                    conformance_errors.append("SUBJECT_DIGEST_MISSING")
+                if attestation_id and subject_digest_sha256:
+                    if str(subject_digest_sha256).strip().lower() != attestation_id:
+                        conformance_errors.append("SUBJECT_DIGEST_MISMATCH")
+
         report.update(
             {
                 "statement_type": statement_type,
@@ -1213,8 +1357,15 @@ def main() -> int:
                 "subject_name": subject_name,
                 "subject_digest_sha256": subject_digest_sha256,
                 "attestation_id": attestation_id,
+                "errors": ([str(error)] if error else []) + conformance_errors,
             }
         )
+
+        report["ok"] = bool(valid and not error and not conformance_errors)
+        if report["ok"] is True:
+            report["error_code"] = None
+        elif report.get("error_code") is None and conformance_errors:
+            report["error_code"] = conformance_errors[0]
 
         if args.format == "json":
             print(json.dumps(report, indent=2))
@@ -1242,7 +1393,13 @@ def main() -> int:
             return 0
 
         # Distinguish format errors from signature/key failures.
-        verification_errors = {"SIGNATURE_INVALID", "UNKNOWN_KEY_ID"}
+        verification_errors = {
+            "SIGNATURE_INVALID",
+            "UNKNOWN_KEY_ID",
+            "SIGNATURE_LEN_INVALID",
+            "KEYID_PIN_MISMATCH",
+            "KEYID_NOT_FOUND",
+        }
         return 2 if str(report.get("error_code") or "") in verification_errors else 3
 
     if args.cmd == "proofpack":

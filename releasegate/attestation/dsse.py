@@ -83,6 +83,8 @@ def verify_dsse(
         signature = base64.b64decode(signature_b64.encode("ascii"), validate=True)
     except Exception:
         return False, None, "INVALID_SIGNATURE_BASE64"
+    if len(signature) != 64:
+        return False, None, "SIGNATURE_LEN_INVALID"
 
     try:
         public_key.verify(signature, payload_bytes)
@@ -97,4 +99,3 @@ def verify_dsse(
         return False, None, "PAYLOAD_NOT_OBJECT"
 
     return True, payload_json, None
-
