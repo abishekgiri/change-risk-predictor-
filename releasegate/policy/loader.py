@@ -1,12 +1,12 @@
 import os
 import yaml
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Union, Optional
 from .types import PolicyDef
 from .policy_types import Policy
 from .inheritance import resolve_policy_inheritance
 
-from releasegate.utils.paths import safe_join_under
+from releasegate.utils.paths import UnsafePathError, safe_join_under
 
 class PolicyLoader:
     def __init__(self, policy_dir: Optional[str] = None, schema: str = "def", strict: bool = True):
@@ -25,7 +25,15 @@ class PolicyLoader:
         """
         policies = []
         
-        policy_base = Path(self.policy_dir).resolve(strict=False)
+        policy_dir_norm = str(self.policy_dir).replace("\\", "/")
+        parts = PurePosixPath(policy_dir_norm).parts
+        if ".." in parts:
+            if self.strict:
+                raise ValueError(f"Invalid policy directory (path traversal): {self.policy_dir}")
+            return []
+
+        policy_base = Path(policy_dir_norm).resolve(strict=False)
+
         if not policy_base.exists():
             if self.strict:
                 raise FileNotFoundError(f"Policy directory not found: {policy_base}")
@@ -46,7 +54,7 @@ class PolicyLoader:
                         continue
                     try:
                         full_path = safe_join_under(policy_base, rel_root, file)
-                    except ValueError as e:
+                    except UnsafePathError as e:
                         if self.strict:
                             raise ValueError(f"Policy path escapes base directory: {e}") from e
                         import sys

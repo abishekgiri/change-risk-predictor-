@@ -1,10 +1,49 @@
 from __future__ import annotations
 
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 from typing import Union
 
 
 PathLike = Union[str, Path]
+
+
+class UnsafePathError(ValueError):
+    """Raised when a path would escape its intended base directory."""
+
+
+_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:$")
+
+
+def _iter_safe_segments(part: PathLike) -> list[str]:
+    """
+    Split a user-provided path part into safe segments.
+
+    We treat both "/" and "\\" as separators and reject:
+    - absolute paths
+    - ".." traversal
+    - Windows drive roots like "C:"
+
+    "." / empty are treated as no-ops (common from Path.relative_to()).
+    """
+    raw = str(part).strip()
+    if raw in ("", "."):
+        return []
+
+    raw = raw.replace("\\", "/")
+    p = PurePosixPath(raw)
+
+    if p.is_absolute():
+        raise UnsafePathError("Absolute paths are not allowed.")
+
+    segments = list(p.parts)
+    for seg in segments:
+        if seg == "..":
+            raise UnsafePathError("Path traversal ('..') is not allowed.")
+        if _WIN_DRIVE_RE.match(seg):
+            raise UnsafePathError("Windows drive paths are not allowed.")
+
+    return segments
 
 
 def safe_join_under(base: PathLike, *parts: PathLike) -> Path:
@@ -21,13 +60,18 @@ def safe_join_under(base: PathLike, *parts: PathLike) -> Path:
       but is sufficient for typical config/policy file loading.
     """
     base_path = Path(base).resolve(strict=False)
-    candidate = base_path.joinpath(*parts)
+
+    safe_segments: list[str] = []
+    for part in parts:
+        safe_segments.extend(_iter_safe_segments(part))
+
+    candidate = base_path.joinpath(*safe_segments)
     resolved = candidate.resolve(strict=False)
 
     try:
         resolved.relative_to(base_path)
     except Exception as exc:  # ValueError on 3.9; keep broad for safety.
-        raise ValueError(f"Path escapes base directory: {resolved}") from exc
+        raise UnsafePathError(f"Path escapes base directory: {resolved}") from exc
 
     return resolved
 
