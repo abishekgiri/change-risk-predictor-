@@ -6,8 +6,21 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, load_public_keys_map
-from releasegate.attestation.dsse import DSSE_PAYLOAD_TYPE, verify_dsse, wrap_dsse
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from releasegate.attestation.crypto import (
+    current_key_id,
+    load_private_key_from_env,
+    load_public_keys_map,
+    public_key_pem_from_private,
+)
+from releasegate.attestation.dsse import (
+    DSSE_PAYLOAD_TYPE,
+    verify_dsse,
+    verify_dsse_signatures,
+    wrap_dsse,
+    wrap_dsse_multi,
+)
 from releasegate.attestation.intoto import (
     PREDICATE_TYPE_RELEASEGATE_V1,
     STATEMENT_TYPE_V1,
@@ -170,6 +183,27 @@ def test_dsse_signature_length_invalid_is_rejected():
     assert valid is False
     assert decoded is None
     assert error == "SIGNATURE_LEN_INVALID"
+
+
+def test_dsse_multi_signature_verify_all_passes():
+    attestation = _sample_attestation()
+    statement = build_intoto_statement(attestation)
+
+    key1 = load_private_key_from_env()
+    key2 = Ed25519PrivateKey.generate()
+    kid1 = current_key_id()
+    kid2 = "rg-test-secondary"
+
+    envelope = wrap_dsse_multi(statement, signers=[(kid1, key1), (kid2, key2)])
+    key_map = {
+        kid1: public_key_pem_from_private(key1),
+        kid2: public_key_pem_from_private(key2),
+    }
+
+    decoded, results, error = verify_dsse_signatures(envelope, key_map)
+    assert error is None
+    assert decoded == statement
+    assert {r.get("keyid") for r in results if r.get("ok")} == {kid1, kid2}
 
 
 def test_dsse_export_endpoint_returns_signed_envelope(clean_db):

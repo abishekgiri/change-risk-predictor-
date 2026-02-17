@@ -10,7 +10,9 @@ from releasegate.attestation.crypto import (
     load_private_key_from_env,
     public_key_pem_from_private,
 )
-from releasegate.attestation.dsse import wrap_dsse
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from releasegate.attestation.dsse import wrap_dsse, wrap_dsse_multi
 from releasegate.attestation.intoto import build_intoto_statement
 from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_analysis_result
 from releasegate.cli import main
@@ -192,3 +194,40 @@ def test_verify_dsse_cli_keymap_missing_keyid_fails(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert payload["error_code"] == "KEYID_NOT_FOUND"
+
+
+def test_verify_dsse_cli_requires_multiple_signers(monkeypatch, tmp_path, capsys):
+    envelope = _sample_dsse_envelope()
+    statement = json.loads(base64.b64decode(envelope["payload"].encode("ascii"), validate=True).decode("utf-8"))
+
+    key1 = load_private_key_from_env()
+    key2 = Ed25519PrivateKey.generate()
+    kid1 = current_key_id()
+    kid2 = "rg-test-secondary"
+
+    envelope = wrap_dsse_multi(statement, signers=[(kid1, key1), (kid2, key2)])
+    dsse_path = tmp_path / "env.dsse.json"
+    dsse_path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    keys_path = tmp_path / "keys.json"
+    keys_path.write_text(
+        json.dumps({kid1: public_key_pem_from_private(key1), kid2: public_key_pem_from_private(key2)}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "releasegate",
+            "verify-dsse",
+            "--dsse",
+            str(dsse_path),
+            "--key-file",
+            str(keys_path),
+            "--require-signers",
+            f"{kid1},{kid2}",
+            "--format",
+            "json",
+        ],
+    )
+    assert main() == 0

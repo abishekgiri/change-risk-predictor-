@@ -3,9 +3,28 @@ import sys
 import os
 import json
 import yaml
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from releasegate.storage.base import resolve_tenant_id
+
+def _parse_age_seconds(value: str) -> int:
+    """
+    Parses a compact duration like '30s', '10m', '12h', '7d' into seconds.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        raise ValueError("duration is empty")
+    unit = text[-1]
+    num = text[:-1]
+    if unit not in {"s", "m", "h", "d"}:
+        raise ValueError("duration must end with s/m/h/d")
+    if not num.isdigit():
+        raise ValueError("duration must start with an integer")
+    n = int(num)
+    if n <= 0:
+        raise ValueError("duration must be > 0")
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return n * mult
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="releasegate")
@@ -24,6 +43,16 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_p.add_argument("--tenant", help="Tenant/org identifier for attestation metadata")
     analyze_p.add_argument("--emit-attestation", help="Write signed release attestation JSON to file")
     analyze_p.add_argument("--emit-dsse", help="Write DSSE wrapped in-toto statement JSON to file")
+    analyze_p.add_argument(
+        "--dsse-signing-mode",
+        default="ed25519",
+        choices=["ed25519", "sigstore"],
+        help="How to sign the DSSE payload (default: ed25519). Sigstore mode uses cosign to produce a bundle.",
+    )
+    analyze_p.add_argument(
+        "--dsse-sigstore-bundle",
+        help="Output path for Sigstore bundle JSON when --dsse-signing-mode=sigstore (default: <emit-dsse>.sigstore.bundle.json)",
+    )
 
     eval_p = sub.add_parser("evaluate", help="Evaluate policies for a change (PR/release).")
     eval_p.add_argument("--repo", required=True)
@@ -160,7 +189,43 @@ def build_parser() -> argparse.ArgumentParser:
     verify_dsse_p.add_argument("--format", default="text", choices=["text", "json"])
     verify_dsse_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
     verify_dsse_p.add_argument("--key", dest="key_file", help="Alias for --key-file")
+    verify_dsse_p.add_argument("--keys-url", help="Fetch public key map from an HTTP endpoint (optional)")
     verify_dsse_p.add_argument("--require-keyid", help="Require DSSE signature keyid to match this value")
+    verify_dsse_p.add_argument(
+        "--require-signers",
+        help="Comma-separated list of key ids that must have valid signatures in the envelope",
+    )
+    verify_dsse_p.add_argument("--max-age", help="Require attestation issued_at to be newer than this (e.g. 7d, 12h)")
+    verify_dsse_p.add_argument("--require-repo", help="Require predicate.subject.repo to match this value")
+    verify_dsse_p.add_argument("--require-commit", help="Require predicate.subject.commit_sha to match this value")
+    verify_dsse_p.add_argument(
+        "--sigstore-bundle",
+        help="Verify DSSE payload using a Sigstore bundle (cosign bundle JSON) instead of an Ed25519 key map.",
+    )
+    verify_dsse_p.add_argument(
+        "--sigstore-identity",
+        help="Expected certificate identity for Sigstore verification (cosign --certificate-identity).",
+    )
+    verify_dsse_p.add_argument(
+        "--sigstore-issuer",
+        help="Expected OIDC issuer for Sigstore verification (cosign --certificate-oidc-issuer).",
+    )
+
+    log_dsse_p = sub.add_parser(
+        "log-dsse",
+        help="Append a DSSE envelope summary line to an append-only JSONL log.",
+    )
+    log_dsse_p.add_argument("--dsse", required=True, help="Path to DSSE JSON envelope")
+    log_dsse_p.add_argument("--log", required=True, help="Path to attestations.log JSONL file")
+    log_dsse_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    verify_log_p = sub.add_parser(
+        "verify-log",
+        help="Verify that a DSSE envelope matches an entry in an attestations.log JSONL file.",
+    )
+    verify_log_p.add_argument("--dsse", required=True, help="Path to DSSE JSON envelope")
+    verify_log_p.add_argument("--log", required=True, help="Path to attestations.log JSONL file")
+    verify_log_p.add_argument("--format", default="json", choices=["json", "text"])
 
     proofpack_v1_p = sub.add_parser(
         "proofpack",
@@ -382,6 +447,38 @@ def main() -> int:
                 or "1970-01-01T00:00:00Z"
             )
 
+            signals_payload: dict = {
+                "metrics": {
+                    "changed_files_count": metrics.changed_files,
+                    "additions": metrics.additions,
+                    "deletions": metrics.deletions,
+                    "total_churn": metrics.total_churn,
+                },
+                "dependency_provenance": dependency_provenance,
+            }
+
+            if str(os.getenv("GITHUB_ACTIONS") or "").lower() == "true":
+                source_ref = str(os.getenv("GITHUB_REF") or "").strip()
+                if source_ref:
+                    signals_payload["source_ref"] = source_ref
+                workflow_run = {
+                    k: v
+                    for k, v in {
+                        "provider": "github-actions",
+                        "repository": str(os.getenv("GITHUB_REPOSITORY") or "").strip(),
+                        "workflow": str(os.getenv("GITHUB_WORKFLOW") or "").strip(),
+                        "run_id": str(os.getenv("GITHUB_RUN_ID") or "").strip(),
+                        "run_attempt": str(os.getenv("GITHUB_RUN_ATTEMPT") or "").strip(),
+                        "actor": str(os.getenv("GITHUB_ACTOR") or "").strip(),
+                        "job": str(os.getenv("GITHUB_JOB") or "").strip(),
+                        "ref": str(os.getenv("GITHUB_REF") or "").strip(),
+                        "sha": str(os.getenv("GITHUB_SHA") or "").strip(),
+                    }.items()
+                    if v
+                }
+                if workflow_run:
+                    signals_payload["workflow_run"] = workflow_run
+
             bundle = build_bundle_from_analysis_result(
                 tenant_id=tenant_id,
                 repo=args.repo,
@@ -393,15 +490,7 @@ def main() -> int:
                 risk_score=float(risk_score),
                 decision=decision,
                 reason_codes=reason_codes or reasons,
-                signals={
-                    "metrics": {
-                        "changed_files_count": metrics.changed_files,
-                        "additions": metrics.additions,
-                        "deletions": metrics.deletions,
-                        "total_churn": metrics.total_churn,
-                    },
-                    "dependency_provenance": dependency_provenance,
-                },
+                signals=signals_payload,
                 engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
                 timestamp=bundle_timestamp,
                 policy_scope=policy_scope,
@@ -425,11 +514,21 @@ def main() -> int:
                     json.dump(attestation, f, indent=2)
             if args.emit_dsse:
                 statement = build_intoto_statement(attestation)
-                dsse_envelope = wrap_dsse(
-                    statement,
-                    signing_key=load_private_key_from_env(),
-                    key_id=current_key_id(),
-                )
+                dsse_mode = str(getattr(args, "dsse_signing_mode", "") or "ed25519").strip().lower()
+                if dsse_mode == "sigstore":
+                    from releasegate.attestation.dsse import wrap_dsse_sigstore
+
+                    bundle_out = str(getattr(args, "dsse_sigstore_bundle", "") or "").strip()
+                    if not bundle_out:
+                        bundle_out = f"{args.emit_dsse}.sigstore.bundle.json"
+                    dsse_envelope = wrap_dsse_sigstore(statement, bundle_path=bundle_out)
+                    output["dsse_sigstore_bundle"] = bundle_out
+                else:
+                    dsse_envelope = wrap_dsse(
+                        statement,
+                        signing_key=load_private_key_from_env(),
+                        key_id=current_key_id(),
+                    )
                 with open(args.emit_dsse, "w", encoding="utf-8") as f:
                     json.dump(dsse_envelope, f, indent=2)
         except Exception as e:
@@ -1145,7 +1244,7 @@ def main() -> int:
 
     if args.cmd == "verify-dsse":
         from releasegate.attestation.crypto import load_public_keys_map
-        from releasegate.attestation.dsse import verify_dsse
+        from releasegate.attestation.dsse import verify_dsse_signatures
         from releasegate.attestation.intoto import PREDICATE_TYPE_RELEASEGATE_V1, STATEMENT_TYPE_V1
 
         try:
@@ -1167,12 +1266,19 @@ def main() -> int:
             return 3
 
         key_id = None
+        signature_key_ids: list[str] = []
         signatures = envelope.get("signatures") if isinstance(envelope, dict) else None
-        if isinstance(signatures, list) and signatures and isinstance(signatures[0], dict):
-            key_id = str(signatures[0].get("keyid") or "").strip() or None
+        if isinstance(signatures, list):
+            for entry in signatures:
+                if isinstance(entry, dict):
+                    kid = str(entry.get("keyid") or "").strip()
+                    if kid:
+                        signature_key_ids.append(kid)
+        if signature_key_ids:
+            key_id = signature_key_ids[0]
 
         require_key_id = str(getattr(args, "require_keyid", "") or "").strip() or None
-        if require_key_id and str(key_id or "") != require_key_id:
+        if require_key_id and require_key_id not in signature_key_ids:
             report = {
                 "ok": False,
                 "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
@@ -1190,8 +1296,46 @@ def main() -> int:
                     print(f"keyid: {report.get('key_id')}")
             return 2
 
+        require_signers_raw = str(getattr(args, "require_signers", "") or "").strip()
+        require_signers = [s.strip() for s in require_signers_raw.split(",") if s.strip()] if require_signers_raw else []
+        missing_required = [s for s in require_signers if s not in signature_key_ids]
+        if missing_required:
+            report = {
+                "ok": False,
+                "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                "key_id": key_id,
+                "error_code": "SIGNERS_MISSING",
+                "missing_signers": missing_required,
+            }
+            if args.format == "json":
+                print(json.dumps(report, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {report['error_code']}")
+                print(f"missing_signers: {', '.join(missing_required)}")
+            return 2
+
         key_map = None
-        if args.key_file:
+        if getattr(args, "sigstore_bundle", None):
+            from releasegate.attestation.dsse import verify_dsse_sigstore
+
+            sig_ok, statement, error = verify_dsse_sigstore(
+                envelope,
+                bundle_path=str(args.sigstore_bundle),
+                certificate_identity=str(getattr(args, "sigstore_identity", "") or "").strip() or None,
+                certificate_oidc_issuer=str(getattr(args, "sigstore_issuer", "") or "").strip() or None,
+            )
+            signature_results = [
+                {
+                    "keyid": key_id,
+                    "ok": bool(sig_ok),
+                    "error_code": (error if not sig_ok else None),
+                }
+            ]
+            valid_key_ids = [str(key_id)] if sig_ok and key_id else []
+            signature_ok = bool(valid_key_ids) and not error
+            # If Sigstore verification is selected, skip Ed25519 key-map verification.
+        elif args.key_file:
             try:
                 key_text = open(args.key_file, "r", encoding="utf-8").read().strip()
             except Exception as exc:
@@ -1241,6 +1385,22 @@ def main() -> int:
                         print(f"error_message: {payload['error_message']}")
                     return 3
                 key_map = {str(k): str(v).strip() for k, v in parsed.items() if isinstance(v, str) and v.strip()}
+                for required in [require_key_id] + require_signers:
+                    if required and required not in key_map:
+                        report = {
+                            "ok": False,
+                            "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                            "key_id": key_id,
+                            "error_code": "KEYID_NOT_FOUND",
+                            "missing_key_id": required,
+                        }
+                        if args.format == "json":
+                            print(json.dumps(report, indent=2))
+                        else:
+                            print("verification: FAIL")
+                            print(f"error_code: {report['error_code']}")
+                            print(f"missing_key_id: {required}")
+                        return 2
                 if key_id and key_id not in key_map:
                     report = {
                         "ok": False,
@@ -1273,16 +1433,104 @@ def main() -> int:
                         print(f"error_code: {report.get('error_code')}")
                     return 3
                 key_map = {str(key_id): key_text}
+        elif getattr(args, "keys_url", None):
+            import requests
+
+            try:
+                resp = requests.get(str(args.keys_url), timeout=10)
+                resp.raise_for_status()
+                payload = resp.json()
+            except Exception as exc:
+                error_payload = {
+                    "ok": False,
+                    "error_code": "KEY_URL_INVALID",
+                    "error_message": str(exc),
+                    "url": str(args.keys_url),
+                }
+                if args.format == "json":
+                    print(json.dumps(error_payload, indent=2))
+                else:
+                    print("verification: FAIL")
+                    print(f"error_code: {error_payload['error_code']}")
+                    print(f"error_message: {error_payload['error_message']}")
+                return 3
+
+            candidate_map: dict = {}
+            if isinstance(payload, dict):
+                public_map = payload.get("public_keys_by_key_id")
+                if isinstance(public_map, dict):
+                    candidate_map = {str(k): str(v).strip() for k, v in public_map.items() if isinstance(v, str) and v.strip()}
+                elif isinstance(payload.get("keys"), list):
+                    for entry in payload.get("keys") or []:
+                        if not isinstance(entry, dict):
+                            continue
+                        kid = str(entry.get("key_id") or entry.get("kid") or "").strip()
+                        pem = str(entry.get("public_key_pem") or entry.get("public_key") or entry.get("pem") or "").strip()
+                        if kid and pem:
+                            candidate_map[kid] = pem
+                elif payload and all(isinstance(v, str) for v in payload.values()):
+                    candidate_map = {str(k): str(v).strip() for k, v in payload.items() if isinstance(v, str) and v.strip()}
+
+            if not candidate_map:
+                error_payload = {
+                    "ok": False,
+                    "error_code": "KEY_URL_EMPTY",
+                    "url": str(args.keys_url),
+                }
+                if args.format == "json":
+                    print(json.dumps(error_payload, indent=2))
+                else:
+                    print("verification: FAIL")
+                    print(f"error_code: {error_payload['error_code']}")
+                return 3
+
+            key_map = candidate_map
+            for required in [require_key_id] + require_signers:
+                if required and required not in key_map:
+                    report = {
+                        "ok": False,
+                        "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+                        "key_id": key_id,
+                        "error_code": "KEYID_NOT_FOUND",
+                        "missing_key_id": required,
+                    }
+                    if args.format == "json":
+                        print(json.dumps(report, indent=2))
+                    else:
+                        print("verification: FAIL")
+                        print(f"error_code: {report['error_code']}")
+                        print(f"missing_key_id: {required}")
+                    return 2
         else:
             key_map = load_public_keys_map(key_file=None)
 
-        valid, statement, error = verify_dsse(envelope, key_map)
+        if getattr(args, "sigstore_bundle", None):
+            # Sigstore branch already computed statement/signature_results/signature_ok above.
+            pass
+        else:
+            statement, signature_results, error = verify_dsse_signatures(envelope, key_map)
+            valid_key_ids = [
+                str(entry.get("keyid") or "")
+                for entry in (signature_results or [])
+                if isinstance(entry, dict) and entry.get("ok") is True and str(entry.get("keyid") or "").strip()
+            ]
+            signature_ok = bool(valid_key_ids) and not error
+        if require_key_id and require_key_id not in valid_key_ids:
+            signature_ok = False
+            error = "REQUIRED_KEYID_INVALID"
+        if signature_ok and require_signers:
+            missing_valid = [s for s in require_signers if s not in valid_key_ids]
+            if missing_valid:
+                signature_ok = False
+                error = "REQUIRED_SIGNER_INVALID"
 
         report: dict = {
             "ok": False,
             "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
             "key_id": key_id,
             "error_code": error,
+            "key_ids": signature_key_ids,
+            "valid_key_ids": valid_key_ids,
         }
 
         subject_name = None
@@ -1295,6 +1543,7 @@ def main() -> int:
         predicate_repo = ""
         predicate_commit_sha = ""
         signed_payload_hash = ""
+        predicate_issued_at = ""
 
         if isinstance(statement, dict):
             statement_type = statement.get("_type")
@@ -1316,6 +1565,7 @@ def main() -> int:
 
                 signature = predicate.get("signature") if isinstance(predicate.get("signature"), dict) else {}
                 signed_payload_hash = str(signature.get("signed_payload_hash") or "").strip()
+                predicate_issued_at = str(predicate.get("issued_at") or "").strip()
                 if signed_payload_hash:
                     if ":" in signed_payload_hash:
                         signed_payload_hash = signed_payload_hash.split(":", 1)[1]
@@ -1336,6 +1586,46 @@ def main() -> int:
                         conformance_errors.append("SUBJECT_NAME_MISMATCH")
                 else:
                     conformance_errors.append("PREDICATE_SUBJECT_MISSING")
+
+                require_repo = str(getattr(args, "require_repo", "") or "").strip()
+                if require_repo:
+                    if not predicate_repo:
+                        conformance_errors.append("REPO_MISSING")
+                    elif predicate_repo != require_repo:
+                        conformance_errors.append("REPO_MISMATCH")
+
+                require_commit = str(getattr(args, "require_commit", "") or "").strip()
+                if require_commit:
+                    if not predicate_commit_sha:
+                        conformance_errors.append("COMMIT_MISSING")
+                    elif predicate_commit_sha != require_commit:
+                        conformance_errors.append("COMMIT_MISMATCH")
+
+                max_age_raw = str(getattr(args, "max_age", "") or "").strip()
+                if max_age_raw:
+                    try:
+                        max_age_seconds = _parse_age_seconds(max_age_raw)
+                    except Exception:
+                        conformance_errors.append("MAX_AGE_INVALID")
+                    else:
+                        issued_raw = str(predicate_issued_at or "").strip()
+                        if not issued_raw:
+                            conformance_errors.append("ISSUED_AT_MISSING")
+                        else:
+                            ts = issued_raw
+                            if ts.endswith("Z"):
+                                ts = f"{ts[:-1]}+00:00"
+                            try:
+                                issued_dt = datetime.fromisoformat(ts)
+                                if issued_dt.tzinfo is None:
+                                    issued_dt = issued_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    issued_dt = issued_dt.astimezone(timezone.utc)
+                            except Exception:
+                                conformance_errors.append("ISSUED_AT_INVALID")
+                            else:
+                                if datetime.now(timezone.utc) - issued_dt > timedelta(seconds=max_age_seconds):
+                                    conformance_errors.append("ATTESTATION_TOO_OLD")
 
                 if not signed_payload_hash:
                     conformance_errors.append("SIGNED_PAYLOAD_HASH_MISSING")
@@ -1361,7 +1651,7 @@ def main() -> int:
             }
         )
 
-        report["ok"] = bool(valid and not error and not conformance_errors)
+        report["ok"] = bool(signature_ok and not error and not conformance_errors)
         if report["ok"] is True:
             report["error_code"] = None
         elif report.get("error_code") is None and conformance_errors:
@@ -1399,8 +1689,138 @@ def main() -> int:
             "SIGNATURE_LEN_INVALID",
             "KEYID_PIN_MISMATCH",
             "KEYID_NOT_FOUND",
+            "REQUIRED_KEYID_INVALID",
+            "REQUIRED_SIGNER_INVALID",
+            "SIGNERS_MISSING",
+            "SIGSTORE_SIGNATURE_INVALID",
         }
         return 2 if str(report.get("error_code") or "") in verification_errors else 3
+
+    if args.cmd == "log-dsse":
+        import base64
+
+        from releasegate.audit.attestation_index import (
+            append_attestation_index_entry,
+            build_attestation_index_entry,
+        )
+
+        try:
+            envelope = json.load(open(args.dsse, "r", encoding="utf-8"))
+        except Exception as exc:
+            payload = {"ok": False, "error_code": "DSSE_FILE_INVALID", "error_message": str(exc)}
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print("log: FAIL")
+                print(f"error_code: {payload['error_code']}")
+                print(f"error_message: {payload['error_message']}")
+            return 3
+
+        try:
+            payload_bytes = base64.b64decode(str(envelope.get("payload") or "").encode("ascii"), validate=True)
+            statement = json.loads(payload_bytes.decode("utf-8"))
+            if not isinstance(statement, dict):
+                raise ValueError("payload must decode to a JSON object")
+        except Exception as exc:
+            payload = {"ok": False, "error_code": "DSSE_PAYLOAD_INVALID", "error_message": str(exc)}
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print("log: FAIL")
+                print(f"error_code: {payload['error_code']}")
+                print(f"error_message: {payload['error_message']}")
+            return 3
+
+        entry = build_attestation_index_entry(envelope=envelope, statement=statement)
+        append_attestation_index_entry(log_path=args.log, entry=entry)
+
+        out = {"ok": True, "entry": entry, "log": args.log}
+        if args.format == "json":
+            print(json.dumps(out, indent=2))
+        else:
+            print("log: OK")
+            print(f"log: {args.log}")
+            if entry.get("attestation_id"):
+                print(f"attestation_id: {entry.get('attestation_id')}")
+            if entry.get("dsse_sha256"):
+                print(f"dsse_sha256: {entry.get('dsse_sha256')}")
+        return 0
+
+    if args.cmd == "verify-log":
+        import base64
+
+        from releasegate.audit.attestation_index import (
+            build_attestation_index_entry,
+            compute_dsse_sha256,
+        )
+
+        try:
+            envelope = json.load(open(args.dsse, "r", encoding="utf-8"))
+        except Exception as exc:
+            payload = {"ok": False, "error_code": "DSSE_FILE_INVALID", "error_message": str(exc)}
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {payload['error_code']}")
+                print(f"error_message: {payload['error_message']}")
+            return 3
+
+        expected_hash = compute_dsse_sha256(envelope)
+        expected_id = None
+        try:
+            payload_bytes = base64.b64decode(str(envelope.get("payload") or "").encode("ascii"), validate=True)
+            statement = json.loads(payload_bytes.decode("utf-8"))
+            if isinstance(statement, dict):
+                expected = build_attestation_index_entry(envelope=envelope, statement=statement)
+                expected_id = str(expected.get("attestation_id") or "").strip() or None
+        except Exception:
+            # If the payload is corrupted, fall back to DSSE envelope hash matching.
+            expected_id = None
+
+        try:
+            with open(args.log, "r", encoding="utf-8") as f:
+                lines = list(f)
+        except Exception as exc:
+            payload = {"ok": False, "error_code": "LOG_FILE_INVALID", "error_message": str(exc)}
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {payload['error_code']}")
+                print(f"error_message: {payload['error_message']}")
+            return 3
+
+        match = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("dsse_sha256") or "").strip() != expected_hash:
+                continue
+            if expected_id is not None and str(row.get("attestation_id") or "").strip() != expected_id:
+                continue
+            match = True
+            break
+
+        payload = {
+            "ok": bool(match),
+            "attestation_id": expected_id,
+            "dsse_sha256": expected_hash,
+        }
+        if args.format == "json":
+            print(json.dumps(payload, indent=2))
+        else:
+            print("verification: OK" if match else "verification: FAIL")
+            print(f"attestation_id: {expected_id}")
+            print(f"dsse_sha256: {expected_hash}")
+        return 0 if match else 2
 
     if args.cmd == "proofpack":
         from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_decision
