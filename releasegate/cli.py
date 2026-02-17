@@ -152,6 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
     verify_attestation_p.add_argument("--format", default="text", choices=["text", "json"])
     verify_attestation_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
 
+    verify_dsse_p = sub.add_parser(
+        "verify-dsse",
+        help="Verify DSSE wrapped in-toto statement offline.",
+    )
+    verify_dsse_p.add_argument("--dsse", required=True, help="Path to DSSE JSON envelope")
+    verify_dsse_p.add_argument("--format", default="text", choices=["text", "json"])
+    verify_dsse_p.add_argument("--key-file", help="Path to trusted Ed25519 public key file or key-id map")
+    verify_dsse_p.add_argument("--key", dest="key_file", help="Alias for --key-file")
+
     proofpack_v1_p = sub.add_parser(
         "proofpack",
         help="Create deterministic proofpack v1 zip artifact.",
@@ -1132,6 +1141,109 @@ def main() -> int:
                 )
             )
         return 0 if report.get("ok") else 2
+
+    if args.cmd == "verify-dsse":
+        from releasegate.attestation.crypto import load_public_keys_map
+        from releasegate.attestation.dsse import verify_dsse
+
+        try:
+            with open(args.dsse, "r", encoding="utf-8") as f:
+                envelope = json.load(f)
+        except Exception as exc:
+            payload = {
+                "ok": False,
+                "error_code": "DSSE_FILE_INVALID",
+                "error_message": str(exc),
+                "file": args.dsse,
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2))
+            else:
+                print("verification: FAIL")
+                print(f"error_code: {payload['error_code']}")
+                print(f"error_message: {payload['error_message']}")
+            return 3
+
+        key_map = load_public_keys_map(key_file=args.key_file)
+        valid, statement, error = verify_dsse(envelope, key_map)
+
+        key_id = None
+        signatures = envelope.get("signatures") if isinstance(envelope, dict) else None
+        if isinstance(signatures, list) and signatures and isinstance(signatures[0], dict):
+            key_id = signatures[0].get("keyid")
+
+        report: dict = {
+            "ok": bool(valid),
+            "payload_type": envelope.get("payloadType") if isinstance(envelope, dict) else None,
+            "key_id": key_id,
+            "error_code": error,
+        }
+
+        subject_name = None
+        subject_digest_sha256 = None
+        predicate_type = None
+        statement_type = None
+        attestation_id = None
+
+        if isinstance(statement, dict):
+            statement_type = statement.get("_type")
+            predicate_type = statement.get("predicateType")
+            subject = statement.get("subject")
+            if isinstance(subject, list) and subject and isinstance(subject[0], dict):
+                subject_name = subject[0].get("name")
+                digest = subject[0].get("digest")
+                if isinstance(digest, dict):
+                    subject_digest_sha256 = digest.get("sha256")
+
+            predicate = statement.get("predicate") if isinstance(statement.get("predicate"), dict) else None
+            if isinstance(predicate, dict):
+                signature = predicate.get("signature") if isinstance(predicate.get("signature"), dict) else {}
+                signed_payload_hash = str(signature.get("signed_payload_hash") or "").strip()
+                if signed_payload_hash:
+                    if ":" in signed_payload_hash:
+                        signed_payload_hash = signed_payload_hash.split(":", 1)[1]
+                    signed_payload_hash = signed_payload_hash.strip().lower()
+                    if len(signed_payload_hash) == 64:
+                        attestation_id = signed_payload_hash
+
+        report.update(
+            {
+                "statement_type": statement_type,
+                "predicate_type": predicate_type,
+                "subject_name": subject_name,
+                "subject_digest_sha256": subject_digest_sha256,
+                "attestation_id": attestation_id,
+            }
+        )
+
+        if args.format == "json":
+            print(json.dumps(report, indent=2))
+        else:
+            if report.get("ok"):
+                print("verification: OK")
+            else:
+                print("verification: FAIL")
+                if report.get("error_code"):
+                    print(f"error_code: {report.get('error_code')}")
+            if report.get("payload_type") is not None:
+                print(f"payloadType: {report.get('payload_type')}")
+            if report.get("key_id") is not None:
+                print(f"keyid: {report.get('key_id')}")
+            if report.get("subject_name") is not None:
+                print(f"subject.name: {report.get('subject_name')}")
+            if report.get("subject_digest_sha256") is not None:
+                print(f"subject.digest.sha256: {report.get('subject_digest_sha256')}")
+            if report.get("predicate_type") is not None:
+                print(f"predicateType: {report.get('predicate_type')}")
+            if report.get("attestation_id") is not None:
+                print(f"attestation_id: {report.get('attestation_id')}")
+
+        if report.get("ok"):
+            return 0
+
+        # Distinguish format errors from signature/key failures.
+        verification_errors = {"SIGNATURE_INVALID", "UNKNOWN_KEY_ID"}
+        return 2 if str(report.get("error_code") or "") in verification_errors else 3
 
     if args.cmd == "proofpack":
         from releasegate.attestation.service import build_attestation_from_bundle, build_bundle_from_decision

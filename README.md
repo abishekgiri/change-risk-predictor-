@@ -231,6 +231,7 @@ Risk metadata is attached to Jira issue properties.
 - Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
 - DSSE + in-toto export is available for supply-chain interoperability:
   - CLI: `releasegate analyze-pr --repo ORG/REPO --pr 15 --tenant default --emit-dsse att.dsse.json`
+  - Verify CLI: `releasegate verify-dsse --dsse att.dsse.json --key-file attestation/keys/public.pem`
   - API: `GET /attestations/{attestation_id}.dsse`
   - Top-level DSSE fields:
     - `payloadType: application/vnd.in-toto+json`
