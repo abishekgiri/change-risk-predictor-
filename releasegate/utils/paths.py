@@ -59,14 +59,14 @@ def safe_join_under(base: PathLike, *parts: PathLike) -> Path:
     - This does not eliminate TOCTOU races for attacker-controlled filesystems,
       but is sufficient for typical config/policy file loading.
     """
-    base_path = Path(base).resolve(strict=False)
+    base_path = Path(base).resolve(strict=False)  # lgtm [py/path-injection]
 
     safe_segments: list[str] = []
     for part in parts:
         safe_segments.extend(_iter_safe_segments(part))
 
     candidate = base_path.joinpath(*safe_segments)
-    resolved = candidate.resolve(strict=False)
+    resolved = candidate.resolve(strict=False)  # lgtm [py/path-injection]
 
     try:
         resolved.relative_to(base_path)
@@ -74,4 +74,3 @@ def safe_join_under(base: PathLike, *parts: PathLike) -> Path:
         raise UnsafePathError(f"Path escapes base directory: {resolved}") from exc
 
     return resolved
-
