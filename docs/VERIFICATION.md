@@ -15,6 +15,14 @@ Expected booleans:
 - `valid_signature=true`
 - `trusted_issuer=true`
 
+## Verify DSSE + in-toto Offline
+
+```bash
+releasegate verify-dsse --dsse /path/to/releasegate.dsse.json --format json --key-file /path/to/public-keys.json
+```
+
+See `docs/attestations/dsse-intoto.md` for the emitted contract.
+
 ## Verify Deterministic Proofpack v1
 
 ```bash

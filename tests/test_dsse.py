@@ -58,8 +58,10 @@ def test_intoto_statement_fields_correct():
     assert statement["_type"] == STATEMENT_TYPE_V1
     assert statement["predicateType"] == PREDICATE_TYPE_RELEASEGATE_V1
     assert statement["predicate"] == attestation
-    assert statement["subject"][0]["name"] == attestation["subject"]["repo"]
-    assert statement["subject"][0]["digest"]["sha256"] == attestation["subject"]["commit_sha"]
+    assert statement["subject"][0]["name"] == f"{attestation['subject']['repo']}@{attestation['subject']['commit_sha']}"
+    signed_payload_hash = attestation["signature"]["signed_payload_hash"]
+    digest = signed_payload_hash.split(":", 1)[1] if ":" in signed_payload_hash else signed_payload_hash
+    assert statement["subject"][0]["digest"]["sha256"] == digest.lower()
 
 
 def test_dsse_roundtrip_verify_passes():
