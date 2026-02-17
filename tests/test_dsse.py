@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import base64
 import os
 
 import pytest
 from fastapi.testclient import TestClient
 
-from releasegate.attestation.crypto import current_key_id, load_private_key_from_env, load_public_keys_map
-from releasegate.attestation.dsse import verify_dsse, wrap_dsse
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from releasegate.attestation.crypto import (
+    current_key_id,
+    load_private_key_from_env,
+    load_public_keys_map,
+    public_key_pem_from_private,
+)
+from releasegate.attestation.dsse import (
+    DSSE_PAYLOAD_TYPE,
+    verify_dsse,
+    verify_dsse_signatures,
+    wrap_dsse,
+    wrap_dsse_multi,
+)
 from releasegate.attestation.intoto import (
     PREDICATE_TYPE_RELEASEGATE_V1,
     STATEMENT_TYPE_V1,
@@ -58,8 +72,12 @@ def test_intoto_statement_fields_correct():
     assert statement["_type"] == STATEMENT_TYPE_V1
     assert statement["predicateType"] == PREDICATE_TYPE_RELEASEGATE_V1
     assert statement["predicate"] == attestation
-    assert statement["subject"][0]["name"] == attestation["subject"]["repo"]
-    assert statement["subject"][0]["digest"]["sha256"] == attestation["subject"]["commit_sha"]
+    assert statement["subject"][0]["name"] == (
+        f"git+https://github.com/{attestation['subject']['repo']}@{attestation['subject']['commit_sha']}"
+    )
+    signed_payload_hash = attestation["signature"]["signed_payload_hash"]
+    digest = signed_payload_hash.split(":", 1)[1] if ":" in signed_payload_hash else signed_payload_hash
+    assert statement["subject"][0]["digest"]["sha256"] == digest.lower()
 
 
 def test_dsse_roundtrip_verify_passes():
@@ -117,6 +135,75 @@ def test_dsse_key_mismatch_fails():
     assert valid is False
     assert decoded is None
     assert error == "UNKNOWN_KEY_ID"
+
+
+def test_dsse_conformance_invariants_and_determinism():
+    attestation = _sample_attestation()
+    statement = build_intoto_statement(attestation)
+    signing_key = load_private_key_from_env()
+    key_id = current_key_id()
+
+    env1 = wrap_dsse(statement, signing_key=signing_key, key_id=key_id)
+    env2 = wrap_dsse(statement, signing_key=signing_key, key_id=key_id)
+
+    assert env1 == env2
+    assert env1["payloadType"] == DSSE_PAYLOAD_TYPE
+    assert env1["signatures"][0]["keyid"] == key_id
+
+    payload_bytes = base64.b64decode(env1["payload"].encode("ascii"), validate=True)
+    assert payload_bytes.startswith(b"{")
+
+    sig_bytes = base64.b64decode(env1["signatures"][0]["sig"].encode("ascii"), validate=True)
+    assert len(sig_bytes) == 64
+
+    valid, decoded, error = verify_dsse(env1, load_public_keys_map())
+    assert valid is True
+    assert error is None
+    assert decoded["_type"] == STATEMENT_TYPE_V1
+    assert decoded["predicateType"] == PREDICATE_TYPE_RELEASEGATE_V1
+    assert isinstance(decoded.get("subject"), list) and len(decoded["subject"]) >= 1
+
+    predicate = decoded["predicate"]
+    signed_payload_hash = str(predicate["signature"]["signed_payload_hash"])
+    digest = signed_payload_hash.split(":", 1)[1] if ":" in signed_payload_hash else signed_payload_hash
+    assert decoded["subject"][0]["digest"]["sha256"] == digest.lower()
+
+
+def test_dsse_signature_length_invalid_is_rejected():
+    attestation = _sample_attestation()
+    statement = build_intoto_statement(attestation)
+    envelope = wrap_dsse(
+        statement,
+        signing_key=load_private_key_from_env(),
+        key_id=current_key_id(),
+    )
+    envelope["signatures"][0]["sig"] = base64.b64encode(b"abc").decode("ascii")
+
+    valid, decoded, error = verify_dsse(envelope, load_public_keys_map())
+    assert valid is False
+    assert decoded is None
+    assert error == "SIGNATURE_LEN_INVALID"
+
+
+def test_dsse_multi_signature_verify_all_passes():
+    attestation = _sample_attestation()
+    statement = build_intoto_statement(attestation)
+
+    key1 = load_private_key_from_env()
+    key2 = Ed25519PrivateKey.generate()
+    kid1 = current_key_id()
+    kid2 = "rg-test-secondary"
+
+    envelope = wrap_dsse_multi(statement, signers=[(kid1, key1), (kid2, key2)])
+    key_map = {
+        kid1: public_key_pem_from_private(key1),
+        kid2: public_key_pem_from_private(key2),
+    }
+
+    decoded, results, error = verify_dsse_signatures(envelope, key_map)
+    assert error is None
+    assert decoded == statement
+    assert {r.get("keyid") for r in results if r.get("ok")} == {kid1, kid2}
 
 
 def test_dsse_export_endpoint_returns_signed_envelope(clean_db):

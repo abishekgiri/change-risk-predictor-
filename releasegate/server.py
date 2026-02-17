@@ -493,6 +493,17 @@ def get_signed_key_manifest_signature():
     return signature
 
 
+# Alias endpoints for well-known key discovery.
+@app.get("/.well-known/releasegate/keys.json")
+def get_signed_key_manifest_alias():
+    return get_signed_key_manifest()
+
+
+@app.get("/.well-known/releasegate/keys.sig")
+def get_signed_key_manifest_signature_alias():
+    return get_signed_key_manifest_signature()
+
+
 @app.post("/attestations/verify")
 def verify_attestation_endpoint(payload: VerifyAttestationRequest):
     """

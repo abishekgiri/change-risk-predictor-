@@ -8,6 +8,7 @@ Current source-of-truth docs:
 - `security.md` — security posture and controls
 - `jira-config.md` — Jira transition/role mapping
 - `forge-hardening.md` — Forge runtime hardening behavior
+- `attestations/dsse-intoto.md` — DSSE + in-toto interoperability contract
 - `contracts/` — versioned artifact contracts (`soc2_v1`, `checkpoint_v1`, `proof_pack_v1`)
 
 Legacy/superseded docs live under `legacy/` and are not normative.
