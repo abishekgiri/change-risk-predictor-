@@ -65,4 +65,14 @@ jobs:
             --pr "${{ github.event.pull_request.number }}" \
             --tenant "${{ github.repository_owner }}" \
             --emit-attestation attestation.json \
+            --emit-dsse releasegate.dsse.json \
             --format json > compliance_report.json
+
+      - name: Upload ReleaseGate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: releasegate-artifacts
+          path: |
+            compliance_report.json
+            attestation.json
+            releasegate.dsse.json
