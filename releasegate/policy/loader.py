@@ -1,18 +1,26 @@
 import os
 import yaml
-from pathlib import Path, PurePosixPath
-from typing import List, Union, Optional
+from pathlib import Path
+from typing import List, Optional, Union
 from .types import PolicyDef
 from .policy_types import Policy
 from .inheritance import resolve_policy_inheritance
 
 from releasegate.utils.paths import UnsafePathError, safe_join_under
 
+
 class PolicyLoader:
-    def __init__(self, policy_dir: Optional[str] = None, schema: str = "def", strict: bool = True):
+    def __init__(
+        self,
+        policy_dir: Optional[str] = None,
+        schema: str = "def",
+        strict: bool = True,
+        base_dir: Optional[Union[str, Path]] = None,
+    ):
         # schema: "def" (PolicyDef), "compiled" (Policy), or "auto"
         self.schema = schema
         self.strict = strict
+        self.base_dir = Path(base_dir) if base_dir is not None else None
         if policy_dir:
             self.policy_dir = policy_dir
         else:
@@ -24,23 +32,25 @@ class PolicyLoader:
         Returns validated PolicyDef objects sorted by Priority (asc), then ID.
         """
         policies = []
-        
-        policy_dir_norm = str(self.policy_dir).replace("\\", "/")
-        parts = PurePosixPath(policy_dir_norm).parts
-        if ".." in parts:
+
+        policy_dir_norm = str(self.policy_dir).replace("\\", "/").strip()
+        if Path(policy_dir_norm).is_absolute():
             if self.strict:
-                raise ValueError(f"Invalid policy directory (path traversal): {self.policy_dir}")
+                raise ValueError(f"Invalid policy directory (absolute path not allowed): {self.policy_dir}")
             return []
 
-        policy_base = Path(policy_dir_norm).resolve(strict=False)  # lgtm [py/path-injection]
+        base_dir = self.base_dir or Path.cwd()
 
-        if not policy_base.exists():  # lgtm [py/path-injection]
+        # Resolve under the configured base directory (repo root in dev/CI).
+        policy_base = safe_join_under(base_dir, policy_dir_norm)
+
+        if not policy_base.exists():
             if self.strict:
                 raise FileNotFoundError(f"Policy directory not found: {policy_base}")
             return []
 
-        for root, _, files in os.walk(policy_base):  # lgtm [py/path-injection]
-            root_path = Path(root)
+        for root, _, files in os.walk(policy_base):
+            root_path = Path(root).resolve(strict=False)
             for file in files:
                 if file.startswith("_"):
                     continue
@@ -61,7 +71,7 @@ class PolicyLoader:
                         print(f"WARN: Skipping unsafe policy path: {e}", file=sys.stderr)
                         continue
                     try:
-                        with full_path.open("r", encoding="utf-8") as f:  # lgtm [py/path-injection]
+                        with full_path.open("r", encoding="utf-8") as f:
                             data = yaml.safe_load(f)
                             # Handle empty files
                             if not data:

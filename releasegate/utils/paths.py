@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path, PurePosixPath
 from typing import Union
@@ -59,18 +60,19 @@ def safe_join_under(base: PathLike, *parts: PathLike) -> Path:
     - This does not eliminate TOCTOU races for attacker-controlled filesystems,
       but is sufficient for typical config/policy file loading.
     """
-    base_path = Path(base).resolve(strict=False)  # lgtm [py/path-injection]
+    base_path = os.path.realpath(str(base))
 
     safe_segments: list[str] = []
     for part in parts:
         safe_segments.extend(_iter_safe_segments(part))
 
-    candidate = base_path.joinpath(*safe_segments)
-    resolved = candidate.resolve(strict=False)  # lgtm [py/path-injection]
+    candidate = os.path.normpath(os.path.join(base_path, *safe_segments))
+    resolved = os.path.realpath(candidate)
 
     try:
-        resolved.relative_to(base_path)
-    except Exception as exc:  # ValueError on 3.9; keep broad for safety.
+        if os.path.commonpath([resolved, base_path]) != base_path:
+            raise UnsafePathError(f"Path escapes base directory: {resolved}")
+    except Exception as exc:
         raise UnsafePathError(f"Path escapes base directory: {resolved}") from exc
 
-    return resolved
+    return Path(resolved)

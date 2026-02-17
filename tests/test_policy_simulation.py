@@ -59,13 +59,14 @@ def test_policy_simulation_reports_impact(tmp_path):
     _record_decision(repo=repo, pr_number=1, status="ALLOWED", risk_level="LOW")
     _record_decision(repo=repo, pr_number=2, status="ALLOWED", risk_level="HIGH")
 
-    policy_dir = tmp_path / "compiled"
+    policy_dir = tmp_path / "releasegate" / "policy" / "compiled"
     _write_sim_policy(policy_dir)
 
     report = simulate_policy_impact(
         repo=repo,
         limit=10,
-        policy_dir=str(policy_dir),
+        policy_dir="releasegate/policy/compiled",
+        policy_base_dir=str(tmp_path),
     )
 
     assert report["repo"] == repo

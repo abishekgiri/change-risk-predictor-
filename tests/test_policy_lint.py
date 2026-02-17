@@ -28,7 +28,7 @@ def test_policy_lint_detects_internal_contradiction(tmp_path):
         },
     )
 
-    report = lint_compiled_policies(policy_dir=str(policy_dir), strict_schema=True)
+    report = lint_compiled_policies(policy_dir="compiled", strict_schema=True, base_dir=tmp_path)
 
     assert report["ok"] is False
     assert any(i["code"] == "CONTRADICTORY_EQUALITY_NEGATION" for i in report["issues"])
@@ -62,7 +62,7 @@ def test_policy_lint_detects_ambiguous_overlap(tmp_path):
         },
     )
 
-    report = lint_compiled_policies(policy_dir=str(policy_dir), strict_schema=True)
+    report = lint_compiled_policies(policy_dir="compiled", strict_schema=True, base_dir=tmp_path)
 
     assert report["ok"] is False
     assert any(i["code"] == "AMBIGUOUS_OVERLAP" for i in report["issues"])
@@ -98,7 +98,7 @@ def test_policy_lint_passes_valid_policies(tmp_path):
         },
     )
 
-    report = lint_compiled_policies(policy_dir=str(policy_dir), strict_schema=True)
+    report = lint_compiled_policies(policy_dir="compiled", strict_schema=True, base_dir=tmp_path)
 
     assert report["ok"] is True
     assert report["error_count"] == 0
