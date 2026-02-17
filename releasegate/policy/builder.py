@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+from pathlib import Path
 from typing import Dict, Any, List
 from datetime import datetime, timezone
 
@@ -9,6 +10,8 @@ from .dsl.parser import DSLParser
 from .dsl.validator import DSLValidator
 from .compiler import PolicyCompiler
 from .types import CompiledPolicy
+
+from releasegate.utils.paths import safe_join_under
 
 class PolicyBuilder:
     """
@@ -32,26 +35,34 @@ class PolicyBuilder:
         Build all policies in source_dir.
         Returns True if successful, False if errors found.
         """
-        print(f"Starting build from {self.source_dir} to {self.output_dir}")
+        source_base = Path(self.source_dir).resolve(strict=False)
+        output_base = Path(self.output_dir).resolve(strict=False)
+        print(f"Starting build from {source_base} to {output_base}")
         
         # 1. Clean output directory (optional, or just overwrite)
-        os.makedirs(self.output_dir, exist_ok=True)
+        output_base.mkdir(parents=True, exist_ok=True)
         
         errors = []
         
         # 2. Walk source directory
-        for root, dirs, files in os.walk(self.source_dir):
+        for root, dirs, files in os.walk(source_base):
+            root_path = Path(root)
             for file in files:
                 if file.endswith(".dsl"):
-                    path = os.path.join(root, file)
                     try:
-                        self._process_file(path)
+                        rel_root = root_path.relative_to(source_base)
+                        path = safe_join_under(source_base, rel_root, file)
+                    except ValueError as e:
+                        errors.append(f"Unsafe path skipped: {e}")
+                        continue
+                    try:
+                        self._process_file(str(path))
                     except Exception as e:
                         errors.append(f"Failed to process {path}: {str(e)}")
         
         # 3. Write Manifest
-        manifest_path = os.path.join(self.output_dir, "manifest.json")
-        with open(manifest_path, "w") as f:
+        manifest_path = safe_join_under(output_base, "manifest.json")
+        with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(self.manifest, f, indent=2)
         
         if errors:
@@ -66,7 +77,7 @@ class PolicyBuilder:
     def _process_file(self, path: str):
         print(f"Processing {path}...")
         
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             source_text = f.read()
         
         # Pipeline
@@ -85,8 +96,9 @@ class PolicyBuilder:
         # Write Outputs
         rule_ids = []
         for policy in compiled_policies:
-            output_path = os.path.join(self.output_dir, policy.filename)
-            with open(output_path, "w") as f:
+            output_base = Path(self.output_dir).resolve(strict=False)
+            output_path = safe_join_under(output_base, str(policy.filename))
+            with output_path.open("w", encoding="utf-8") as f:
                 json.dump(policy.content, f, indent=2)
             rule_ids.append(policy.policy_id)
         

@@ -8,6 +8,7 @@ from releasegate.enforcement.types import ControlContext
 from releasegate.observability.internal_metrics import incr
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.ttl_cache import TTLCache, yaml_tree_fingerprint
+from releasegate.utils.paths import safe_join_under
 from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
 from releasegate.engine_core import (
     ComplianceRunResult,
@@ -38,8 +39,9 @@ class ComplianceEngine:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.policy_dir = str(config.get("policy_dir") or "releasegate/policy/compiled")
+        self.policy_base_dir = config.get("policy_base_dir")
         self.tenant_id = resolve_tenant_id(config.get("tenant_id"), allow_none=True) or "system"
-        self.loader = PolicyLoader(policy_dir=self.policy_dir, schema="compiled")
+        self.loader = PolicyLoader(policy_dir=self.policy_dir, schema="compiled", base_dir=self.policy_base_dir)
         self.policies = self._load_compiled_policies()
         self.policy_hash = self._compute_policy_hash(self.policies)
         
@@ -50,10 +52,12 @@ class ComplianceEngine:
         self.control_registry = ControlRegistry(config)
 
     def _policy_cache_key(self) -> Tuple[str, str, str]:
+        base_dir = self.policy_base_dir or os.getcwd()
+        effective_dir = str(safe_join_under(base_dir, self.policy_dir))
         return (
             self.tenant_id,
-            os.path.abspath(self.policy_dir),
-            yaml_tree_fingerprint(self.policy_dir),
+            os.path.abspath(effective_dir),
+            yaml_tree_fingerprint(effective_dir),
         )
 
     def _load_compiled_policies(self) -> List[Policy]:

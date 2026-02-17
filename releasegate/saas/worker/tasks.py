@@ -4,10 +4,12 @@ import tempfile
 import subprocess
 import json
 from datetime import datetime
+from pathlib import Path
 from releasegate.saas.worker.auth import get_installation_token, get_github_client
 from releasegate.saas.db.base import SessionLocal
 from releasegate.saas.db.models import AnalysisRun, Repository
 from releasegate.saas.policy import resolve_effective_policy
+from releasegate.utils.paths import safe_join_under
 
 def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commit_sha: str):
     """
@@ -72,8 +74,9 @@ def run_analysis_job(installation_id: int, repo_slug: str, pr_number: int, commi
                 except Exception as e:
                     print(f"WORKER: Failed to resolve policy: {e}, using default strictness=block")
             
-            if proc.returncode == 0 and os.path.exists(os.path.join(work_dir, "result.json")):
-                with open(os.path.join(work_dir, "result.json")) as f:
+            result_path = safe_join_under(Path(work_dir), "result.json")
+            if proc.returncode == 0 and result_path.exists():
+                with result_path.open("r", encoding="utf-8") as f:
                     result = json.load(f)
                     verdict = result.get("control_result", "UNKNOWN")
                     # Fix: handle non-int severity

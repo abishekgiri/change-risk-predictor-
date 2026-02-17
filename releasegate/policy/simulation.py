@@ -38,14 +38,15 @@ def simulate_policy_impact(
     repo: str,
     limit: int = 100,
     policy_dir: str = "releasegate/policy/compiled",
+    policy_base_dir: str | None = None,
     tenant_id: str | None = None,
 ) -> Dict[str, Any]:
     effective_tenant = resolve_tenant_id(tenant_id)
-    loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=True)
+    loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=True, base_dir=policy_base_dir)
     loaded = loader.load_all()
     policies = [p for p in loaded if isinstance(p, Policy)]
 
-    engine = ComplianceEngine({})
+    engine = ComplianceEngine({"tenant_id": effective_tenant, "policy_dir": policy_dir, "policy_base_dir": policy_base_dir})
     engine.policies = policies
     engine.policy_hash = compute_policy_hash(policies)
 

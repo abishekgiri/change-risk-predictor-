@@ -3,6 +3,9 @@ import json
 import os
 from typing import List
 from releasegate.audit.types import TraceableFinding
+from pathlib import Path
+
+from releasegate.utils.paths import safe_join_under
 
 class ReportGenerator:
     """
@@ -10,8 +13,10 @@ class ReportGenerator:
     """
     
     def __init__(self, bundle_path: str):
-        self.report_dir = os.path.join(bundle_path, "reports")
-        os.makedirs(self.report_dir, exist_ok=True)
+        base = Path(bundle_path).resolve(strict=False)
+        report_dir = safe_join_under(base, "reports")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        self.report_dir = str(report_dir)
     
     def generate_all(self, findings: List[TraceableFinding]):
         self.generate_json(findings)
@@ -19,14 +24,14 @@ class ReportGenerator:
         self.generate_csv(findings)
     
     def generate_json(self, findings: List[TraceableFinding]):
-        path = os.path.join(self.report_dir, "report.json")
-        with open(path, 'w') as f:
+        path = safe_join_under(self.report_dir, "report.json")
+        with path.open("w", encoding="utf-8") as f:
             data = [fd.__dict__ for fd in findings]
             json.dump(data, f, indent=2)
     
     def generate_csv(self, findings: List[TraceableFinding]):
-        path = os.path.join(self.report_dir, "report.csv")
-        with open(path, 'w', newline='') as f:
+        path = safe_join_under(self.report_dir, "report.csv")
+        with path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             # Header
             writer.writerow(["FindingID", "Severity", "PolicyID", "Rule", "Compliance", "Message"])
@@ -41,8 +46,8 @@ class ReportGenerator:
                 ])
     
     def generate_markdown(self, findings: List[TraceableFinding]):
-        path = os.path.join(self.report_dir, "report.md")
-        with open(path, 'w') as f:
+        path = safe_join_under(self.report_dir, "report.md")
+        with path.open("w", encoding="utf-8") as f:
             f.write("# Compliance Audit Report\n\n")
             f.write(f"**Findings:** {len(findings)}\n\n")
             

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
+from releasegate.utils.paths import safe_join_under
 
 
 def _issue(
@@ -30,19 +32,29 @@ def _issue(
     return issue
 
 
-def _iter_policy_yaml(policy_dir: str) -> List[Tuple[str, Dict[str, Any]]]:
+def _iter_policy_yaml(policy_dir: str, *, base_dir: Optional[Union[str, Path]] = None) -> List[Tuple[str, Dict[str, Any]]]:
     docs: List[Tuple[str, Dict[str, Any]]] = []
-    if not os.path.exists(policy_dir):
+    policy_dir_norm = str(policy_dir).replace("\\", "/").strip()
+    if Path(policy_dir_norm).is_absolute():
         return docs
-    for root, _, files in os.walk(policy_dir):
+
+    policy_base = safe_join_under(base_dir or Path.cwd(), policy_dir_norm)
+    if not policy_base.exists():
+        return docs
+    for root, _, files in os.walk(policy_base):
+        root_path = Path(root)
         for file_name in sorted(files):
             if file_name.startswith("_") or not file_name.endswith((".yaml", ".yml")):
                 continue
-            full_path = os.path.join(root, file_name)
-            with open(full_path, "r", encoding="utf-8") as f:
+            try:
+                rel_root = root_path.relative_to(policy_base)
+                full_path = safe_join_under(policy_base, rel_root, file_name)
+            except ValueError:
+                continue
+            with full_path.open("r", encoding="utf-8") as f:
                 loaded = yaml.safe_load(f) or {}
             if isinstance(loaded, dict):
-                docs.append((full_path, loaded))
+                docs.append((str(full_path), loaded))
     return docs
 
 
@@ -151,9 +163,14 @@ def _check_internal_contradictions(policy: Policy, source_file: Optional[str]) -
     return issues
 
 
-def lint_compiled_policies(policy_dir: str = "releasegate/policy/compiled", strict_schema: bool = True) -> Dict[str, Any]:
+def lint_compiled_policies(
+    policy_dir: str = "releasegate/policy/compiled",
+    strict_schema: bool = True,
+    *,
+    base_dir: Optional[Union[str, Path]] = None,
+) -> Dict[str, Any]:
     issues: List[Dict[str, Any]] = []
-    raw_docs = _iter_policy_yaml(policy_dir)
+    raw_docs = _iter_policy_yaml(policy_dir, base_dir=base_dir)
     by_policy_id: Dict[str, List[str]] = {}
 
     for source_file, doc in raw_docs:
@@ -173,7 +190,7 @@ def lint_compiled_policies(policy_dir: str = "releasegate/policy/compiled", stri
                 )
             )
 
-    loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=strict_schema)
+    loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=strict_schema, base_dir=base_dir)
     try:
         loaded = loader.load_all()
         policies = [p for p in loaded if isinstance(p, Policy)]

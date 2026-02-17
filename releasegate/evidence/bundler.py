@@ -1,11 +1,13 @@
 import os
 import json
 import hashlib
+from pathlib import Path
 from typing import Dict, List, Any
 
 from releasegate.storage.paths import get_bundle_path
 from releasegate.audit.types import TraceableFinding
 from releasegate.storage.atomic import ensure_directory, atomic_write
+from releasegate.utils.paths import safe_join_under
 
 class EvidenceBundler:
     """
@@ -13,21 +15,22 @@ class EvidenceBundler:
     """
     def __init__(self, repo: str, pr: int, audit_id: str):
         self.bundle_path = get_bundle_path(repo, pr, audit_id)
-        self.manifest_path = os.path.join(self.bundle_path, "manifest.json")
-        ensure_directory(self.bundle_path)
+        self._bundle_base = Path(self.bundle_path).resolve(strict=False)
+        self.manifest_path = str(safe_join_under(self._bundle_base, "manifest.json"))
+        ensure_directory(str(self._bundle_base))
     
     def _write_json(self, filename: str, data: Any):
-        path = os.path.join(self.bundle_path, filename)
+        path = str(safe_join_under(self._bundle_base, filename))
         with atomic_write(path) as f:
             json.dump(data, f, indent=2, sort_keys=True)
     
     def _write_file(self, filename: str, content: str):
-        path = os.path.join(self.bundle_path, filename)
+        path = str(safe_join_under(self._bundle_base, filename))
         with atomic_write(path) as f:
             f.write(content)
     
     def _compute_file_hash(self, filename: str) -> str:
-        path = os.path.join(self.bundle_path, filename)
+        path = str(safe_join_under(self._bundle_base, filename))
         sha = hashlib.sha256()
         with open(path, 'rb') as f:
             while chunk := f.read(8192):
@@ -52,10 +55,18 @@ class EvidenceBundler:
         # 2. Create Manifest
         # Scan all files we just wrote
         manifest = {}
-        for root, _, files in os.walk(self.bundle_path):
+        for root, _, files in os.walk(self._bundle_base):
+            root_path = Path(root)
             for file in files:
                 if file == "manifest.json": continue
-                rel_path = os.path.relpath(os.path.join(root, file), self.bundle_path)
+                try:
+                    rel_path = str(
+                        root_path.joinpath(file)
+                        .resolve(strict=False)
+                        .relative_to(self._bundle_base)
+                    )
+                except Exception:
+                    continue
                 manifest[rel_path] = self._compute_file_hash(rel_path)
         
         self._write_json("manifest.json", manifest)
