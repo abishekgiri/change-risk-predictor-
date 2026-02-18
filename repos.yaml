@@ -1,0 +1,6 @@
+version: 1
+
+# Central repository registry for multi-repo enforcement.
+# Add entries here to govern additional repositories via a shared policy store.
+repos: []
+

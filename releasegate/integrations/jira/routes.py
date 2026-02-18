@@ -1,7 +1,12 @@
 import json
 import logging
+from typing import List
 
 from fastapi import APIRouter, Header, HTTPException
+from releasegate.integrations.jira.lock_store import (
+    apply_transition_lock_update,
+    expire_override_if_needed,
+)
 from releasegate.audit.idempotency import (
     claim_idempotency,
     complete_idempotency,
@@ -41,6 +46,17 @@ async def check_transition(
     """
     tenant_id = resolve_tenant_id(request.tenant_id or auth.tenant_id or request.context_overrides.get("tenant_id"))
     request.tenant_id = tenant_id
+
+    # Best-effort: clear expired overrides before evaluating this transition.
+    try:
+        expire_override_if_needed(
+            tenant_id=tenant_id,
+            issue_key=request.issue_key,
+            actor=request.actor_email or request.actor_account_id,
+        )
+    except Exception:
+        # Never block the transition gate on lock ledger errors.
+        pass
 
     delivery_id = (
         x_atlassian_webhook_identifier
@@ -133,6 +149,8 @@ async def check_transition(
                 sort_keys=True,
             )
         )
+        # Best-effort: keep Jira lock state consistent with the replayed response.
+        _apply_jira_lock_best_effort(request, replay, tenant_id=tenant_id)
         return replay
     if claim.state == "in_progress":
         replayed = wait_for_idempotency_response(
@@ -141,7 +159,9 @@ async def check_transition(
             idem_key=idem_key,
         )
         if replayed is not None:
-            return TransitionCheckResponse.model_validate(replayed)
+            modeled = TransitionCheckResponse.model_validate(replayed)
+            _apply_jira_lock_best_effort(request, modeled, tenant_id=tenant_id)
+            return modeled
         raise HTTPException(status_code=409, detail="Idempotent request is still in progress")
 
     gate = WorkflowGate()
@@ -171,7 +191,77 @@ async def check_transition(
         resource_type="decision",
         resource_id=response.decision_id,
     )
+    _apply_jira_lock_best_effort(request, response, tenant_id=tenant_id)
     return response
+
+
+def _apply_jira_lock_best_effort(
+    request: TransitionCheckRequest,
+    response: TransitionCheckResponse,
+    *,
+    tenant_id: str,
+) -> None:
+    """
+    Keep a durable, append-only lock ledger for Jira issues.
+
+    This is a side-effect; failures are intentionally swallowed so the transition
+    evaluation path remains available even if storage is degraded.
+    """
+    try:
+        from releasegate.audit.reader import AuditReader
+
+        row = AuditReader.get_decision(decision_id=response.decision_id, tenant_id=tenant_id)
+        policy_hash = None
+        policy_resolution_hash = None
+        reason_codes: List[str] = []
+        repo = None
+        pr_number = None
+        decision_id = response.decision_id
+
+        if row:
+            repo = row.get("repo")
+            pr_number = row.get("pr_number")
+            policy_hash = row.get("policy_hash") or row.get("policy_bundle_hash") or response.policy_hash
+            policy_resolution_hash = row.get("policy_bundle_hash") or row.get("policy_hash") or response.policy_hash
+            raw_full = row.get("full_decision_json")
+            if isinstance(raw_full, str) and raw_full:
+                try:
+                    payload = json.loads(raw_full)
+                except Exception:
+                    payload = {}
+                rc = payload.get("reason_code")
+                if rc:
+                    reason_codes.append(str(rc))
+        if not reason_codes:
+            # Fall back to the response status if we couldn't load the decision.
+            reason_codes = [str(response.status)]
+
+        override_requested = bool(request.context_overrides.get("override") is True)
+        override_expires_at = None
+        override_reason = None
+        override_by = None
+        if override_requested and response.allow:
+            override_expires_at = request.context_overrides.get("override_expires_at")
+            override_reason = request.context_overrides.get("override_reason")
+            override_by = request.actor_email or request.actor_account_id
+
+        apply_transition_lock_update(
+            tenant_id=tenant_id,
+            issue_key=request.issue_key,
+            desired_locked=not bool(response.allow),
+            reason_codes=reason_codes,
+            decision_id=decision_id,
+            policy_hash=policy_hash,
+            policy_resolution_hash=policy_resolution_hash,
+            repo=repo,
+            pr_number=pr_number,
+            actor=request.actor_email or request.actor_account_id,
+            override_expires_at=str(override_expires_at) if override_expires_at else None,
+            override_reason=str(override_reason) if override_reason else None,
+            override_by=str(override_by) if override_by else None,
+        )
+    except Exception:
+        return
 
 @router.get("/health")
 async def health_check():

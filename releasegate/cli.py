@@ -81,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
     audit_list.add_argument("--pr", type=int)
     audit_list.add_argument("--tenant", required=True, help="Tenant/org identifier")
+
+    # audit search
+    audit_search = audit_sub.add_parser("search", help="Search decisions across repos and external refs (e.g. Jira issue)")
+    audit_search.add_argument("--repo", help="Repository name (owner/repo) (optional)")
+    audit_search.add_argument("--jira", help="Jira issue key (optional)")
+    audit_search.add_argument("--limit", type=int, default=20)
+    audit_search.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
+    audit_search.add_argument("--pr", type=int)
+    audit_search.add_argument("--tenant", required=True, help="Tenant/org identifier")
     
     # audit show
     audit_show = audit_sub.add_parser("show", help="Show full decision details")
@@ -125,6 +134,45 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow invalid policy files to be skipped while validating policy bundle.",
     )
+
+    policy_compile_p = sub.add_parser(
+        "compile-policy",
+        help="Compile layered policy bundle (org -> repo -> environment).",
+    )
+    policy_compile_p.add_argument("--org-policy", help="Path to org policy YAML/JSON (object)")
+    policy_compile_p.add_argument("--repo-policy", help="Path to repo policy YAML/JSON (object)")
+    policy_compile_p.add_argument("--environment", required=True, help="Environment name (e.g., DEV, PRODUCTION)")
+    policy_compile_p.add_argument(
+        "--environment-policies",
+        help="Path to environment policy map YAML/JSON (object mapping env -> policy object)",
+    )
+    policy_compile_p.add_argument(
+        "--list-merge",
+        action="append",
+        default=[],
+        help="List merge strategy mapping like path=strategy (e.g., approvals.security_team_slugs=union)",
+    )
+    policy_compile_p.add_argument("--out", required=True, help="Output JSON path for compiled bundle")
+    policy_compile_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_validate_p = sub.add_parser(
+        "validate-policy",
+        help="Validate layered policy inputs and compiled bundle schema.",
+    )
+    policy_validate_p.add_argument("--org-policy", help="Path to org policy YAML/JSON (object)")
+    policy_validate_p.add_argument("--repo-policy", help="Path to repo policy YAML/JSON (object)")
+    policy_validate_p.add_argument("--environment", required=True, help="Environment name (e.g., DEV, PRODUCTION)")
+    policy_validate_p.add_argument(
+        "--environment-policies",
+        help="Path to environment policy map YAML/JSON (object mapping env -> policy object)",
+    )
+    policy_validate_p.add_argument(
+        "--list-merge",
+        action="append",
+        default=[],
+        help="List merge strategy mapping like path=strategy (e.g., approvals.security_team_slugs=union)",
+    )
+    policy_validate_p.add_argument("--format", default="json", choices=["json", "text"])
 
     checkpoint_p = sub.add_parser("checkpoint-override", help="Create signed override-ledger root checkpoint.")
     checkpoint_p.add_argument("--repo", required=True)
@@ -285,6 +333,70 @@ def main() -> int:
         print(json.dumps(migration_status(), indent=2))
         return 0
 
+    if args.cmd in {"compile-policy", "validate-policy"}:
+        from releasegate.policy.bundle import build_policy_bundle, validate_policy_bundle
+        from releasegate.storage.atomic import atomic_write
+
+        def _load_obj(path: str | None) -> dict:
+            if not path:
+                return {}
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"expected a YAML/JSON object in {path}")
+            return loaded
+
+        def _parse_list_merge(items: list[str]) -> dict[str, str]:
+            out: dict[str, str] = {}
+            for raw in items or []:
+                value = str(raw or "").strip()
+                if not value:
+                    continue
+                if "=" not in value:
+                    raise ValueError(f"invalid --list-merge entry {value!r} (expected path=strategy)")
+                k, v = value.split("=", 1)
+                key = k.strip()
+                strat = v.strip()
+                if not key or not strat:
+                    raise ValueError(f"invalid --list-merge entry {value!r} (expected path=strategy)")
+                out[key] = strat
+            return out
+
+        org_policy = _load_obj(getattr(args, "org_policy", None))
+        repo_policy = _load_obj(getattr(args, "repo_policy", None))
+        env_policies = _load_obj(getattr(args, "environment_policies", None)) if getattr(args, "environment_policies", None) else None
+        if env_policies is not None and not isinstance(env_policies, dict):
+            raise ValueError("environment_policies must be an object mapping env -> policy")
+
+        bundle = build_policy_bundle(
+            org_policy=org_policy,
+            repo_policy=repo_policy,
+            environment=str(getattr(args, "environment", "") or "").strip(),
+            environment_policies=env_policies,
+            list_merge_strategies=_parse_list_merge(getattr(args, "list_merge", []) or []),
+        )
+        schema_errors = validate_policy_bundle(bundle)
+        ok = not schema_errors
+
+        if args.cmd == "compile-policy":
+            out_path = str(getattr(args, "out"))
+            with atomic_write(out_path, "w") as f:
+                f.write(json.dumps(bundle, indent=2, sort_keys=True, ensure_ascii=False))
+                f.write("\n")
+
+        if getattr(args, "format", "json") == "json":
+            payload = {"ok": ok, "bundle": bundle, "errors": schema_errors}
+            print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+        else:
+            if ok:
+                print(f"ok: true\npolicy_resolution_hash: {bundle.get('policy_resolution_hash')}")
+            else:
+                print("ok: false")
+                for err in schema_errors:
+                    print(f"- {err}")
+
+        return 0 if ok else 1
+
     if args.cmd == "analyze-pr":
         # Set token if provided
         if args.token:
@@ -299,11 +411,107 @@ def main() -> int:
             except Exception as e:
                 print(f"Warning: Failed to load config {args.config}: {e}", file=sys.stderr)
 
+        # Optional multi-repo control plane registry (repos.yaml).
+        # Config file always wins; registry fills missing top-level sections.
+        try:
+            from releasegate.control_plane.repo_registry import (
+                get_repo_entry,
+                load_repo_policy_inputs,
+                load_repo_registry,
+            )
+
+            registry_path = str(os.getenv("RELEASEGATE_REPO_REGISTRY_PATH") or "repos.yaml")
+            registry = load_repo_registry(registry_path)
+            entry = get_repo_entry(registry=registry, repo=args.repo)
+            if entry:
+                registry_cfg = load_repo_policy_inputs(entry=entry)
+                for k, v in registry_cfg.items():
+                    config.setdefault(k, v)
+        except Exception:
+            pass
+
+        from releasegate.reporting import (
+            build_compliance_report,
+            exit_code_for_report,
+            exit_code_for_verdict,
+            resolve_enforcement_mode,
+            validate_compliance_report,
+            write_json_report_atomic,
+        )
+        from releasegate.reporting.artifacts import write_artifacts_sha256
+        from releasegate.utils.canonical import sha256_json
+
+        enforcement_mode = resolve_enforcement_mode(config)
+        tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
+
         try:
             from releasegate.server import get_pr_details, get_pr_metrics, post_pr_comment, create_check_run
         except Exception as e:
-            print(f"Error importing GitHub helpers: {e}", file=sys.stderr)
-            return 1
+            errors = [f"IMPORT_GITHUB_HELPERS_FAILED: {e}"]
+            report = build_compliance_report(
+                repo=args.repo,
+                pr_number=int(args.pr),
+                head_sha=None,
+                base_sha=None,
+                tenant_id=tenant_id,
+                control_result="BLOCK",
+                risk_score=None,
+                risk_level="UNKNOWN",
+                reasons=[],
+                reason_codes=[],
+                metrics={
+                    "changed_files_count": None,
+                    "additions": None,
+                    "deletions": None,
+                    "total_churn": None,
+                },
+                dependency_provenance={},
+                attached_issue_keys=[],
+                policy_hash=sha256_json({}),
+                policy_resolution_hash=sha256_json({}),
+                policy_scope=[],
+                enforcement_mode=enforcement_mode,
+                decision_id="unknown",
+                attestation_id=None,
+                signed_payload_hash=None,
+                dsse_path=args.emit_dsse if getattr(args, "emit_dsse", None) else None,
+                dsse_sigstore_bundle_path=None,
+                artifacts_sha256_path="releasegate.artifacts.sha256",
+                errors=errors,
+            )
+
+            try:
+                schema_errors = validate_compliance_report(report)
+            except Exception as exc:
+                errors.append(f"COMPLIANCE_REPORT_SCHEMA_VALIDATION_FAILED: {exc}")
+                report["errors"] = sorted(set(errors))
+            else:
+                if schema_errors:
+                    for msg in schema_errors[:10]:
+                        errors.append(f"COMPLIANCE_REPORT_SCHEMA_INVALID: {msg}")
+                    report["errors"] = sorted(set(errors))
+
+            if args.output:
+                try:
+                    write_json_report_atomic(args.output, report)
+                    write_artifacts_sha256("releasegate.artifacts.sha256", [args.output])
+                except Exception as write_err:
+                    print(f"Error writing output {args.output}: {write_err}", file=sys.stderr)
+                    return 1
+
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print("Decision: BLOCK")
+                print("Risk: UNKNOWN")
+                for err in errors:
+                    print(f" - {err}")
+
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
 
         from releasegate.integrations.github_risk import (
             build_issue_risk_property,
@@ -313,279 +521,415 @@ def main() -> int:
         )
 
         pr_number = int(args.pr)
-        pr_data = get_pr_details(args.repo, pr_number)
-        metrics = get_pr_metrics(args.repo, pr_number)
-        github_risk = config.get("github_risk", {}) if isinstance(config, dict) else {}
-        risk_level = classify_pr_risk(
-            metrics,
-            high_changed_files=int(github_risk.get("high_changed_files", 20)),
-            medium_additions=int(github_risk.get("medium_additions", 300)),
-            high_total_churn=int(github_risk.get("high_total_churn", 800)),
-        )
-        risk_score = score_for_risk_level(risk_level)
-        decision = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
+        artifact_failed = False
+        errors: list[str] = []
 
-        reasons = [f"Heuristic classification from GitHub metadata: {risk_level}"]
+        # Defaults (kept fail-closed)
+        commit_sha = ""
+        base_sha = None
+        control_result = "BLOCK"
+        risk_level = "UNKNOWN"
+        risk_score: Optional[float] = None
+        reasons: list[str] = []
         reason_codes: list[str] = []
-        if risk_level == "HIGH":
-            reason_codes.append("RISK_HIGH_HEURISTIC")
-        elif risk_level == "MEDIUM":
-            reason_codes.append("RISK_MEDIUM_HEURISTIC")
-        else:
-            reason_codes.append("RISK_LOW_HEURISTIC")
+        dependency_provenance: dict = {}
+        attached_issue_keys: list[str] = []
+        policy_scope: list[str] = []
+        policy_resolution_hash = sha256_json({})
+        policy_hash = policy_resolution_hash
+        decision_id = "unknown"
+        attestation_id: Optional[str] = None
+        signed_payload_hash: Optional[str] = None
+        dsse_path: Optional[str] = args.emit_dsse if getattr(args, "emit_dsse", None) else None
+        dsse_sigstore_bundle_path: Optional[str] = None
+        artifacts_sha256_path: Optional[str] = "releasegate.artifacts.sha256"
 
-        env_name = str(os.getenv("RELEASEGATE_ENVIRONMENT") or "DEV")
-        policy_scope = []
-        policy_resolution_hash = "heuristic-policy-v1"
-        resolved_policy = {}
+        metrics_payload = {
+            "changed_files_count": None,
+            "additions": None,
+            "deletions": None,
+            "total_churn": None,
+        }
+
         try:
-            from releasegate.policy.inheritance import resolve_policy_inheritance
+            pr_data = get_pr_details(args.repo, pr_number)
+            metrics = get_pr_metrics(args.repo, pr_number)
+            commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
+            base_sha = str((pr_data.get("base") or {}).get("sha") or "") or None
 
-            inheritance_cfg = config.get("policy_inheritance", {}) if isinstance(config, dict) else {}
-            org_policy = inheritance_cfg.get("org_policy") if isinstance(inheritance_cfg, dict) else {}
-            repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
-            repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
-            env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
-            resolved = resolve_policy_inheritance(
-                org_policy=org_policy if isinstance(org_policy, dict) else {},
-                repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
-                environment=env_name,
-                environment_policies=env_policies if isinstance(env_policies, dict) else None,
+            github_risk = config.get("github_risk", {}) if isinstance(config, dict) else {}
+            risk_level = classify_pr_risk(
+                metrics,
+                high_changed_files=int(github_risk.get("high_changed_files", 20)),
+                medium_additions=int(github_risk.get("medium_additions", 300)),
+                high_total_churn=int(github_risk.get("high_total_churn", 800)),
             )
-            resolved_policy = resolved.get("resolved_policy", {}) if isinstance(resolved, dict) else {}
-            policy_resolution_hash = str(resolved.get("policy_resolution_hash") or policy_resolution_hash)
-            policy_scope = list(resolved.get("policy_scope") or [])
-        except Exception:
+            risk_score = float(score_for_risk_level(risk_level))
+            control_result = "BLOCK" if risk_level == "HIGH" else "WARN" if risk_level == "MEDIUM" else "PASS"
+
+            reasons = [f"Heuristic classification from GitHub metadata: {risk_level}"]
+            if risk_level == "HIGH":
+                reason_codes.append("RISK_HIGH_HEURISTIC")
+            elif risk_level == "MEDIUM":
+                reason_codes.append("RISK_MEDIUM_HEURISTIC")
+            else:
+                reason_codes.append("RISK_LOW_HEURISTIC")
+
+            env_name = str(
+                os.getenv("RELEASEGATE_ENVIRONMENT")
+                or (config.get("environment") if isinstance(config, dict) else None)
+                or "DEV"
+            )
             resolved_policy = {}
-            policy_scope = []
-            policy_resolution_hash = "heuristic-policy-v1"
-
-        dp_cfg = resolved_policy.get("dependency_provenance") if isinstance(resolved_policy, dict) else {}
-        lockfile_required = bool((dp_cfg or {}).get("lockfile_required", False))
-        commit_sha = str((pr_data.get("head") or {}).get("sha") or "")
-        try:
-            from releasegate.ingestion.providers.github_provider import GitHubProvider
-            from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
-
-            dp_provider = GitHubProvider(config if isinstance(config, dict) else {})
-            dependency_provenance = build_dependency_provenance_signal(
-                provider=dp_provider,
-                repo=args.repo,
-                ref=commit_sha or None,
-                lockfile_required=lockfile_required,
-            )
-        except Exception:
-            from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
-
-            dependency_provenance = build_dependency_provenance_signal(
-                provider=None,
-                repo=args.repo,
-                ref=commit_sha or None,
-                lockfile_required=lockfile_required,
-            )
-
-        if not dependency_provenance.get("satisfied", True):
-            for code in dependency_provenance.get("reason_codes", []):
-                if code not in reason_codes:
-                    reason_codes.append(code)
-            if "LOCKFILE_REQUIRED_MISSING" in dependency_provenance.get("reason_codes", []):
-                reasons.append("LOCKFILE_REQUIRED_MISSING: policy requires at least one lockfile at PR head.")
-            decision = "BLOCK"
-
-        issue_keys = sorted(extract_jira_issue_keys(pr_data.get("title"), pr_data.get("body")))
-        attached_issue_keys = []
-        if issue_keys:
             try:
-                from releasegate.integrations.jira.client import JiraClient
+                from releasegate.policy.inheritance import resolve_policy_inheritance
 
-                jc = JiraClient()
-                payload = build_issue_risk_property(
-                    repo=args.repo,
-                    pr_number=pr_number,
-                    risk_level=risk_level,
-                    metrics=metrics,
+                inheritance_cfg = config.get("policy_inheritance", {}) if isinstance(config, dict) else {}
+                org_policy = inheritance_cfg.get("org_policy") if isinstance(inheritance_cfg, dict) else {}
+                repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
+                repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
+                env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
+                list_merge_strategies = (
+                    inheritance_cfg.get("list_merge_strategies") if isinstance(inheritance_cfg, dict) else None
                 )
-                for key in issue_keys:
-                    if jc.set_issue_property(key, "releasegate_risk", payload):
-                        attached_issue_keys.append(key)
+                resolved = resolve_policy_inheritance(
+                    org_policy=org_policy if isinstance(org_policy, dict) else {},
+                    repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
+                    environment=env_name,
+                    environment_policies=env_policies if isinstance(env_policies, dict) else None,
+                    list_merge_strategies=list_merge_strategies if isinstance(list_merge_strategies, dict) else None,
+                )
+                resolved_policy = resolved.get("resolved_policy", {}) if isinstance(resolved, dict) else {}
+                policy_scope = list(resolved.get("policy_scope") or [])
+                policy_resolution_hash = str(resolved.get("policy_resolution_hash") or policy_resolution_hash)
+                policy_hash = policy_resolution_hash
             except Exception as e:
-                print(f"Warning: Failed to attach Jira risk property: {e}", file=sys.stderr)
+                errors.append(f"POLICY_INHERITANCE_FAILED: {e}")
+                resolved_policy = {}
+                policy_scope = []
+                policy_resolution_hash = sha256_json({})
+                policy_hash = policy_resolution_hash
 
-        output = {
-            "control_result": decision,
-            "severity": risk_score,
-            "severity_level": risk_level,
-            "risk_score": risk_score,
-            "risk_level": risk_level,
-            "decision": decision,
-            "reasons": reasons,
-            "reason_codes": reason_codes,
-            "metrics": {
+            dp_cfg = resolved_policy.get("dependency_provenance") if isinstance(resolved_policy, dict) else {}
+            lockfile_required = bool((dp_cfg or {}).get("lockfile_required", False))
+
+            try:
+                from releasegate.ingestion.providers.github_provider import GitHubProvider
+                from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
+
+                dp_provider = GitHubProvider(config if isinstance(config, dict) else {})
+                dependency_provenance = build_dependency_provenance_signal(
+                    provider=dp_provider,
+                    repo=args.repo,
+                    ref=commit_sha or None,
+                    lockfile_required=lockfile_required,
+                )
+            except Exception:
+                from releasegate.signals.dependency_provenance import build_dependency_provenance_signal
+
+                dependency_provenance = build_dependency_provenance_signal(
+                    provider=None,
+                    repo=args.repo,
+                    ref=commit_sha or None,
+                    lockfile_required=lockfile_required,
+                )
+
+            dependency_provenance = dependency_provenance if isinstance(dependency_provenance, dict) else {}
+            if not dependency_provenance.get("satisfied", True):
+                for code in dependency_provenance.get("reason_codes", []):
+                    if code not in reason_codes:
+                        reason_codes.append(code)
+                if "LOCKFILE_REQUIRED_MISSING" in dependency_provenance.get("reason_codes", []):
+                    reasons.append("LOCKFILE_REQUIRED_MISSING: policy requires at least one lockfile at PR head.")
+                control_result = "BLOCK"
+
+            dependency_provenance_signal = dependency_provenance
+            dependency_provenance = dependency_provenance_signal
+
+            issue_keys = sorted(extract_jira_issue_keys(pr_data.get("title"), pr_data.get("body")))
+            if issue_keys:
+                try:
+                    from releasegate.integrations.jira.client import JiraClient
+
+                    jc = JiraClient()
+                    payload = build_issue_risk_property(
+                        repo=args.repo,
+                        pr_number=pr_number,
+                        risk_level=risk_level,
+                        metrics=metrics,
+                    )
+                    for key in issue_keys:
+                        if jc.set_issue_property(key, "releasegate_risk", payload):
+                            attached_issue_keys.append(key)
+                except Exception as e:
+                    errors.append(f"JIRA_PROPERTY_ATTACH_FAILED: {e}")
+
+            metrics_payload = {
                 "changed_files_count": metrics.changed_files,
                 "additions": metrics.additions,
                 "deletions": metrics.deletions,
                 "total_churn": metrics.total_churn,
-            },
-            "dependency_provenance": dependency_provenance,
-            "attached_issue_keys": attached_issue_keys,
-        }
-
-        try:
-            from releasegate.attestation import (
-                build_attestation_from_bundle,
-                build_bundle_from_analysis_result,
-                build_intoto_statement,
-                wrap_dsse,
-            )
-            from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
-            from releasegate.audit.attestations import record_release_attestation
-
-            tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=True) or "default"
-            bundle_timestamp = str(
-                pr_data.get("updated_at")
-                or pr_data.get("created_at")
-                or "1970-01-01T00:00:00Z"
-            )
-
-            signals_payload: dict = {
-                "metrics": {
-                    "changed_files_count": metrics.changed_files,
-                    "additions": metrics.additions,
-                    "deletions": metrics.deletions,
-                    "total_churn": metrics.total_churn,
-                },
-                "dependency_provenance": dependency_provenance,
             }
 
-            if str(os.getenv("GITHUB_ACTIONS") or "").lower() == "true":
-                source_ref = str(os.getenv("GITHUB_REF") or "").strip()
-                if source_ref:
-                    signals_payload["source_ref"] = source_ref
-                workflow_run = {
-                    k: v
-                    for k, v in {
-                        "provider": "github-actions",
-                        "repository": str(os.getenv("GITHUB_REPOSITORY") or "").strip(),
-                        "workflow": str(os.getenv("GITHUB_WORKFLOW") or "").strip(),
-                        "run_id": str(os.getenv("GITHUB_RUN_ID") or "").strip(),
-                        "run_attempt": str(os.getenv("GITHUB_RUN_ATTEMPT") or "").strip(),
-                        "actor": str(os.getenv("GITHUB_ACTOR") or "").strip(),
-                        "job": str(os.getenv("GITHUB_JOB") or "").strip(),
-                        "ref": str(os.getenv("GITHUB_REF") or "").strip(),
-                        "sha": str(os.getenv("GITHUB_SHA") or "").strip(),
-                    }.items()
-                    if v
-                }
-                if workflow_run:
-                    signals_payload["workflow_run"] = workflow_run
+            dependency_provenance = dependency_provenance if isinstance(dependency_provenance, dict) else {}
 
-            bundle = build_bundle_from_analysis_result(
-                tenant_id=tenant_id,
-                repo=args.repo,
-                pr_number=pr_number,
-                commit_sha=commit_sha,
-                policy_hash=policy_resolution_hash,
-                policy_version="1.0.0",
-                policy_bundle_hash=policy_resolution_hash,
-                risk_score=float(risk_score),
-                decision=decision,
-                reason_codes=reason_codes or reasons,
-                signals=signals_payload,
-                engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
-                timestamp=bundle_timestamp,
-                policy_scope=policy_scope,
-                policy_resolution_hash=policy_resolution_hash,
-            )
-            attestation = build_attestation_from_bundle(bundle)
-            attestation_id = record_release_attestation(
-                decision_id=bundle.decision_id,
-                tenant_id=tenant_id,
-                repo=args.repo,
-                pr_number=pr_number,
-                attestation=attestation,
-            )
-            output["attestation_id"] = attestation_id
-            output["attestation"] = attestation
-            output["policy_scope"] = policy_scope
-            output["policy_resolution_hash"] = policy_resolution_hash
-
-            if args.emit_attestation:
-                with open(args.emit_attestation, "w", encoding="utf-8") as f:
-                    json.dump(attestation, f, indent=2)
-            if args.emit_dsse:
-                statement = build_intoto_statement(attestation)
-                dsse_mode = str(getattr(args, "dsse_signing_mode", "") or "ed25519").strip().lower()
-                if dsse_mode == "sigstore":
-                    from releasegate.attestation.dsse import wrap_dsse_sigstore
-
-                    bundle_out = str(getattr(args, "dsse_sigstore_bundle", "") or "").strip()
-                    if not bundle_out:
-                        bundle_out = f"{args.emit_dsse}.sigstore.bundle.json"
-                    dsse_envelope = wrap_dsse_sigstore(statement, bundle_path=bundle_out)
-                    output["dsse_sigstore_bundle"] = bundle_out
-                else:
-                    dsse_envelope = wrap_dsse(
-                        statement,
-                        signing_key=load_private_key_from_env(),
-                        key_id=current_key_id(),
-                    )
-                with open(args.emit_dsse, "w", encoding="utf-8") as f:
-                    json.dump(dsse_envelope, f, indent=2)
-        except Exception as e:
-            if args.emit_attestation or args.emit_dsse:
-                print(f"Error generating attestation: {e}", file=sys.stderr)
-                return 1
-            output["attestation_error"] = str(e)
-
-        # Write JSON output if requested
-        if args.output:
             try:
-                with open(args.output, "w") as f:
-                    json.dump(output, f, indent=2)
-            except Exception as e:
-                print(f"Error writing output {args.output}: {e}", file=sys.stderr)
-                return 1
-
-        if args.format == "json":
-            print(json.dumps(output, indent=2))
-        else:
-            print(f"Decision: {decision}")
-            print(f"Risk: {risk_level} ({risk_score})")
-            if reasons:
-                print("Reasons:")
-                for r in reasons:
-                    print(f" - {r}")
-
-        # Optional PR comment/check
-        if args.post_comment and args.repo and pr_number:
-            comment_body = (
-                f"## {decision} Compliance Check\n\n"
-                f"**Severity**: {risk_level} ({risk_score})\n\n"
-                + ("\n".join(f"- {r}" for r in reasons) if reasons else "_No policy violations found._")
-            )
-            try:
-                post_pr_comment(args.repo, pr_number, comment_body)
-            except Exception as e:
-                print(f"Warning: Failed to post comment: {e}", file=sys.stderr)
-
-        if args.create_check and args.repo and pr_number:
-            try:
-                create_check_run(
-                    args.repo,
-                    pr_data.get("head", {}).get("sha", ""),
-                    risk_score,
-                    risk_level,
-                    reasons,
-                    evidence=None
+                from releasegate.attestation import (
+                    build_attestation_from_bundle,
+                    build_bundle_from_analysis_result,
+                    build_intoto_statement,
+                    wrap_dsse,
                 )
-            except Exception as e:
-                print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
+                from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
+                from releasegate.audit.attestations import record_release_attestation
 
-        # Enforcement mode
-        mode = os.getenv("RELEASEGATE_ENFORCEMENT", os.getenv("COMPLIANCEBOT_ENFORCEMENT", "report_only"))
-        if mode == "block" and decision == "BLOCK":
-            return 1
-        return 0
+                bundle_timestamp = str(
+                    pr_data.get("updated_at")
+                    or pr_data.get("created_at")
+                    or "1970-01-01T00:00:00Z"
+                )
+
+                signals_payload: dict = {
+                    "metrics": metrics_payload,
+                    "dependency_provenance": dependency_provenance,
+                }
+
+                if str(os.getenv("GITHUB_ACTIONS") or "").lower() == "true":
+                    source_ref = str(os.getenv("GITHUB_REF") or "").strip()
+                    if source_ref:
+                        signals_payload["source_ref"] = source_ref
+                    workflow_run = {
+                        k: v
+                        for k, v in {
+                            "provider": "github-actions",
+                            "repository": str(os.getenv("GITHUB_REPOSITORY") or "").strip(),
+                            "workflow": str(os.getenv("GITHUB_WORKFLOW") or "").strip(),
+                            "run_id": str(os.getenv("GITHUB_RUN_ID") or "").strip(),
+                            "run_attempt": str(os.getenv("GITHUB_RUN_ATTEMPT") or "").strip(),
+                            "actor": str(os.getenv("GITHUB_ACTOR") or "").strip(),
+                            "job": str(os.getenv("GITHUB_JOB") or "").strip(),
+                            "ref": str(os.getenv("GITHUB_REF") or "").strip(),
+                            "sha": str(os.getenv("GITHUB_SHA") or "").strip(),
+                        }.items()
+                        if v
+                    }
+                    if workflow_run:
+                        signals_payload["workflow_run"] = workflow_run
+
+                bundle = build_bundle_from_analysis_result(
+                    tenant_id=tenant_id,
+                    repo=args.repo,
+                    pr_number=pr_number,
+                    commit_sha=commit_sha,
+                    policy_hash=policy_hash,
+                    policy_version="1.0.0",
+                    policy_bundle_hash=policy_hash,
+                    risk_score=float(risk_score or 0.0),
+                    decision=control_result,
+                    reason_codes=reason_codes or reasons,
+                    signals=signals_payload,
+                    engine_version=os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
+                    timestamp=bundle_timestamp,
+                    policy_scope=policy_scope,
+                    policy_resolution_hash=policy_resolution_hash,
+                )
+                decision_id = bundle.decision_id
+
+                try:
+                    attestation = build_attestation_from_bundle(bundle)
+                    signature = attestation.get("signature") if isinstance(attestation, dict) else {}
+                    if isinstance(signature, dict):
+                        signed_payload_hash = signature.get("signed_payload_hash")
+
+                    attestation_id = record_release_attestation(
+                        decision_id=bundle.decision_id,
+                        tenant_id=tenant_id,
+                        repo=args.repo,
+                        pr_number=pr_number,
+                        attestation=attestation,
+                    )
+
+                    if args.emit_attestation:
+                        with open(args.emit_attestation, "w", encoding="utf-8") as f:
+                            json.dump(attestation, f, indent=2)
+
+                    if args.emit_dsse:
+                        statement = build_intoto_statement(attestation)
+                        dsse_mode = str(getattr(args, "dsse_signing_mode", "") or "ed25519").strip().lower()
+                        if dsse_mode == "sigstore":
+                            from releasegate.attestation.dsse import wrap_dsse_sigstore
+
+                            bundle_out = str(getattr(args, "dsse_sigstore_bundle", "") or "").strip()
+                            if not bundle_out:
+                                bundle_out = f"{args.emit_dsse}.sigstore.bundle.json"
+                            dsse_sigstore_bundle_path = bundle_out
+                            dsse_envelope = wrap_dsse_sigstore(statement, bundle_path=bundle_out)
+                        else:
+                            dsse_envelope = wrap_dsse(
+                                statement,
+                                signing_key=load_private_key_from_env(),
+                                key_id=current_key_id(),
+                            )
+                        with open(args.emit_dsse, "w", encoding="utf-8") as f:
+                            json.dump(dsse_envelope, f, indent=2)
+                except Exception as e:
+                    errors.append(f"ATTESTATION_GENERATION_FAILED: {e}")
+                    if args.emit_attestation or args.emit_dsse:
+                        artifact_failed = True
+            except Exception as e:
+                errors.append(f"ATTESTATION_PIPELINE_FAILED: {e}")
+                if args.emit_attestation or args.emit_dsse:
+                    artifact_failed = True
+
+            report = build_compliance_report(
+                repo=args.repo,
+                pr_number=pr_number,
+                head_sha=commit_sha or None,
+                base_sha=base_sha,
+                tenant_id=tenant_id,
+                control_result=control_result,
+                risk_score=risk_score,
+                risk_level=risk_level,
+                reasons=reasons,
+                reason_codes=reason_codes,
+                metrics=metrics_payload,
+                dependency_provenance=dependency_provenance,
+                attached_issue_keys=attached_issue_keys,
+                policy_hash=policy_hash,
+                policy_resolution_hash=policy_resolution_hash,
+                policy_scope=policy_scope,
+                enforcement_mode=enforcement_mode,
+                decision_id=decision_id,
+                attestation_id=attestation_id,
+                signed_payload_hash=signed_payload_hash,
+                dsse_path=dsse_path,
+                dsse_sigstore_bundle_path=dsse_sigstore_bundle_path,
+                artifacts_sha256_path=artifacts_sha256_path,
+                errors=errors,
+            )
+
+            try:
+                schema_errors = validate_compliance_report(report)
+            except Exception as exc:
+                errors.append(f"COMPLIANCE_REPORT_SCHEMA_VALIDATION_FAILED: {exc}")
+                report["errors"] = sorted(set(errors))
+            else:
+                if schema_errors:
+                    for msg in schema_errors[:10]:
+                        errors.append(f"COMPLIANCE_REPORT_SCHEMA_INVALID: {msg}")
+                    report["errors"] = sorted(set(errors))
+
+            if args.output:
+                write_json_report_atomic(args.output, report)
+                # Always attempt to emit a deterministic artifact hash list for evidence.
+                artifacts = [args.output]
+                if args.emit_attestation:
+                    artifacts.append(args.emit_attestation)
+                if args.emit_dsse:
+                    artifacts.append(args.emit_dsse)
+                if os.path.exists("attestations.log"):
+                    artifacts.append("attestations.log")
+                write_artifacts_sha256(artifacts_sha256_path or "releasegate.artifacts.sha256", artifacts)
+
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print(f"Decision: {control_result}")
+                print(f"Risk: {risk_level} ({risk_score})")
+                if reasons:
+                    print("Reasons:")
+                    for r in reasons:
+                        print(f" - {r}")
+                if errors:
+                    print("Errors:")
+                    for err in errors:
+                        print(f" - {err}")
+
+            # Optional PR comment/check
+            if args.post_comment and args.repo and pr_number:
+                comment_body = (
+                    f"## {control_result} Compliance Check\n\n"
+                    f"**Severity**: {risk_level} ({risk_score})\n\n"
+                    + ("\n".join(f"- {r}" for r in reasons) if reasons else "_No policy violations found._")
+                )
+                try:
+                    post_pr_comment(args.repo, pr_number, comment_body)
+                except Exception as e:
+                    print(f"Warning: Failed to post comment: {e}", file=sys.stderr)
+
+            if args.create_check and args.repo and pr_number:
+                try:
+                    create_check_run(
+                        args.repo,
+                        pr_data.get("head", {}).get("sha", ""),
+                        risk_score,
+                        risk_level,
+                        reasons,
+                        evidence=None
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
+
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
+        except Exception as e:
+            errors.append(f"ANALYSIS_FAILED: {e}")
+            if args.emit_attestation or args.emit_dsse:
+                artifact_failed = True
+
+            report = build_compliance_report(
+                repo=args.repo,
+                pr_number=pr_number,
+                head_sha=commit_sha or None,
+                base_sha=base_sha,
+                tenant_id=tenant_id,
+                control_result="BLOCK",
+                risk_score=None,
+                risk_level="UNKNOWN",
+                reasons=[],
+                reason_codes=[],
+                metrics=metrics_payload,
+                dependency_provenance={},
+                attached_issue_keys=[],
+                policy_hash=policy_hash,
+                policy_resolution_hash=policy_resolution_hash,
+                policy_scope=policy_scope,
+                enforcement_mode=enforcement_mode,
+                decision_id=decision_id,
+                attestation_id=None,
+                signed_payload_hash=None,
+                dsse_path=dsse_path,
+                dsse_sigstore_bundle_path=None,
+                artifacts_sha256_path=artifacts_sha256_path,
+                errors=errors,
+            )
+
+            if args.output:
+                try:
+                    write_json_report_atomic(args.output, report)
+                    write_artifacts_sha256(artifacts_sha256_path or "releasegate.artifacts.sha256", [args.output])
+                except Exception as write_err:
+                    print(f"Error writing output {args.output}: {write_err}", file=sys.stderr)
+                    return 1
+
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True))
+            else:
+                print("Decision: BLOCK")
+                print("Risk: UNKNOWN")
+                if errors:
+                    print("Errors:")
+                    for err in errors:
+                        print(f" - {err}")
+
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
 
     if args.cmd == "evaluate":
         try:
@@ -770,6 +1114,18 @@ def main() -> int:
                 tenant_id=tenant_id,
             )
             print(json.dumps(rows, indent=2, default=str)) # Simple JSON output for list
+
+        elif args.audit_cmd == "search":
+            tenant_id = resolve_tenant_id(args.tenant)
+            rows = AuditReader.search_decisions(
+                limit=args.limit,
+                repo=args.repo,
+                status=args.status,
+                pr=args.pr,
+                jira_issue_key=args.jira,
+                tenant_id=tenant_id,
+            )
+            print(json.dumps(rows, indent=2, default=str))
             
         elif args.audit_cmd == "show":
             row = AuditReader.get_decision(args.decision_id, tenant_id=resolve_tenant_id(args.tenant))

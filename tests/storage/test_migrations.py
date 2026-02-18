@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260214_")
+    assert current.startswith("20260218_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -31,6 +31,8 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260213_012_transparency_engine_build" in migration_ids
         assert "20260213_013_transparency_daily_roots" in migration_ids
         assert "20260214_014_attestation_immutability" in migration_ids
+        assert "20260218_015_jira_lock_ledger" in migration_ids
+        assert "20260218_016_decision_external_refs" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -113,11 +115,32 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "root_hash" in root_cols
         assert root_pk == ["tenant_id", "date_utc"]
 
+        cur.execute("PRAGMA table_info(jira_lock_events)")
+        lock_event_info = cur.fetchall()
+        lock_event_cols = {row[1] for row in lock_event_info}
+        lock_event_pk = [row[1] for row in sorted((r for r in lock_event_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "event_id", "issue_key", "event_type"} <= lock_event_cols
+        assert lock_event_pk == ["tenant_id", "event_id"]
+
+        cur.execute("PRAGMA table_info(jira_issue_locks_current)")
+        lock_current_info = cur.fetchall()
+        lock_current_cols = {row[1] for row in lock_current_info}
+        lock_current_pk = [row[1] for row in sorted((r for r in lock_current_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "issue_key", "locked"} <= lock_current_cols
+        assert lock_current_pk == ["tenant_id", "issue_key"]
+
+        cur.execute("PRAGMA table_info(audit_decision_refs)")
+        ref_info = cur.fetchall()
+        ref_cols = {row[1] for row in ref_info}
+        ref_pk = [row[1] for row in sorted((r for r in ref_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "decision_id", "repo", "ref_type", "ref_value"} <= ref_cols
+        assert ref_pk == ["tenant_id", "decision_id", "ref_type", "ref_value"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260214_014_attestation_immutability"
-        assert state[1] == "20260214_014_attestation_immutability"
+        assert state[0] == "20260218_016_decision_external_refs"
+        assert state[1] == "20260218_016_decision_external_refs"
     finally:
         conn.close()
 

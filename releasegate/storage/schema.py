@@ -73,6 +73,25 @@ def _init_postgres_schema() -> str:
         ON audit_decisions(tenant_id, decision_id)
         """
     )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_context_id ON audit_decisions(context_id)")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_created
+        ON audit_decisions(tenant_id, repo, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_pr
+        ON audit_decisions(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_tenant_status_created
+        ON audit_decisions(tenant_id, release_status, created_at DESC)
+        """
+    )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS audit_overrides (
@@ -114,8 +133,91 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_repo_created
+        ON audit_overrides(tenant_id, repo, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_repo_pr
+        ON audit_overrides(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
         ON audit_overrides(tenant_id, repo, previous_hash)
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_decision_refs (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            pr_number INTEGER,
+            ref_type TEXT NOT NULL,
+            ref_value TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id, ref_type, ref_value)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_refs_tenant_ref_created
+        ON audit_decision_refs(tenant_id, ref_type, ref_value, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_refs_tenant_repo_pr_created
+        ON audit_decision_refs(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_audit_decision_refs_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Decision reference index is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_audit_decision_refs_update'
+            ) THEN
+                CREATE TRIGGER prevent_audit_decision_refs_update
+                BEFORE UPDATE ON audit_decision_refs
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_audit_decision_refs_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_audit_decision_refs_delete'
+            ) THEN
+                CREATE TRIGGER prevent_audit_decision_refs_delete
+                BEFORE DELETE ON audit_decision_refs
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_audit_decision_refs_mutation();
+            END IF;
+        END $$;
         """
     )
     cur.execute(
@@ -400,6 +502,112 @@ def _init_postgres_schema() -> str:
                 EXECUTE FUNCTION releasegate_prevent_transparency_mutation();
             END IF;
         END $$;
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jira_lock_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            issue_key TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            decision_id TEXT,
+            repo TEXT,
+            pr_number INTEGER,
+            reason_codes_json TEXT NOT NULL,
+            policy_hash TEXT,
+            policy_resolution_hash TEXT,
+            override_expires_at TIMESTAMPTZ,
+            override_reason TEXT,
+            actor TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_issue_created
+        ON jira_lock_events(tenant_id, issue_key, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_created
+        ON jira_lock_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_jira_lock_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Jira lock ledger is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_jira_lock_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_jira_lock_events_update
+                BEFORE UPDATE ON jira_lock_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_jira_lock_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_jira_lock_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_jira_lock_events_delete
+                BEFORE DELETE ON jira_lock_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_jira_lock_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jira_issue_locks_current (
+            tenant_id TEXT NOT NULL,
+            issue_key TEXT NOT NULL,
+            locked BOOLEAN NOT NULL,
+            lock_reason_codes_json TEXT NOT NULL,
+            policy_hash TEXT,
+            policy_resolution_hash TEXT,
+            decision_id TEXT,
+            repo TEXT,
+            pr_number INTEGER,
+            locked_by TEXT,
+            override_expires_at TIMESTAMPTZ,
+            override_reason TEXT,
+            override_by TEXT,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, issue_key)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_issue_locks_current_tenant_locked
+        ON jira_issue_locks_current(tenant_id, locked, updated_at DESC)
         """
     )
     cur.execute(

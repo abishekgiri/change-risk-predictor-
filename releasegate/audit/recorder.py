@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, List, Optional, Sequence
 
 from releasegate.audit.policy_bundles import store_policy_bundle
 from releasegate.decision.hashing import (
@@ -85,6 +85,67 @@ class AuditRecorder:
             )
 
     @staticmethod
+    def _extract_decision_refs(decision: Decision) -> List[tuple[str, str]]:
+        """
+        Extract external references from a Decision for cross-system search.
+        """
+        refs: list[tuple[str, str]] = []
+
+        # Jira issue keys (primary use case for multi-repo enforcement + change windows).
+        try:
+            jira_keys: Sequence[Any] = getattr(getattr(decision.enforcement_targets, "external", None), "jira", []) or []
+        except Exception:
+            jira_keys = []
+        for raw in jira_keys:
+            key = str(raw or "").strip()
+            if key:
+                refs.append(("jira", key))
+
+        # Git ref/sha (optional but useful for later search and evidence).
+        try:
+            git_ref = str(getattr(decision.enforcement_targets, "ref", "") or "").strip()
+        except Exception:
+            git_ref = ""
+        if git_ref:
+            refs.append(("git_ref", git_ref))
+
+        # Deterministic ordering + de-dupe.
+        uniq = sorted(set(refs))
+        return uniq
+
+    @staticmethod
+    def _persist_decision_refs(
+        tenant_id: str,
+        decision: Decision,
+        repo: str,
+        pr_number: Optional[int],
+        created_at: str,
+    ) -> None:
+        refs = AuditRecorder._extract_decision_refs(decision)
+        if not refs:
+            return
+
+        storage = get_storage_backend()
+        for ref_type, ref_value in refs:
+            storage.execute(
+                """
+                INSERT INTO audit_decision_refs (
+                    tenant_id, decision_id, repo, pr_number, ref_type, ref_value, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id, decision_id, ref_type, ref_value) DO NOTHING
+                """,
+                (
+                    tenant_id,
+                    decision.decision_id,
+                    repo,
+                    pr_number,
+                    ref_type,
+                    ref_value,
+                    created_at,
+                ),
+            )
+
+    @staticmethod
     def record(decision: Decision) -> Decision:
         repo = decision.enforcement_targets.repository
         pr_number = decision.enforcement_targets.pr_number
@@ -141,6 +202,17 @@ class AuditRecorder:
                 decision=decision,
                 created_at=created_at,
             )
+            try:
+                AuditRecorder._persist_decision_refs(
+                    tenant_id=effective_tenant,
+                    decision=decision,
+                    repo=repo,
+                    pr_number=pr_number,
+                    created_at=created_at,
+                )
+            except Exception:
+                # Best-effort index for search; decision persistence is the source of truth.
+                pass
             store_policy_bundle(
                 tenant_id=effective_tenant,
                 policy_bundle_hash=decision.policy_bundle_hash,

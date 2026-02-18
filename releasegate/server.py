@@ -1147,6 +1147,43 @@ def audit_export(
     return payload
 
 
+@app.get("/audit/search")
+def audit_search(
+    limit: int = 200,
+    repo: Optional[str] = None,
+    status: Optional[str] = None,
+    pr: Optional[int] = None,
+    jira: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    """
+    Search audit decisions across repos and/or by external references (e.g. Jira issue key).
+    """
+    from releasegate.audit.reader import AuditReader
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    limit = _bounded_limit(limit, max_allowed=500, field="limit")
+    rows = AuditReader.search_decisions(
+        limit=limit,
+        repo=repo,
+        status=status,
+        pr=pr,
+        jira_issue_key=jira,
+        tenant_id=effective_tenant,
+    )
+    rows = _attach_attestation_to_rows(rows)
+    return {
+        "ok": True,
+        "limit": limit,
+        "items": rows,
+    }
+
+
 @app.post("/audit/checkpoints/override")
 def create_override_checkpoint(
     repo: str,
