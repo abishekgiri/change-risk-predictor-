@@ -81,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     audit_list.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
     audit_list.add_argument("--pr", type=int)
     audit_list.add_argument("--tenant", required=True, help="Tenant/org identifier")
+
+    # audit search
+    audit_search = audit_sub.add_parser("search", help="Search decisions across repos and external refs (e.g. Jira issue)")
+    audit_search.add_argument("--repo", help="Repository name (owner/repo) (optional)")
+    audit_search.add_argument("--jira", help="Jira issue key (optional)")
+    audit_search.add_argument("--limit", type=int, default=20)
+    audit_search.add_argument("--status", choices=["ALLOWED", "BLOCKED", "CONDITIONAL", "SKIPPED", "ERROR"])
+    audit_search.add_argument("--pr", type=int)
+    audit_search.add_argument("--tenant", required=True, help="Tenant/org identifier")
     
     # audit show
     audit_show = audit_sub.add_parser("show", help="Show full decision details")
@@ -125,6 +134,45 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow invalid policy files to be skipped while validating policy bundle.",
     )
+
+    policy_compile_p = sub.add_parser(
+        "compile-policy",
+        help="Compile layered policy bundle (org -> repo -> environment).",
+    )
+    policy_compile_p.add_argument("--org-policy", help="Path to org policy YAML/JSON (object)")
+    policy_compile_p.add_argument("--repo-policy", help="Path to repo policy YAML/JSON (object)")
+    policy_compile_p.add_argument("--environment", required=True, help="Environment name (e.g., DEV, PRODUCTION)")
+    policy_compile_p.add_argument(
+        "--environment-policies",
+        help="Path to environment policy map YAML/JSON (object mapping env -> policy object)",
+    )
+    policy_compile_p.add_argument(
+        "--list-merge",
+        action="append",
+        default=[],
+        help="List merge strategy mapping like path=strategy (e.g., approvals.security_team_slugs=union)",
+    )
+    policy_compile_p.add_argument("--out", required=True, help="Output JSON path for compiled bundle")
+    policy_compile_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_validate_p = sub.add_parser(
+        "validate-policy",
+        help="Validate layered policy inputs and compiled bundle schema.",
+    )
+    policy_validate_p.add_argument("--org-policy", help="Path to org policy YAML/JSON (object)")
+    policy_validate_p.add_argument("--repo-policy", help="Path to repo policy YAML/JSON (object)")
+    policy_validate_p.add_argument("--environment", required=True, help="Environment name (e.g., DEV, PRODUCTION)")
+    policy_validate_p.add_argument(
+        "--environment-policies",
+        help="Path to environment policy map YAML/JSON (object mapping env -> policy object)",
+    )
+    policy_validate_p.add_argument(
+        "--list-merge",
+        action="append",
+        default=[],
+        help="List merge strategy mapping like path=strategy (e.g., approvals.security_team_slugs=union)",
+    )
+    policy_validate_p.add_argument("--format", default="json", choices=["json", "text"])
 
     checkpoint_p = sub.add_parser("checkpoint-override", help="Create signed override-ledger root checkpoint.")
     checkpoint_p.add_argument("--repo", required=True)
@@ -285,6 +333,70 @@ def main() -> int:
         print(json.dumps(migration_status(), indent=2))
         return 0
 
+    if args.cmd in {"compile-policy", "validate-policy"}:
+        from releasegate.policy.bundle import build_policy_bundle, validate_policy_bundle
+        from releasegate.storage.atomic import atomic_write
+
+        def _load_obj(path: str | None) -> dict:
+            if not path:
+                return {}
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = yaml.safe_load(handle) or {}
+            if not isinstance(loaded, dict):
+                raise ValueError(f"expected a YAML/JSON object in {path}")
+            return loaded
+
+        def _parse_list_merge(items: list[str]) -> dict[str, str]:
+            out: dict[str, str] = {}
+            for raw in items or []:
+                value = str(raw or "").strip()
+                if not value:
+                    continue
+                if "=" not in value:
+                    raise ValueError(f"invalid --list-merge entry {value!r} (expected path=strategy)")
+                k, v = value.split("=", 1)
+                key = k.strip()
+                strat = v.strip()
+                if not key or not strat:
+                    raise ValueError(f"invalid --list-merge entry {value!r} (expected path=strategy)")
+                out[key] = strat
+            return out
+
+        org_policy = _load_obj(getattr(args, "org_policy", None))
+        repo_policy = _load_obj(getattr(args, "repo_policy", None))
+        env_policies = _load_obj(getattr(args, "environment_policies", None)) if getattr(args, "environment_policies", None) else None
+        if env_policies is not None and not isinstance(env_policies, dict):
+            raise ValueError("environment_policies must be an object mapping env -> policy")
+
+        bundle = build_policy_bundle(
+            org_policy=org_policy,
+            repo_policy=repo_policy,
+            environment=str(getattr(args, "environment", "") or "").strip(),
+            environment_policies=env_policies,
+            list_merge_strategies=_parse_list_merge(getattr(args, "list_merge", []) or []),
+        )
+        schema_errors = validate_policy_bundle(bundle)
+        ok = not schema_errors
+
+        if args.cmd == "compile-policy":
+            out_path = str(getattr(args, "out"))
+            with atomic_write(out_path, "w") as f:
+                f.write(json.dumps(bundle, indent=2, sort_keys=True, ensure_ascii=False))
+                f.write("\n")
+
+        if getattr(args, "format", "json") == "json":
+            payload = {"ok": ok, "bundle": bundle, "errors": schema_errors}
+            print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
+        else:
+            if ok:
+                print(f"ok: true\npolicy_resolution_hash: {bundle.get('policy_resolution_hash')}")
+            else:
+                print("ok: false")
+                for err in schema_errors:
+                    print(f"- {err}")
+
+        return 0 if ok else 1
+
     if args.cmd == "analyze-pr":
         # Set token if provided
         if args.token:
@@ -298,6 +410,25 @@ def main() -> int:
                     config = yaml.safe_load(f) or {}
             except Exception as e:
                 print(f"Warning: Failed to load config {args.config}: {e}", file=sys.stderr)
+
+        # Optional multi-repo control plane registry (repos.yaml).
+        # Config file always wins; registry fills missing top-level sections.
+        try:
+            from releasegate.control_plane.repo_registry import (
+                get_repo_entry,
+                load_repo_policy_inputs,
+                load_repo_registry,
+            )
+
+            registry_path = str(os.getenv("RELEASEGATE_REPO_REGISTRY_PATH") or "repos.yaml")
+            registry = load_repo_registry(registry_path)
+            entry = get_repo_entry(registry=registry, repo=args.repo)
+            if entry:
+                registry_cfg = load_repo_policy_inputs(entry=entry)
+                for k, v in registry_cfg.items():
+                    config.setdefault(k, v)
+        except Exception:
+            pass
 
         from releasegate.reporting import (
             build_compliance_report,
@@ -444,7 +575,11 @@ def main() -> int:
             else:
                 reason_codes.append("RISK_LOW_HEURISTIC")
 
-            env_name = str(os.getenv("RELEASEGATE_ENVIRONMENT") or "DEV")
+            env_name = str(
+                os.getenv("RELEASEGATE_ENVIRONMENT")
+                or (config.get("environment") if isinstance(config, dict) else None)
+                or "DEV"
+            )
             resolved_policy = {}
             try:
                 from releasegate.policy.inheritance import resolve_policy_inheritance
@@ -454,11 +589,15 @@ def main() -> int:
                 repo_policies = inheritance_cfg.get("repo_policies") if isinstance(inheritance_cfg, dict) else {}
                 repo_policy = repo_policies.get(args.repo) if isinstance(repo_policies, dict) else {}
                 env_policies = inheritance_cfg.get("environment_policies") if isinstance(inheritance_cfg, dict) else {}
+                list_merge_strategies = (
+                    inheritance_cfg.get("list_merge_strategies") if isinstance(inheritance_cfg, dict) else None
+                )
                 resolved = resolve_policy_inheritance(
                     org_policy=org_policy if isinstance(org_policy, dict) else {},
                     repo_policy=repo_policy if isinstance(repo_policy, dict) else {},
                     environment=env_name,
                     environment_policies=env_policies if isinstance(env_policies, dict) else None,
+                    list_merge_strategies=list_merge_strategies if isinstance(list_merge_strategies, dict) else None,
                 )
                 resolved_policy = resolved.get("resolved_policy", {}) if isinstance(resolved, dict) else {}
                 policy_scope = list(resolved.get("policy_scope") or [])
@@ -975,6 +1114,18 @@ def main() -> int:
                 tenant_id=tenant_id,
             )
             print(json.dumps(rows, indent=2, default=str)) # Simple JSON output for list
+
+        elif args.audit_cmd == "search":
+            tenant_id = resolve_tenant_id(args.tenant)
+            rows = AuditReader.search_decisions(
+                limit=args.limit,
+                repo=args.repo,
+                status=args.status,
+                pr=args.pr,
+                jira_issue_key=args.jira,
+                tenant_id=tenant_id,
+            )
+            print(json.dumps(rows, indent=2, default=str))
             
         elif args.audit_cmd == "show":
             row = AuditReader.get_decision(args.decision_id, tenant_id=resolve_tenant_id(args.tenant))

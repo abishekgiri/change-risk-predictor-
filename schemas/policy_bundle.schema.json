@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseGate Policy Bundle (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "policy_bundle_v1" },
+    "environment": { "type": ["string", "null"] },
+    "environment_scope": { "type": ["string", "null"] },
+    "policy_scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "policy_resolution_hash": { "type": "string" },
+    "resolved_policy": { "type": "object" },
+    "provenance": { "type": "object" },
+    "list_merge_strategies": { "type": "object" }
+  },
+  "required": [
+    "schema_version",
+    "environment",
+    "environment_scope",
+    "policy_scope",
+    "policy_resolution_hash",
+    "resolved_policy",
+    "provenance",
+    "list_merge_strategies"
+  ]
+}
+

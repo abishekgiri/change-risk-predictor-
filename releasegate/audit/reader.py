@@ -38,6 +38,62 @@ class AuditReader:
         return storage.fetchall(query, params)
 
     @staticmethod
+    def search_decisions(
+        *,
+        limit: int = 20,
+        repo: Optional[str] = None,
+        status: Optional[str] = None,
+        pr: Optional[int] = None,
+        jira_issue_key: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search decisions across repositories and/or by external references.
+        """
+        init_db()
+        storage = get_storage_backend()
+        effective_tenant = resolve_tenant_id(tenant_id)
+
+        if jira_issue_key:
+            query = """
+                SELECT d.*
+                FROM audit_decisions d
+                JOIN audit_decision_refs r
+                  ON d.tenant_id = r.tenant_id AND d.decision_id = r.decision_id
+                WHERE d.tenant_id = ?
+                  AND r.ref_type = ?
+                  AND r.ref_value = ?
+            """
+            params: List[Any] = [effective_tenant, "jira", str(jira_issue_key).strip()]
+            if repo:
+                query += " AND d.repo = ?"
+                params.append(str(repo).strip())
+            if status:
+                query += " AND d.release_status = ?"
+                params.append(status)
+            if pr is not None:
+                query += " AND d.pr_number = ?"
+                params.append(pr)
+            query += " ORDER BY d.created_at DESC LIMIT ?"
+            params.append(limit)
+            return storage.fetchall(query, params)
+
+        query = "SELECT * FROM audit_decisions WHERE tenant_id = ?"
+        params = [effective_tenant]
+        if repo:
+            query += " AND repo = ?"
+            params.append(str(repo).strip())
+        if status:
+            query += " AND release_status = ?"
+            params.append(status)
+        if pr is not None:
+            query += " AND pr_number = ?"
+            params.append(pr)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return storage.fetchall(query, params)
+
+    @staticmethod
     def get_decision(decision_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         init_db()
         storage = get_storage_backend()

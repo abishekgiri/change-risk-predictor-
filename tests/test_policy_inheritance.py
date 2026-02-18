@@ -53,3 +53,44 @@ def test_policy_inheritance_preserves_dependency_provenance_rule():
         environment_policies=None,
     )
     assert resolved["resolved_policy"]["dependency_provenance"]["lockfile_required"] is True
+
+
+def test_policy_inheritance_emits_field_provenance():
+    resolved = resolve_policy_inheritance(
+        org_policy={
+            "required_approvals": 1,
+            "labels": {"security": False, "release": False},
+        },
+        repo_policy={
+            "required_approvals": 2,
+            "labels": {"release": True},
+        },
+        environment="PRODUCTION",
+        environment_policies={
+            "production": {
+                "required_approvals": 3,
+                "labels": {"security": True},
+                "freeze": True,
+            }
+        },
+    )
+    provenance = resolved.get("provenance") or {}
+    assert provenance["required_approvals"] == ["environment"]
+    assert provenance["labels.security"] == ["environment"]
+    assert provenance["labels.release"] == ["repo"]
+    assert provenance["freeze"] == ["environment"]
+    # Default-injected policy defaults must be attributed.
+    assert provenance["dependency_provenance.lockfile_required"] == ["default"]
+
+
+def test_policy_inheritance_list_union_strategy_is_deterministic():
+    resolved = resolve_policy_inheritance(
+        org_policy={"approvals": {"security_team_slugs": ["org/security"]}},
+        repo_policy={"approvals": {"security_team_slugs": ["org/security", "org/platform"]}},
+        environment="DEV",
+        environment_policies=None,
+        list_merge_strategies={"approvals.security_team_slugs": "union"},
+    )
+    cfg = resolved["resolved_policy"]
+    assert cfg["approvals"]["security_team_slugs"] == ["org/platform", "org/security"]
+    assert resolved["provenance"]["approvals.security_team_slugs"] == ["org", "repo"]
