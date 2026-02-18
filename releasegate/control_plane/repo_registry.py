@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -46,8 +47,32 @@ class RepoRegistry(BaseModel):
         return int(value)
 
 
+_REL_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def _validate_relative_path(value: str, *, field: str) -> str:
+    """
+    Defensive validation for registry-provided paths.
+    This is intentionally strict to prevent traversal and symlink escapes.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{field} must be non-empty")
+    raw = raw.replace("\\", "/")
+    if raw.startswith("/"):
+        raise ValueError(f"{field} must be relative")
+    if ":" in raw:
+        raise ValueError(f"{field} must not contain ':'")
+    if ".." in Path(raw).parts:
+        raise ValueError(f"{field} must not contain '..'")
+    if not _REL_PATH_RE.fullmatch(raw):
+        raise ValueError(f"{field} contains invalid characters")
+    return raw
+
+
 def load_repo_registry(path: str = "repos.yaml", *, base_dir: Optional[str | Path] = None) -> RepoRegistry:
-    registry_path = safe_join_under(base_dir or Path.cwd(), path)
+    rel = _validate_relative_path(path, field="registry path")
+    registry_path = safe_join_under(base_dir or Path.cwd(), rel)
     raw = registry_path.read_text(encoding="utf-8")
     data = yaml.safe_load(raw) or {}
     if not isinstance(data, dict):
@@ -86,7 +111,8 @@ def load_repo_policy_inputs(
     def _load_obj(path: Optional[str]) -> dict:
         if not path:
             return {}
-        p = safe_join_under(base, path)
+        rel = _validate_relative_path(path, field="policy path")
+        p = safe_join_under(base, rel)
         loaded = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         if not isinstance(loaded, dict):
             raise ValueError(f"expected object in {path}")
