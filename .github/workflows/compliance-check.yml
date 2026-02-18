@@ -46,6 +46,7 @@ jobs:
             --format text
 
       - name: Run Policy Analysis
+        continue-on-error: true
         env:
           # Use the built-in GITHUB_TOKEN for API access logic in cli.py
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,9 +69,12 @@ jobs:
             --tenant "${{ github.repository_owner }}" \
             --emit-attestation attestation.json \
             --emit-dsse releasegate.dsse.json \
-            --format json > compliance_report.json
+            --output compliance_report.json \
+            --format json
 
       - name: Verify DSSE artifact
+        if: always()
+        continue-on-error: true
         env:
           RELEASEGATE_SIGNING_KEY: ${{ secrets.RELEASEGATE_SIGNING_KEY }}
           RELEASEGATE_ATTESTATION_KEY_ID: rg-ci-2026-02
@@ -87,16 +91,115 @@ jobs:
           releasegate log-dsse --dsse releasegate.dsse.json --log attestations.log --format json
 
       - name: Generate artifact sha256 sums
+        if: always()
         run: |
-          sha256sum releasegate.dsse.json attestation.json compliance_report.json attestations.log > releasegate.artifacts.sha256
+          set -euo pipefail
+          files=()
+          for f in compliance_report.json attestation.json releasegate.dsse.json attestations.log; do
+            if [ -f "$f" ]; then
+              files+=("$f")
+            fi
+          done
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No artifacts found to hash."
+            exit 0
+          fi
+          sha256sum "${files[@]}" > releasegate.artifacts.sha256
 
       - name: Upload ReleaseGate artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: releasegate-artifacts
+          if-no-files-found: warn
           path: |
             compliance_report.json
             attestation.json
             releasegate.dsse.json
             releasegate.artifacts.sha256
             attestations.log
+
+      - name: Gate (enforce mode only)
+        if: always()
+        env:
+          RELEASEGATE_SIGNING_KEY: ${{ secrets.RELEASEGATE_SIGNING_KEY }}
+          RELEASEGATE_ATTESTATION_KEY_ID: rg-ci-2026-02
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+
+          report_path = pathlib.Path("compliance_report.json")
+          if not report_path.exists():
+              print("Missing compliance_report.json; failing closed.", file=sys.stderr)
+              sys.exit(1)
+
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          mode = str(report.get("enforcement_mode") or "monitor").strip().lower()
+          verdict = str(report.get("verdict") or "FAIL").strip().upper()
+          errors = report.get("errors") or []
+
+          if mode != "enforce":
+              print(f"Enforcement mode is {mode}; not blocking.")
+              sys.exit(0)
+
+          if errors:
+              print("Report contains errors; blocking in enforce mode:", file=sys.stderr)
+              for err in errors:
+                  print(f" - {err}", file=sys.stderr)
+              sys.exit(1)
+
+          if verdict == "FAIL":
+              print("Verdict is FAIL; blocking in enforce mode.", file=sys.stderr)
+              sys.exit(1)
+
+          dsse_path = report.get("dsse_path") or "releasegate.dsse.json"
+          if not dsse_path:
+              print("Missing dsse_path; blocking in enforce mode.", file=sys.stderr)
+              sys.exit(1)
+
+          dsse_file = pathlib.Path(dsse_path)
+          if not dsse_file.exists():
+              print(f"Missing DSSE artifact: {dsse_path}; blocking in enforce mode.", file=sys.stderr)
+              sys.exit(1)
+
+          # Build a key-id map from the configured signing key and verify DSSE.
+          try:
+              from releasegate.attestation.crypto import (
+                  current_key_id,
+                  load_private_key_from_env,
+                  public_key_pem_from_private,
+              )
+          except Exception as e:
+              print(f"Failed to import key helpers: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          key_id = current_key_id()
+          public_key = public_key_pem_from_private(load_private_key_from_env()).strip()
+          key_map_path = pathlib.Path("releasegate.public_keys.json")
+          key_map_path.write_text(json.dumps({key_id: public_key}), encoding="utf-8")
+
+          cmd = [
+              "releasegate",
+              "verify-dsse",
+              "--dsse",
+              dsse_path,
+              "--key-file",
+              str(key_map_path),
+              "--require-keyid",
+              key_id,
+              "--format",
+              "json",
+          ]
+          result = subprocess.run(cmd, capture_output=True, text=True)
+          if result.returncode != 0:
+              print("DSSE verification failed; blocking in enforce mode.", file=sys.stderr)
+              sys.stderr.write(result.stderr)
+              sys.stderr.write(result.stdout)
+              sys.exit(1)
+          print("Gate passed (enforce mode).")
+          sys.exit(0)
+          PY
