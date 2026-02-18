@@ -49,11 +49,6 @@ def resolve_enforcement_mode(config: Optional[Dict[str, Any]] = None) -> str:
     Returns:
       "monitor" or "enforce"
     """
-    env_raw = os.getenv("RELEASEGATE_ENFORCEMENT") or os.getenv("COMPLIANCEBOT_ENFORCEMENT") or ""
-    env_mode = _normalize_enforcement_mode(env_raw)
-    if env_mode:
-        return env_mode
-
     cfg = config if isinstance(config, dict) else {}
     enforcement = cfg.get("enforcement")
     if isinstance(enforcement, dict):
@@ -67,6 +62,11 @@ def resolve_enforcement_mode(config: Optional[Dict[str, Any]] = None) -> str:
         if mode:
             return mode
 
+    env_raw = os.getenv("RELEASEGATE_ENFORCEMENT") or os.getenv("COMPLIANCEBOT_ENFORCEMENT") or ""
+    env_mode = _normalize_enforcement_mode(env_raw)
+    if env_mode:
+        return env_mode
+
     return "monitor"
 
 
@@ -76,6 +76,20 @@ def exit_code_for_verdict(enforcement_mode: str, verdict: str) -> int:
     if mode == "enforce" and v == "FAIL":
         return 1
     return 0
+
+
+def exit_code_for_report(enforcement_mode: str, *, verdict: str, errors: Sequence[str] | None = None) -> int:
+    """
+    Exit code semantics for CI:
+    - monitor: never blocks (always 0)
+    - enforce: blocks on FAIL or tooling errors
+    """
+    mode = str(enforcement_mode or "").strip().lower() or "monitor"
+    if mode != "enforce":
+        return 0
+    if errors:
+        return 1
+    return exit_code_for_verdict(mode, verdict)
 
 
 def build_compliance_report(
@@ -153,4 +167,3 @@ def build_compliance_report(
         "errors": _unique_sorted(errors or []),
     }
     return report
-

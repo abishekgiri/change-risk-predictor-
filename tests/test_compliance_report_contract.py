@@ -5,7 +5,9 @@ from pathlib import Path
 
 from releasegate.reporting import (
     build_compliance_report,
+    exit_code_for_report,
     exit_code_for_verdict,
+    validate_compliance_report,
     write_json_report_atomic,
 )
 
@@ -13,12 +15,14 @@ from releasegate.reporting import (
 def test_exit_code_monitor_never_blocks():
     assert exit_code_for_verdict("monitor", "FAIL") == 0
     assert exit_code_for_verdict("monitor", "PASS") == 0
+    assert exit_code_for_report("monitor", verdict="FAIL", errors=["x"]) == 0
 
 
 def test_exit_code_enforce_blocks_on_fail():
     assert exit_code_for_verdict("enforce", "FAIL") == 1
     assert exit_code_for_verdict("enforce", "WARN") == 0
     assert exit_code_for_verdict("enforce", "PASS") == 0
+    assert exit_code_for_report("enforce", verdict="PASS", errors=["TOOLING_ERROR"]) == 1
 
 
 def test_report_written_even_on_fail(tmp_path: Path):
@@ -59,8 +63,8 @@ def test_report_written_even_on_fail(tmp_path: Path):
     assert out.exists()
 
     loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert validate_compliance_report(loaded) == []
     assert loaded["schema_version"] == "compliance_report_v1"
     assert loaded["verdict"] == "FAIL"
     assert loaded["control_result"] == "BLOCK"
     assert loaded["errors"]
-

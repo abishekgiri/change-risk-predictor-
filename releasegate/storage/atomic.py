@@ -18,8 +18,32 @@ def atomic_write(filepath: str, mode: str = "w"):
     try:
         with os.fdopen(fd, mode) as f:
             yield f
+            # Ensure payload is on disk before the rename.
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                # Best-effort durability; some file-like objects may not support fsync.
+                pass
+
         # Atomic rename
         os.replace(temp_path, filepath)
+
+        # Best-effort durability for the directory entry (rename).
+        try:
+            dir_fd = os.open(folder or ".", os.O_RDONLY)
+        except Exception:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            except Exception:
+                pass
+            finally:
+                try:
+                    os.close(dir_fd)
+                except Exception:
+                    pass
     except Exception:
         # Cleanup on fail
         if os.path.exists(temp_path):
@@ -28,4 +52,3 @@ def atomic_write(filepath: str, mode: str = "w"):
 
 def ensure_directory(path: str):
     os.makedirs(path, exist_ok=True)
-

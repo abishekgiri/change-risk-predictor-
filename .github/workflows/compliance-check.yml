@@ -50,8 +50,6 @@ jobs:
         env:
           # Use the built-in GITHUB_TOKEN for API access logic in cli.py
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Report-only mode for now
-          COMPLIANCEBOT_ENFORCEMENT: report_only
           # Persist attestations + transparency entries to Postgres so daily roots can be published.
           RELEASEGATE_STORAGE_BACKEND: postgres
           RELEASEGATE_POSTGRES_DSN: ${{ secrets.RELEASEGATE_POSTGRES_DSN }}
@@ -71,6 +69,58 @@ jobs:
             --emit-dsse releasegate.dsse.json \
             --output compliance_report.json \
             --format json
+
+      - name: Write Compliance Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          path = pathlib.Path("compliance_report.json")
+          if not path.exists():
+              summary = "## Compliance Check\n\nMissing `compliance_report.json`.\n"
+              pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary, encoding="utf-8")
+              raise SystemExit(0)
+
+          report = json.loads(path.read_text(encoding="utf-8"))
+          verdict = str(report.get("verdict") or "FAIL").upper()
+          mode = str(report.get("enforcement_mode") or "monitor").lower()
+          reason_codes = report.get("reason_codes") or []
+          top = reason_codes[:3]
+
+          attestation_id = report.get("attestation_id")
+          policy_hash = report.get("policy_hash") or report.get("policy_resolution_hash")
+
+          lines = []
+          lines.append("## Compliance Check")
+          lines.append(f"**Verdict**: `{verdict}`  ")
+          lines.append(f"**Mode**: `{mode}`  ")
+          if policy_hash:
+              lines.append(f"**Policy Hash**: `{policy_hash}`  ")
+          if attestation_id:
+              lines.append(f"**Attestation ID**: `{attestation_id}`  ")
+          if top:
+              lines.append("")
+              lines.append("**Top Reason Codes**:")
+              for code in top:
+                  lines.append(f"- `{code}`")
+          errors = report.get("errors") or []
+          if errors:
+              lines.append("")
+              lines.append("**Errors**:")
+              for err in errors[:5]:
+                  lines.append(f"- `{err}`")
+              if len(errors) > 5:
+                  lines.append(f"- ... ({len(errors) - 5} more)")
+
+          lines.append("")
+          lines.append("_Evidence artifacts are uploaded as a workflow artifact._")
+
+          out = "\n".join(lines) + "\n"
+          pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(out, encoding="utf-8")
+          PY
 
       - name: Verify DSSE artifact
         if: always()

@@ -301,10 +301,13 @@ def main() -> int:
 
         from releasegate.reporting import (
             build_compliance_report,
+            exit_code_for_report,
             exit_code_for_verdict,
             resolve_enforcement_mode,
+            validate_compliance_report,
             write_json_report_atomic,
         )
+        from releasegate.reporting.artifacts import write_artifacts_sha256
         from releasegate.utils.canonical import sha256_json
 
         enforcement_mode = resolve_enforcement_mode(config)
@@ -314,7 +317,6 @@ def main() -> int:
             from releasegate.server import get_pr_details, get_pr_metrics, post_pr_comment, create_check_run
         except Exception as e:
             errors = [f"IMPORT_GITHUB_HELPERS_FAILED: {e}"]
-            artifact_failed = bool(args.emit_attestation or args.emit_dsse)
             report = build_compliance_report(
                 repo=args.repo,
                 pr_number=int(args.pr),
@@ -347,9 +349,21 @@ def main() -> int:
                 errors=errors,
             )
 
+            try:
+                schema_errors = validate_compliance_report(report)
+            except Exception as exc:
+                errors.append(f"COMPLIANCE_REPORT_SCHEMA_VALIDATION_FAILED: {exc}")
+                report["errors"] = sorted(set(errors))
+            else:
+                if schema_errors:
+                    for msg in schema_errors[:10]:
+                        errors.append(f"COMPLIANCE_REPORT_SCHEMA_INVALID: {msg}")
+                    report["errors"] = sorted(set(errors))
+
             if args.output:
                 try:
                     write_json_report_atomic(args.output, report)
+                    write_artifacts_sha256("releasegate.artifacts.sha256", [args.output])
                 except Exception as write_err:
                     print(f"Error writing output {args.output}: {write_err}", file=sys.stderr)
                     return 1
@@ -362,10 +376,11 @@ def main() -> int:
                 for err in errors:
                     print(f" - {err}")
 
-            exit_code = exit_code_for_verdict(enforcement_mode, report.get("verdict"))
-            if artifact_failed:
-                exit_code = 1
-            return exit_code
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
 
         from releasegate.integrations.github_risk import (
             build_issue_risk_property,
@@ -654,8 +669,28 @@ def main() -> int:
                 errors=errors,
             )
 
+            try:
+                schema_errors = validate_compliance_report(report)
+            except Exception as exc:
+                errors.append(f"COMPLIANCE_REPORT_SCHEMA_VALIDATION_FAILED: {exc}")
+                report["errors"] = sorted(set(errors))
+            else:
+                if schema_errors:
+                    for msg in schema_errors[:10]:
+                        errors.append(f"COMPLIANCE_REPORT_SCHEMA_INVALID: {msg}")
+                    report["errors"] = sorted(set(errors))
+
             if args.output:
                 write_json_report_atomic(args.output, report)
+                # Always attempt to emit a deterministic artifact hash list for evidence.
+                artifacts = [args.output]
+                if args.emit_attestation:
+                    artifacts.append(args.emit_attestation)
+                if args.emit_dsse:
+                    artifacts.append(args.emit_dsse)
+                if os.path.exists("attestations.log"):
+                    artifacts.append("attestations.log")
+                write_artifacts_sha256(artifacts_sha256_path or "releasegate.artifacts.sha256", artifacts)
 
             if args.format == "json":
                 print(json.dumps(report, indent=2, sort_keys=True))
@@ -696,10 +731,11 @@ def main() -> int:
                 except Exception as e:
                     print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
 
-            exit_code = exit_code_for_verdict(enforcement_mode, report.get("verdict"))
-            if artifact_failed:
-                exit_code = 1
-            return exit_code
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
         except Exception as e:
             errors.append(f"ANALYSIS_FAILED: {e}")
             if args.emit_attestation or args.emit_dsse:
@@ -735,6 +771,7 @@ def main() -> int:
             if args.output:
                 try:
                     write_json_report_atomic(args.output, report)
+                    write_artifacts_sha256(artifacts_sha256_path or "releasegate.artifacts.sha256", [args.output])
                 except Exception as write_err:
                     print(f"Error writing output {args.output}: {write_err}", file=sys.stderr)
                     return 1
@@ -749,10 +786,11 @@ def main() -> int:
                     for err in errors:
                         print(f" - {err}")
 
-            exit_code = exit_code_for_verdict(enforcement_mode, report.get("verdict"))
-            if artifact_failed:
-                exit_code = 1
-            return exit_code
+            return exit_code_for_report(
+                enforcement_mode,
+                verdict=str(report.get("verdict") or "FAIL"),
+                errors=report.get("errors") or [],
+            )
 
     if args.cmd == "evaluate":
         try:
