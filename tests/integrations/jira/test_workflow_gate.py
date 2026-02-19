@@ -72,7 +72,8 @@ def test_build_decision_id_is_deterministic(base_request):
         message="ok",
         evaluation_key=eval_key,
     )
-    assert d1.decision_id == d2.decision_id == eval_key
+    assert d1.decision_id == d2.decision_id
+    assert len(d1.decision_id) == 64
 
 
 def test_build_decision_id_ignores_evaluation_suffix(base_request):
@@ -84,7 +85,59 @@ def test_build_decision_id_ignores_evaluation_suffix(base_request):
         message="ok",
         evaluation_key=f"{eval_key}:evaluated",
     )
-    assert d.decision_id == eval_key
+    d_base = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+    )
+    assert d.decision_id == d_base.decision_id
+
+
+def test_build_decision_id_changes_when_policy_hash_changes(base_request):
+    gate = WorkflowGate()
+    eval_key = gate._compute_key(base_request)
+    d1 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+        policy_hash="hash-a",
+    )
+    d2 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+        policy_hash="hash-b",
+    )
+    assert d1.decision_id != d2.decision_id
+
+
+def test_build_decision_id_changes_when_pr_number_changes(base_request):
+    gate = WorkflowGate()
+    eval_key = gate._compute_key(base_request)
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 27,
+    }
+    d1 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+    )
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 28,
+    }
+    d2 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+    )
+    assert d1.decision_id != d2.decision_id
 
 @patch("releasegate.engine.ComplianceEngine")
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
@@ -548,21 +601,45 @@ def test_gate_strict_mode_blocks_on_risk_fetch_error(MockRecorder, base_request)
     base_request.environment = "STAGING"
     gate.client.get_issue_property = MagicMock(side_effect=RuntimeError("jira unavailable"))
 
-    mock_decision = Decision(
-        decision_id="uuid-error-strict",
-        timestamp=datetime.now(timezone.utc),
-        release_status="ERROR",
-        context_id="ctx-error-strict",
-        message="System Error: failed to fetch issue property `releasegate_risk` (jira unavailable)",
-        policy_bundle_hash="abc",
-        enforcement_targets=EnforcementTargets(repository="r", ref="h")
-    )
-    MockRecorder.record_with_context.return_value = mock_decision
-
-    resp = gate.check_transition(base_request)
+    with patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
     assert resp.allow is False
-    assert resp.status == "ERROR"
+    assert resp.status == "BLOCKED"
     assert "failed to fetch issue property" in resp.reason
+
+
+def test_gate_strict_blocks_when_policy_map_missing(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    with patch.object(gate, "_load_transition_map", return_value=None), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "POLICY_MISSING"
+
+
+def test_gate_strict_blocks_when_policy_resolution_invalid(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+
+    def _resolve_with_invalid(_request):
+        gate._policy_resolution_issue = {
+            "reason_code": "POLICY_INVALID",
+            "message": "BLOCKED: transition policy map is invalid",
+            "unlock_conditions": ["Fix jira_transition_map.yaml validation errors before retrying transition."],
+            "error_code": "TRANSITION_MAP_LOAD_FAILED",
+        }
+        return []
+
+    with patch.object(gate, "_resolve_policies", side_effect=_resolve_with_invalid), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "POLICY_INVALID"
 
 
 def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
@@ -587,7 +664,7 @@ def test_gate_policy_registry_timeout_strict_blocks(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
-    assert resp.reason_code == "TIMEOUT_DEPENDENCY"
+    assert resp.reason_code == "DEPENDENCY_TIMEOUT"
     assert "dependency timeout" in resp.reason
 
 
@@ -616,7 +693,7 @@ def test_gate_prod_without_mapping_blocks_fail_closed(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
-    assert resp.reason_code == "NO_POLICIES_MAPPED_STRICT"
+    assert resp.reason_code == "POLICY_MISSING"
     assert "no policies configured" in resp.reason.lower()
 
 
@@ -631,8 +708,29 @@ def test_gate_strict_blocks_when_role_map_missing(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
-    assert resp.reason_code == "ROLE_MAPPING_MISSING"
+    assert resp.reason_code == "JIRA_ROLE_MAPPING_MISSING"
     assert "role mapping unavailable" in resp.reason.lower()
+
+
+def test_gate_strict_blocks_when_required_signal_missing(base_request):
+    with patch.dict(
+        os.environ,
+        {
+            "RELEASEGATE_STRICT_MODE": "true",
+            "RELEASEGATE_STRICT_REQUIRED_SIGNALS": "releasegate_risk,risk_score",
+        },
+    ):
+        gate = WorkflowGate()
+        base_request.environment = "STAGING"
+        gate.client.get_issue_property = MagicMock(return_value={"releasegate_risk": "LOW"})
+        with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch.object(
+            gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+        ):
+            resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "SIGNAL_MISSING:risk_score"
+    assert "required signal missing" in resp.reason.lower()
 
 
 def test_gate_strict_blocks_when_risk_fallback_fetch_fails(base_request):
@@ -679,6 +777,32 @@ def test_gate_strict_blocks_when_repo_or_pr_not_found(base_request):
     assert "not found" in resp.reason.lower()
 
 
+def test_gate_strict_blocks_when_project_not_allowed_for_tenant(base_request):
+    with patch.dict(
+        os.environ,
+        {
+            "RELEASEGATE_STRICT_MODE": "true",
+            "RELEASEGATE_ALLOWED_PROJECTS_TENANT_TEST": "OTHER",
+            "GITHUB_TOKEN": "test-github-token",
+        },
+    ):
+        gate = WorkflowGate()
+        base_request.environment = "STAGING"
+        base_request.context_overrides = {
+            "repo": "abishekgiri/change-risk-predictor-",
+            "pr_number": 27,
+        }
+        with patch("releasegate.integrations.jira.workflow_gate.requests.get") as mock_get, patch.object(
+            gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+        ):
+            resp = gate.check_transition(base_request)
+        mock_get.assert_not_called()
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "PROJECT_NOT_ALLOWED"
+    assert "project" in resp.reason.lower()
+
+
 def test_gate_strict_blocks_when_repo_not_allowed_for_tenant(base_request):
     with patch.dict(
         os.environ,
@@ -716,5 +840,5 @@ def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
-    assert resp.reason_code == "TIMEOUT_DEPENDENCY"
+    assert resp.reason_code == "DEPENDENCY_TIMEOUT"
     assert "dependency timeout" in resp.reason

@@ -219,6 +219,35 @@ def test_webhook_signature_auth_and_replay_protection():
     assert second.status_code == 401
 
 
+def test_webhook_signature_auth_accepts_rg_headers():
+    secret = "phase3-rg-header-secret"
+    key = create_webhook_key(
+        tenant_id="tenant-test",
+        integration_id="github",
+        created_by="test-suite",
+        raw_secret=secret,
+        deactivate_existing=True,
+    )
+    payload = {"ping": True}
+    payload_text = json.dumps(payload)
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+    nonce = f"nonce-{uuid.uuid4().hex[:8]}"
+    canonical = "\n".join([timestamp, nonce, "POST", "/webhooks/github", payload_text])
+    signature = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    headers = {
+        "X-RG-Signature": signature,
+        "X-RG-Key-Id": key["key_id"],
+        "X-RG-Timestamp": timestamp,
+        "X-RG-Nonce": nonce,
+        "X-GitHub-Event": "ping",
+        "Content-Type": "application/json",
+    }
+
+    response = client.post("/webhooks/github", content=payload_text.encode("utf-8"), headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"msg": "pong"}
+
+
 def test_webhook_rejects_jwt_even_if_valid():
     response = client.post(
         "/webhooks/github",

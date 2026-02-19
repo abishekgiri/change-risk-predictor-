@@ -164,6 +164,7 @@ LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "fa
 LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
 CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
 HASH_ALGORITHM = "sha256"
+GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("RELEASEGATE_GITHUB_API_TIMEOUT_SECONDS", "10"))
 
 
 def _effective_tenant(auth: AuthContext, requested_tenant: Optional[str]) -> str:
@@ -187,7 +188,7 @@ def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
     }
 
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1))
         if resp.status_code == 200:
             return resp.json()
         logger.warning("Failed to fetch PR details: status_code=%s", resp.status_code)
@@ -220,7 +221,12 @@ def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
         "Accept": "application/vnd.github.v3+json"
     }
     try:
-        requests.post(url, json={"body": body}, headers=headers)
+        requests.post(
+            url,
+            json={"body": body},
+            headers=headers,
+            timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1),
+        )
         logger.info("Posted comment to PR #%s", pr_number)
     except Exception:
         logger.exception("Failed to post comment")
@@ -263,7 +269,12 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
         payload["details_url"] = WEBHOOK_URL
 
     try:
-        resp = requests.post(url, json=payload, headers=headers)
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1),
+        )
         if resp.status_code not in [200, 201]:
             logger.warning(
                 "Failed to create check run: status_code=%s response=%s",

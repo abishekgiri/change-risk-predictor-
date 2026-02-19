@@ -247,11 +247,16 @@ const _signatureHeaders = (method, path, bodyText) => {
     Buffer.from(bodyText || "", "utf-8"),
   ]);
   const sigHex = crypto.createHmac("sha256", secret).update(canonical).digest("hex");
+  const signature = `sha256=${sigHex}`;
   return {
-    "X-Signature": `sha256=${sigHex}`,
+    "X-Signature": signature,
+    "X-RG-Signature": signature,
     "X-Key-Id": keyId,
+    "X-RG-Key-Id": keyId,
     "X-Timestamp": timestamp,
+    "X-RG-Timestamp": timestamp,
     "X-Nonce": nonce,
+    "X-RG-Nonce": nonce,
   };
 };
 
@@ -344,7 +349,7 @@ export const run = async (event, _context) => {
       issue_type: issueMeta.issue_type,
       context_overrides: {
         repo: "abishekgiri/change-risk-predictor-",
-        pr_number: 27,
+        pr_number: 28,
       },
     };
 

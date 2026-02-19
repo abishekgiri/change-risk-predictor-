@@ -80,6 +80,10 @@ def _present_auth_methods(request: Request) -> List[str]:
         "X-Key-Id",
         "X-Timestamp",
         "X-Nonce",
+        "X-RG-Signature",
+        "X-RG-Key-Id",
+        "X-RG-Timestamp",
+        "X-RG-Nonce",
     )
     if any((request.headers.get(name) or "").strip() for name in signature_headers):
         methods.append("signature")
@@ -287,13 +291,13 @@ def _consume_nonce(
 
 
 async def _authenticate_signature(request: Request, *, rate_profile: str) -> Optional[AuthContext]:
-    signature = (request.headers.get("X-Signature") or "").strip()
+    signature = (request.headers.get("X-RG-Signature") or request.headers.get("X-Signature") or "").strip()
     if not signature:
         return None
 
-    key_id = (request.headers.get("X-Key-Id") or "").strip()
+    key_id = (request.headers.get("X-RG-Key-Id") or request.headers.get("X-Key-Id") or "").strip()
     if not key_id:
-        raise _auth_error(401, "AUTH_SIGNATURE_KEY_ID", "Missing X-Key-Id header")
+        raise _auth_error(401, "AUTH_SIGNATURE_KEY_ID", "Missing signature key id header")
 
     key_record = lookup_active_webhook_key(key_id)
     if not key_record:
@@ -307,8 +311,8 @@ async def _authenticate_signature(request: Request, *, rate_profile: str) -> Opt
     enforce_tenant_rate_limit(tenant_id=tenant_id, profile=rate_profile)
     request.state.pre_tenant_rate_limited = True
 
-    timestamp_raw = request.headers.get("X-Timestamp")
-    nonce = (request.headers.get("X-Nonce") or "").strip()
+    timestamp_raw = request.headers.get("X-RG-Timestamp") or request.headers.get("X-Timestamp")
+    nonce = (request.headers.get("X-RG-Nonce") or request.headers.get("X-Nonce") or "").strip()
     if not nonce:
         raise _auth_error(401, "AUTH_SIGNATURE_NONCE", "Missing X-Nonce header")
 
