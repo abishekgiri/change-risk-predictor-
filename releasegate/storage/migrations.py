@@ -1204,6 +1204,126 @@ def _migration_20260219_017_policy_snapshot_rollout(cursor) -> None:
     )
 
 
+def _migration_20260219_018_lock_chain_governance(cursor) -> None:
+    if not _column_exists(cursor, "jira_lock_events", "chain_id"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN chain_id TEXT")
+    if not _column_exists(cursor, "jira_lock_events", "seq"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN seq INTEGER")
+    if not _column_exists(cursor, "jira_lock_events", "prev_hash"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN prev_hash TEXT")
+    if not _column_exists(cursor, "jira_lock_events", "event_hash"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN event_hash TEXT")
+    if not _column_exists(cursor, "jira_lock_events", "ttl_seconds"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN ttl_seconds INTEGER")
+    if not _column_exists(cursor, "jira_lock_events", "expires_at"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN expires_at TEXT")
+    if not _column_exists(cursor, "jira_lock_events", "justification"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN justification TEXT")
+    if not _column_exists(cursor, "jira_lock_events", "context_json"):
+        cursor.execute("ALTER TABLE jira_lock_events ADD COLUMN context_json TEXT")
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_prev_hash
+        ON jira_lock_events(tenant_id, chain_id, prev_hash)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_lock_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            cadence TEXT NOT NULL,
+            period_id TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            head_seq INTEGER NOT NULL,
+            head_hash TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            path TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_lock_checkpoints_scope
+        ON audit_lock_checkpoints(tenant_id, chain_id, cadence, period_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_lock_checkpoints_tenant_chain_created
+        ON audit_lock_checkpoints(tenant_id, chain_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_audit_lock_checkpoints_update
+        BEFORE UPDATE ON audit_lock_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Lock checkpoints are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_audit_lock_checkpoints_delete
+        BEFORE DELETE ON audit_lock_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Lock checkpoints are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_override_metrics_daily (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            overrides_total INTEGER NOT NULL,
+            locks_total INTEGER NOT NULL,
+            unlocks_total INTEGER NOT NULL,
+            override_expires_total INTEGER NOT NULL,
+            high_risk_overrides_total INTEGER NOT NULL,
+            distinct_issues_total INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, date_utc, chain_id, actor)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_date
+        ON governance_override_metrics_daily(tenant_id, date_utc)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_actor
+        ON governance_override_metrics_daily(tenant_id, actor, date_utc)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1289,6 +1409,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260219_017_policy_snapshot_rollout",
         description="Add immutable resolved policy snapshots, decision bindings, and staged rollout control-plane tables.",
         apply=_migration_20260219_017_policy_snapshot_rollout,
+    ),
+    Migration(
+        migration_id="20260219_018_lock_chain_governance",
+        description="Add Jira lock hash-chain fields, lock checkpoints, and override governance metrics tables.",
+        apply=_migration_20260219_018_lock_chain_governance,
     ),
 ]
 

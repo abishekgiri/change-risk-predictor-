@@ -16,6 +16,10 @@ from releasegate.audit.idempotency import (
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
 from releasegate.integrations.jira.client import JiraClient
+from releasegate.integrations.jira.override_validation import (
+    ACTION_OVERRIDE,
+    validate_override_request,
+)
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
 from releasegate.security.auth import require_access
 from releasegate.storage.base import resolve_tenant_id
@@ -101,6 +105,33 @@ async def check_transition(
     }
     if delivery_id:
         request.context_overrides["delivery_id"] = delivery_id
+
+    override_requested = bool(request.context_overrides.get("override") is True)
+    if override_requested:
+        validation = validate_override_request(
+            action=ACTION_OVERRIDE,
+            ttl_seconds=request.context_overrides.get("override_ttl_seconds"),
+            justification=request.context_overrides.get("override_reason"),
+            actor_roles=auth.roles,
+            idempotency_key=idem_key,
+        )
+        if not validation.allowed:
+            status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "error_code": validation.reason_code,
+                    "message": validation.message,
+                },
+            )
+        request.context_overrides = {
+            **request.context_overrides,
+            "override_ttl_seconds": validation.ttl_seconds,
+            "override_expires_at": validation.expires_at,
+            "override_reason": validation.justification,
+            # Explicitly server-derived, never trusted from client payload.
+            "override_expires_at_server_derived": True,
+        }
 
     request_id = delivery_id or idem_key
     logger.info(
@@ -239,10 +270,12 @@ def _apply_jira_lock_best_effort(
         override_requested = bool(request.context_overrides.get("override") is True)
         override_expires_at = None
         override_reason = None
+        override_ttl_seconds = None
         override_by = None
         if override_requested and response.allow:
             override_expires_at = request.context_overrides.get("override_expires_at")
             override_reason = request.context_overrides.get("override_reason")
+            override_ttl_seconds = request.context_overrides.get("override_ttl_seconds")
             override_by = request.actor_email or request.actor_account_id
 
         apply_transition_lock_update(
@@ -259,6 +292,15 @@ def _apply_jira_lock_best_effort(
             override_expires_at=str(override_expires_at) if override_expires_at else None,
             override_reason=str(override_reason) if override_reason else None,
             override_by=str(override_by) if override_by else None,
+            ttl_seconds=int(override_ttl_seconds) if override_ttl_seconds is not None else None,
+            justification=str(override_reason) if override_reason else None,
+            context={
+                "transition_id": request.transition_id,
+                "source_status": request.source_status,
+                "target_status": request.target_status,
+                "request_id": request.context_overrides.get("delivery_id")
+                or request.context_overrides.get("idempotency_key"),
+            },
         )
     except Exception:
         return

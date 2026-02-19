@@ -116,7 +116,8 @@ class ManualOverrideRequest(BaseModel):
     pr_number: Optional[int] = None
     issue_key: Optional[str] = None
     decision_id: Optional[str] = None
-    reason: str = Field(min_length=3)
+    reason: str = Field(min_length=20)
+    ttl_seconds: int = Field(gt=0)
     target_type: str = "pr"
     target_id: Optional[str] = None
     idempotency_key: Optional[str] = None
@@ -836,13 +837,20 @@ def verify_ledger_on_startup():
     if not LEDGER_VERIFY_ON_STARTUP:
         return
     from releasegate.audit.overrides import verify_all_override_chains
+    from releasegate.integrations.jira.lock_store import verify_all_lock_chains
 
     result = verify_all_override_chains()
     app.state.override_chain_last_verification = result
+    lock_result = verify_all_lock_chains()
+    app.state.jira_lock_chain_last_verification = lock_result
     if not result.get("valid", True):
         logger.error("Override ledger corruption detected at startup: %s", result)
         if LEDGER_FAIL_ON_CORRUPTION:
             raise RuntimeError("Override ledger corruption detected")
+    if not lock_result.get("valid", True):
+        logger.error("Jira lock ledger corruption detected at startup: %s", lock_result)
+        if LEDGER_FAIL_ON_CORRUPTION:
+            raise RuntimeError("Jira lock ledger corruption detected")
     else:
         logger.info(
             "Override ledger verified at startup: checked_chains=%s",
@@ -854,6 +862,8 @@ def verify_ledger_on_startup():
 def verify_ledger(
     repo: Optional[str] = None,
     pr: Optional[int] = None,
+    chain_id: Optional[str] = None,
+    ledger: str = "override",
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -862,8 +872,16 @@ def verify_ledger(
     ),
 ):
     from releasegate.audit.overrides import verify_all_override_chains, verify_override_chain
+    from releasegate.integrations.jira.lock_store import verify_all_lock_chains, verify_lock_chain
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    normalized = str(ledger or "override").strip().lower()
+    if normalized in {"jira", "jira_lock", "lock"}:
+        if chain_id:
+            result = verify_lock_chain(tenant_id=effective_tenant, chain_id=chain_id)
+            return {"tenant_id": effective_tenant, "chain_id": chain_id, **result}
+        return verify_all_lock_chains(tenant_id=effective_tenant)
+
     if repo:
         result = verify_override_chain(repo=repo, pr=pr, tenant_id=effective_tenant)
         return {"tenant_id": effective_tenant, "repo": repo, **result}
@@ -1299,6 +1317,92 @@ def verify_override_checkpoint(
     return result
 
 
+@app.post("/audit/checkpoints/jira-lock")
+def create_jira_lock_checkpoint(
+    chain_id: str,
+    cadence: str = "daily",
+    at: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import create_jira_lock_checkpoint as create_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = create_checkpoint(
+            chain_id=chain_id,
+            cadence=cadence,
+            at=at,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="checkpoint_create",
+        target_type="jira_lock_chain",
+        target_id=chain_id,
+        metadata={"cadence": cadence},
+    )
+    return result
+
+
+@app.get("/audit/checkpoints/jira-lock/verify")
+def verify_jira_lock_checkpoint(
+    chain_id: str,
+    period_id: str,
+    cadence: str = "daily",
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import verify_jira_lock_checkpoint as verify_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = verify_checkpoint(
+            chain_id=chain_id,
+            cadence=cadence,
+            period_id=period_id,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("exists", False):
+        raise HTTPException(status_code=404, detail=result.get("reason", "Checkpoint not found"))
+    return result
+
+
+@app.get("/governance/override-metrics")
+def governance_override_metrics(
+    tenant_id: Optional[str] = None,
+    days: int = 30,
+    top_n: int = 10,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.integrations.jira.override_metrics import get_override_metrics_summary
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return get_override_metrics_summary(
+        tenant_id=effective_tenant,
+        days=days,
+        top_n=top_n,
+    )
+
+
 @app.get("/policy/simulate")
 def simulate_policy_impact(
     repo: str,
@@ -1576,14 +1680,32 @@ def create_manual_override(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
-        roles=["admin", "operator"],
+        roles=["admin"],
         scopes=["override:write"],
         rate_profile="default",
     ),
 ):
     from releasegate.audit.overrides import get_active_override, record_override
+    from releasegate.integrations.jira.override_validation import ACTION_OVERRIDE, validate_override_request
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    validation = validate_override_request(
+        action=ACTION_OVERRIDE,
+        ttl_seconds=payload.ttl_seconds,
+        justification=payload.reason,
+        actor_roles=auth.roles,
+        idempotency_key=idempotency_key,
+    )
+    if not validation.allowed:
+        status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error_code": validation.reason_code,
+                "message": validation.message,
+            },
+        )
+
     operation = "manual_override_create"
     claim = claim_idempotency(
         tenant_id=effective_tenant,
@@ -1652,7 +1774,7 @@ def create_manual_override(
         issue_key=payload.issue_key,
         decision_id=payload.decision_id,
         actor=auth.principal_id,
-        reason=payload.reason,
+        reason=validation.justification or payload.reason,
         idempotency_key=idempotency_key,
         tenant_id=effective_tenant,
         target_type=effective_target_type,
@@ -1665,9 +1787,21 @@ def create_manual_override(
         action="override_create",
         target_type=payload.target_type,
         target_id=payload.target_id or payload.repo,
-        metadata={"repo": payload.repo, "pr_number": payload.pr_number, "decision_id": payload.decision_id},
+        metadata={
+            "repo": payload.repo,
+            "pr_number": payload.pr_number,
+            "decision_id": payload.decision_id,
+            "ttl_seconds": validation.ttl_seconds,
+            "expires_at": validation.expires_at,
+        },
     )
-    response_payload = {**override, "idempotency_key": idempotency_key}
+    response_payload = {
+        **override,
+        "idempotency_key": idempotency_key,
+        "ttl_seconds": validation.ttl_seconds,
+        "expires_at": validation.expires_at,
+        "justification": validation.justification,
+    }
     if payload.decision_id:
         from releasegate.audit.reader import AuditReader
         att = AuditReader.get_attestation_by_decision(payload.decision_id, tenant_id=effective_tenant)

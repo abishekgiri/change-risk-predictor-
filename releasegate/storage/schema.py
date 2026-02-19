@@ -262,6 +262,82 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_lock_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            cadence TEXT NOT NULL,
+            period_id TEXT NOT NULL,
+            period_end TIMESTAMPTZ NOT NULL,
+            head_seq INTEGER NOT NULL,
+            head_hash TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            path TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_lock_checkpoints_scope
+        ON audit_lock_checkpoints(tenant_id, chain_id, cadence, period_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_lock_checkpoints_tenant_chain_created
+        ON audit_lock_checkpoints(tenant_id, chain_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_lock_checkpoint_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Lock checkpoints are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_lock_checkpoints_update'
+            ) THEN
+                CREATE TRIGGER prevent_lock_checkpoints_update
+                BEFORE UPDATE ON audit_lock_checkpoints
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_lock_checkpoint_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_lock_checkpoints_delete'
+            ) THEN
+                CREATE TRIGGER prevent_lock_checkpoints_delete
+                BEFORE DELETE ON audit_lock_checkpoints
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_lock_checkpoint_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoint_tenant_scope
         ON audit_checkpoints(tenant_id, repo, cadence, period_id, pr_number)
         """
@@ -521,11 +597,27 @@ def _init_postgres_schema() -> str:
             override_expires_at TIMESTAMPTZ,
             override_reason TEXT,
             actor TEXT,
+            chain_id TEXT,
+            seq INTEGER,
+            prev_hash TEXT,
+            event_hash TEXT,
+            ttl_seconds INTEGER,
+            expires_at TIMESTAMPTZ,
+            justification TEXT,
+            context_json JSONB,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, event_id)
         )
         """
     )
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS chain_id TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS seq INTEGER")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS prev_hash TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS event_hash TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS justification TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS context_json JSONB")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_issue_created
@@ -536,6 +628,24 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_created
         ON jira_lock_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_prev_hash
+        ON jira_lock_events(tenant_id, chain_id, prev_hash)
         """
     )
     cur.execute(
@@ -652,6 +762,36 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_policy_resolved_snapshots_tenant_created
         ON policy_resolved_snapshots(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_override_metrics_daily (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            overrides_total INTEGER NOT NULL,
+            locks_total INTEGER NOT NULL,
+            unlocks_total INTEGER NOT NULL,
+            override_expires_total INTEGER NOT NULL,
+            high_risk_overrides_total INTEGER NOT NULL,
+            distinct_issues_total INTEGER NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, date_utc, chain_id, actor)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_date
+        ON governance_override_metrics_daily(tenant_id, date_utc)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_actor
+        ON governance_override_metrics_daily(tenant_id, actor, date_utc DESC)
         """
     )
     cur.execute(

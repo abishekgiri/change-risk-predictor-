@@ -34,6 +34,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260218_015_jira_lock_ledger" in migration_ids
         assert "20260218_016_decision_external_refs" in migration_ids
         assert "20260219_017_policy_snapshot_rollout" in migration_ids
+        assert "20260219_018_lock_chain_governance" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -120,7 +121,20 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         lock_event_info = cur.fetchall()
         lock_event_cols = {row[1] for row in lock_event_info}
         lock_event_pk = [row[1] for row in sorted((r for r in lock_event_info if r[5] > 0), key=lambda r: r[5])]
-        assert {"tenant_id", "event_id", "issue_key", "event_type"} <= lock_event_cols
+        assert {
+            "tenant_id",
+            "event_id",
+            "issue_key",
+            "event_type",
+            "chain_id",
+            "seq",
+            "prev_hash",
+            "event_hash",
+            "ttl_seconds",
+            "expires_at",
+            "justification",
+            "context_json",
+        } <= lock_event_cols
         assert lock_event_pk == ["tenant_id", "event_id"]
 
         cur.execute("PRAGMA table_info(jira_issue_locks_current)")
@@ -165,11 +179,32 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "policy_id", "target_env", "active_release_id"} <= pointers_cols
         assert pointers_pk == ["tenant_id", "policy_id", "target_env"]
 
+        cur.execute("PRAGMA table_info(audit_lock_checkpoints)")
+        lock_cp_info = cur.fetchall()
+        lock_cp_cols = {row[1] for row in lock_cp_info}
+        lock_cp_pk = [row[1] for row in sorted((r for r in lock_cp_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "checkpoint_id", "chain_id", "head_seq", "head_hash"} <= lock_cp_cols
+        assert lock_cp_pk == ["tenant_id", "checkpoint_id"]
+
+        cur.execute("PRAGMA table_info(governance_override_metrics_daily)")
+        metrics_info = cur.fetchall()
+        metrics_cols = {row[1] for row in metrics_info}
+        metrics_pk = [row[1] for row in sorted((r for r in metrics_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "date_utc",
+            "chain_id",
+            "actor",
+            "overrides_total",
+            "high_risk_overrides_total",
+        } <= metrics_cols
+        assert metrics_pk == ["tenant_id", "date_utc", "chain_id", "actor"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260219_017_policy_snapshot_rollout"
-        assert state[1] == "20260219_017_policy_snapshot_rollout"
+        assert state[0] == "20260219_018_lock_chain_governance"
+        assert state[1] == "20260219_018_lock_chain_governance"
     finally:
         conn.close()
 
