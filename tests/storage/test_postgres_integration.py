@@ -221,3 +221,182 @@ def test_postgres_recorder_flow_persists_decision_snapshot_and_graph(postgres_en
     )
     assert edge is not None
 
+
+def test_postgres_recorder_rolls_back_when_evidence_write_fails(postgres_env, monkeypatch):
+    tenant_id = f"tenant-pg-{uuid.uuid4().hex[:10]}"
+    repo = f"pg-int-{uuid.uuid4().hex[:8]}"
+    pr_number = 89
+    issue_key = "RG-POSTGRES-ROLLBACK-1"
+
+    policy_dict = {
+        "policy_id": "RG-PG-ROLLBACK",
+        "version": "1.0.0",
+        "name": "Allow low risk",
+        "description": "Allow when risk low",
+        "scope": "pull_request",
+        "enabled": True,
+        "controls": [{"signal": "raw.risk.level", "operator": "==", "value": "LOW"}],
+        "enforcement": {"result": "ALLOW", "message": "Approved"},
+    }
+    binding = PolicyBinding(
+        policy_id="RG-PG-ROLLBACK",
+        policy_version="1.0.0",
+        policy_hash=_policy_hash(policy_dict),
+        policy=policy_dict,
+        tenant_id=tenant_id,
+    )
+    bundle_hash = _bindings_hash([binding.model_dump(mode="json")])
+    decision = Decision(
+        tenant_id=tenant_id,
+        timestamp=datetime.now(timezone.utc),
+        release_status="ALLOWED",
+        context_id=f"jira-{repo}-{pr_number}",
+        message="allowed",
+        policy_bundle_hash=bundle_hash,
+        evaluation_key=f"{repo}:{pr_number}:{uuid.uuid4().hex}",
+        actor_id="pg-int-user",
+        reason_code="POLICY_ALLOWED",
+        inputs_present={"releasegate_risk": True},
+        input_snapshot={
+            "signal_map": {"repo": repo, "pr_number": pr_number, "diff": {}, "risk": {"level": "LOW"}},
+            "policies_requested": ["RG-PG-ROLLBACK"],
+            "issue_key": issue_key,
+            "transition_id": "2",
+            "environment": "PRODUCTION",
+        },
+        policy_bindings=[binding],
+        enforcement_targets=EnforcementTargets(
+            repository=repo,
+            pr_number=pr_number,
+            ref="abc123",
+            external={"jira": [issue_key]},
+        ),
+    )
+
+    def _boom(**kwargs):
+        raise RuntimeError("forced graph failure")
+
+    monkeypatch.setattr("releasegate.evidence.graph.record_decision_evidence", _boom)
+
+    with pytest.raises(RuntimeError, match="forced graph failure"):
+        AuditRecorder.record_with_context(
+            decision=decision,
+            repo=repo,
+            pr_number=pr_number,
+            tenant_id=tenant_id,
+        )
+
+    storage = get_storage_backend()
+    row = storage.fetchone(
+        "SELECT decision_id FROM audit_decisions WHERE tenant_id = ? AND decision_id = ?",
+        (tenant_id, decision.decision_id),
+    )
+    assert row is None
+    binding_row = storage.fetchone(
+        "SELECT decision_id FROM policy_decision_records WHERE tenant_id = ? AND decision_id = ?",
+        (tenant_id, decision.decision_id),
+    )
+    assert binding_row is None
+    node_row = storage.fetchone(
+        "SELECT node_id FROM evidence_nodes WHERE tenant_id = ? AND type = ? AND ref = ?",
+        (tenant_id, "DECISION", decision.decision_id),
+    )
+    assert node_row is None
+
+
+def test_postgres_recorder_retry_is_idempotent_for_decision_and_graph(postgres_env):
+    tenant_id = f"tenant-pg-{uuid.uuid4().hex[:10]}"
+    repo = f"pg-int-{uuid.uuid4().hex[:8]}"
+    pr_number = 90
+    issue_key = "RG-POSTGRES-IDEMPOTENT-1"
+
+    policy_dict = {
+        "policy_id": "RG-PG-IDEMPOTENT",
+        "version": "1.0.0",
+        "name": "Allow low risk",
+        "description": "Allow when risk low",
+        "scope": "pull_request",
+        "enabled": True,
+        "controls": [{"signal": "raw.risk.level", "operator": "==", "value": "LOW"}],
+        "enforcement": {"result": "ALLOW", "message": "Approved"},
+    }
+    binding = PolicyBinding(
+        policy_id="RG-PG-IDEMPOTENT",
+        policy_version="1.0.0",
+        policy_hash=_policy_hash(policy_dict),
+        policy=policy_dict,
+        tenant_id=tenant_id,
+    )
+    bundle_hash = _bindings_hash([binding.model_dump(mode="json")])
+    decision = Decision(
+        tenant_id=tenant_id,
+        timestamp=datetime.now(timezone.utc),
+        release_status="ALLOWED",
+        context_id=f"jira-{repo}-{pr_number}",
+        message="allowed",
+        policy_bundle_hash=bundle_hash,
+        evaluation_key=f"{repo}:{pr_number}:{uuid.uuid4().hex}",
+        actor_id="pg-int-user",
+        reason_code="POLICY_ALLOWED",
+        inputs_present={"releasegate_risk": True},
+        input_snapshot={
+            "signal_map": {"repo": repo, "pr_number": pr_number, "diff": {}, "risk": {"level": "LOW"}},
+            "policies_requested": ["RG-PG-IDEMPOTENT"],
+            "issue_key": issue_key,
+            "transition_id": "2",
+            "environment": "PRODUCTION",
+        },
+        policy_bindings=[binding],
+        enforcement_targets=EnforcementTargets(
+            repository=repo,
+            pr_number=pr_number,
+            ref="abc123",
+            external={"jira": [issue_key]},
+        ),
+    )
+
+    first = AuditRecorder.record_with_context(
+        decision=decision,
+        repo=repo,
+        pr_number=pr_number,
+        tenant_id=tenant_id,
+    )
+    storage = get_storage_backend()
+    counts_before = {
+        "decisions": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM audit_decisions WHERE tenant_id = ? AND decision_id = ?",
+            (tenant_id, first.decision_id),
+        )["count"],
+        "nodes": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM evidence_nodes WHERE tenant_id = ?",
+            (tenant_id,),
+        )["count"],
+        "edges": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM evidence_edges WHERE tenant_id = ?",
+            (tenant_id,),
+        )["count"],
+    }
+
+    second = AuditRecorder.record_with_context(
+        decision=decision.model_copy(deep=True),
+        repo=repo,
+        pr_number=pr_number,
+        tenant_id=tenant_id,
+    )
+    assert second.decision_id == first.decision_id
+
+    counts_after = {
+        "decisions": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM audit_decisions WHERE tenant_id = ? AND decision_id = ?",
+            (tenant_id, first.decision_id),
+        )["count"],
+        "nodes": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM evidence_nodes WHERE tenant_id = ?",
+            (tenant_id,),
+        )["count"],
+        "edges": storage.fetchone(
+            "SELECT COUNT(*) AS count FROM evidence_edges WHERE tenant_id = ?",
+            (tenant_id,),
+        )["count"],
+    }
+    assert counts_after == counts_before

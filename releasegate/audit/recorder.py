@@ -250,44 +250,44 @@ class AuditRecorder:
         created_at = decision.timestamp.astimezone(timezone.utc).isoformat()
 
         try:
-            storage.execute(
-                """
-                INSERT INTO audit_decisions (
-                    decision_id, tenant_id, context_id, repo, pr_number,
-                    release_status, policy_bundle_hash, engine_version,
-                    decision_hash, input_hash, policy_hash, replay_hash, full_decision_json, created_at, evaluation_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    decision.decision_id,
-                    effective_tenant,
-                    decision.context_id,
-                    repo,
-                    pr_number,
-                    decision.release_status,
-                    decision.policy_bundle_hash,
-                    AuditRecorder.ENGINE_VERSION,
-                    decision.decision_hash,
-                    decision.input_hash,
-                    decision.policy_hash,
-                    decision.replay_hash,
-                    canonical_json,
-                    created_at,
-                    decision.evaluation_key,
-                ),
-            )
-            AuditRecorder._persist_policy_snapshots(
-                tenant_id=effective_tenant,
-                decision=decision,
-                created_at=created_at,
-            )
-            resolved_snapshot = AuditRecorder._persist_resolved_policy_snapshot_record(
-                tenant_id=effective_tenant,
-                decision=decision,
-                repo=repo,
-                pr_number=pr_number,
-            )
-            try:
+            with storage.transaction():
+                storage.execute(
+                    """
+                    INSERT INTO audit_decisions (
+                        decision_id, tenant_id, context_id, repo, pr_number,
+                        release_status, policy_bundle_hash, engine_version,
+                        decision_hash, input_hash, policy_hash, replay_hash, full_decision_json, created_at, evaluation_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        decision.decision_id,
+                        effective_tenant,
+                        decision.context_id,
+                        repo,
+                        pr_number,
+                        decision.release_status,
+                        decision.policy_bundle_hash,
+                        AuditRecorder.ENGINE_VERSION,
+                        decision.decision_hash,
+                        decision.input_hash,
+                        decision.policy_hash,
+                        decision.replay_hash,
+                        canonical_json,
+                        created_at,
+                        decision.evaluation_key,
+                    ),
+                )
+                AuditRecorder._persist_policy_snapshots(
+                    tenant_id=effective_tenant,
+                    decision=decision,
+                    created_at=created_at,
+                )
+                resolved_snapshot = AuditRecorder._persist_resolved_policy_snapshot_record(
+                    tenant_id=effective_tenant,
+                    decision=decision,
+                    repo=repo,
+                    pr_number=pr_number,
+                )
                 from releasegate.evidence.graph import record_decision_evidence
 
                 record_decision_evidence(
@@ -309,10 +309,6 @@ class AuditRecorder:
                         "transition_id": resolved_snapshot.get("transition_id"),
                     },
                 )
-            except Exception:
-                # Evidence graph is auxiliary; do not block decision recording.
-                pass
-            try:
                 AuditRecorder._persist_decision_refs(
                     tenant_id=effective_tenant,
                     decision=decision,
@@ -320,15 +316,12 @@ class AuditRecorder:
                     pr_number=pr_number,
                     created_at=created_at,
                 )
-            except Exception:
-                # Best-effort index for search; decision persistence is the source of truth.
-                pass
-            store_policy_bundle(
-                tenant_id=effective_tenant,
-                policy_bundle_hash=decision.policy_bundle_hash,
-                policy_snapshot=[b.model_dump(mode="json") for b in decision.policy_bindings],
-                is_active=True,
-            )
+                store_policy_bundle(
+                    tenant_id=effective_tenant,
+                    policy_bundle_hash=decision.policy_bundle_hash,
+                    policy_snapshot=[b.model_dump(mode="json") for b in decision.policy_bindings],
+                    is_active=True,
+                )
             return decision
         except Exception as exc:
             # Idempotency collision on evaluation_key; return existing decision row.

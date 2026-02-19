@@ -45,3 +45,13 @@ class StorageBackend(ABC):
     @abstractmethod
     def fetchall(self, query: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
         raise NotImplementedError
+
+    @contextmanager
+    @abstractmethod
+    def transaction(self) -> Iterator["StorageBackend"]:
+        """
+        Execute multiple statements atomically.
+        Inside this context, execute()/fetch*() must use the same connection and
+        must not auto-commit per statement.
+        """
+        raise NotImplementedError

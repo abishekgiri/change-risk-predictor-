@@ -1462,6 +1462,22 @@ def init_db() -> str:
     Initialize SQLite schema and apply forward-only migrations.
     Returns current schema version identifier.
     """
+    # If we're already inside an active storage transaction, schema bootstrap has
+    # already happened on entry. Re-initializing via a separate connection can
+    # deadlock (notably on SQLite BEGIN IMMEDIATE), so short-circuit.
+    try:
+        from releasegate.storage import get_storage_backend as _get_storage_backend
+
+        active_backend = _get_storage_backend()
+        active_getter = getattr(active_backend, "_active_tx", None)
+        if callable(active_getter):
+            tx_state = active_getter()
+            if tx_state is not None:
+                return SCHEMA_VERSION
+    except Exception:
+        # Fallback to normal init path.
+        pass
+
     backend = (os.getenv("RELEASEGATE_STORAGE_BACKEND") or "sqlite").strip().lower()
     if backend == "postgres":
         return _init_postgres_schema()

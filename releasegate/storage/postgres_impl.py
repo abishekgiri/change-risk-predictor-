@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 import os
+import threading
 
 from releasegate.storage.base import StorageBackend
 
@@ -26,6 +27,7 @@ class PostgresStorageBackend(StorageBackend):
             raise ValueError("Postgres DSN missing. Set RELEASEGATE_POSTGRES_DSN or DATABASE_URL.")
         if psycopg2 is None:
             raise RuntimeError("psycopg2 is required for PostgresStorageBackend")
+        self._local = threading.local()
 
     @property
     def name(self) -> str:
@@ -35,8 +37,15 @@ class PostgresStorageBackend(StorageBackend):
         # Existing codebase uses sqlite-style '?' placeholders.
         return query.replace("?", "%s")
 
+    def _active_tx(self) -> Optional[Dict[str, Any]]:
+        return getattr(self._local, "tx_state", None)
+
     @contextmanager
     def connect(self) -> Iterator[Any]:
+        active = self._active_tx()
+        if active is not None:
+            yield active["conn"]
+            return
         conn = psycopg2.connect(self._dsn)
         try:
             yield conn
@@ -44,6 +53,15 @@ class PostgresStorageBackend(StorageBackend):
             conn.close()
 
     def execute(self, query: str, params: Sequence[Any] = ()) -> int:
+        active = self._active_tx()
+        if active is not None:
+            with active["conn"].cursor() as cur:
+                q = self._adapt_sql(query)
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
+                return cur.rowcount
         with self.connect() as conn:
             with conn.cursor() as cur:
                 q = self._adapt_sql(query)
@@ -59,6 +77,16 @@ class PostgresStorageBackend(StorageBackend):
                 return cur.rowcount
 
     def fetchone(self, query: str, params: Sequence[Any] = ()) -> Optional[Dict[str, Any]]:
+        active = self._active_tx()
+        if active is not None:
+            with active["conn"].cursor(cursor_factory=RealDictCursor) as cur:
+                q = self._adapt_sql(query)
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
+                row = cur.fetchone()
+                return dict(row) if row else None
         with self.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 q = self._adapt_sql(query)
@@ -70,6 +98,16 @@ class PostgresStorageBackend(StorageBackend):
                 return dict(row) if row else None
 
     def fetchall(self, query: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
+        active = self._active_tx()
+        if active is not None:
+            with active["conn"].cursor(cursor_factory=RealDictCursor) as cur:
+                q = self._adapt_sql(query)
+                if params:
+                    cur.execute(q, tuple(params))
+                else:
+                    cur.execute(q)
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
         with self.connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 q = self._adapt_sql(query)
@@ -79,3 +117,27 @@ class PostgresStorageBackend(StorageBackend):
                     cur.execute(q)
                 rows = cur.fetchall()
                 return [dict(r) for r in rows]
+
+    @contextmanager
+    def transaction(self) -> Iterator["PostgresStorageBackend"]:
+        active = self._active_tx()
+        if active is not None:
+            active["depth"] += 1
+            try:
+                yield self
+            finally:
+                active["depth"] -= 1
+            return
+
+        conn = psycopg2.connect(self._dsn)
+        state = {"conn": conn, "depth": 1}
+        self._local.tx_state = state
+        try:
+            yield self
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._local.tx_state = None
+            conn.close()
