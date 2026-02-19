@@ -96,6 +96,30 @@ def build_parser() -> argparse.ArgumentParser:
     audit_show.add_argument("--decision-id", required=True)
     audit_show.add_argument("--tenant", required=True, help="Tenant/org identifier")
 
+    verify_p = sub.add_parser("verify", help="Verify governance ledgers and checkpoints.")
+    verify_sub = verify_p.add_subparsers(dest="verify_cmd", required=True)
+
+    verify_lock = verify_sub.add_parser(
+        "lock-ledger",
+        help="Verify Jira lock ledger hash-chain integrity for a chain.",
+    )
+    verify_lock.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    verify_lock.add_argument("--chain", required=True, help="Lock chain id (e.g., jira-lock:RG-1)")
+    verify_lock.add_argument("--from-seq", type=int, help="Optional inclusive starting sequence")
+    verify_lock.add_argument("--to-seq", type=int, help="Optional inclusive ending sequence")
+    verify_lock.add_argument("--format", default="text", choices=["text", "json"])
+
+    verify_checkpoints = verify_sub.add_parser(
+        "checkpoints",
+        help="Verify Jira lock checkpoints for a UTC period range.",
+    )
+    verify_checkpoints.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    verify_checkpoints.add_argument("--from", dest="from_period", required=True, help="Period start (YYYY-MM-DD)")
+    verify_checkpoints.add_argument("--to", dest="to_period", required=True, help="Period end (YYYY-MM-DD)")
+    verify_checkpoints.add_argument("--chain", help="Optional lock chain id filter")
+    verify_checkpoints.add_argument("--cadence", default="daily", choices=["daily", "weekly", "all"])
+    verify_checkpoints.add_argument("--format", default="text", choices=["text", "json"])
+
     lint_p = sub.add_parser("lint-policies", help="Validate compiled policy schema and lint policy logic.")
     lint_p.add_argument("--policy-dir", default="releasegate/policy/compiled")
     lint_p.add_argument("--format", default="text", choices=["text", "json"])
@@ -419,6 +443,109 @@ def main() -> int:
     if args.cmd == "version":
         print("releasegate 0.1.0")
         return 0
+
+    if args.cmd == "verify":
+        if args.verify_cmd == "lock-ledger":
+            from releasegate.integrations.jira.lock_store import verify_lock_chain
+
+            tenant_id = resolve_tenant_id(args.tenant)
+            result = verify_lock_chain(
+                tenant_id=tenant_id,
+                chain_id=str(args.chain),
+                from_seq=args.from_seq,
+                to_seq=args.to_seq,
+            )
+            if args.format == "json":
+                print(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+            else:
+                print(f"tenant_id: {result.get('tenant_id')}")
+                print(f"chain_id: {result.get('chain_id')}")
+                print(f"valid: {result.get('valid')}")
+                print(f"checked: {result.get('checked')}")
+                print(f"head_seq: {result.get('head_seq')}")
+                print(f"head_hash: {result.get('head_hash')}")
+                if not result.get("valid"):
+                    print(f"reason: {result.get('reason')}")
+            return 0 if result.get("valid") else 1
+
+        if args.verify_cmd == "checkpoints":
+            from releasegate.audit.checkpoints import verify_jira_lock_checkpoint
+            from releasegate.storage import get_storage_backend
+
+            tenant_id = resolve_tenant_id(args.tenant)
+            from_period = str(args.from_period)
+            to_period = str(args.to_period)
+            if from_period > to_period:
+                print("Error: --from must be <= --to", file=sys.stderr)
+                return 1
+
+            storage = get_storage_backend()
+            query = """
+                SELECT chain_id, cadence, period_id, checkpoint_id
+                FROM audit_lock_checkpoints
+                WHERE tenant_id = ? AND period_id >= ? AND period_id <= ?
+            """
+            params: list = [tenant_id, from_period, to_period]
+            if getattr(args, "chain", None):
+                query += " AND chain_id = ?"
+                params.append(str(args.chain))
+            if getattr(args, "cadence", "daily") != "all":
+                query += " AND cadence = ?"
+                params.append(str(args.cadence))
+            query += " ORDER BY chain_id ASC, cadence ASC, period_id ASC"
+            rows = storage.fetchall(query, params)
+
+            items = []
+            valid = True
+            for row in rows:
+                proof = verify_jira_lock_checkpoint(
+                    chain_id=str(row.get("chain_id") or ""),
+                    cadence=str(row.get("cadence") or "daily"),
+                    period_id=str(row.get("period_id") or ""),
+                    tenant_id=tenant_id,
+                )
+                item = {
+                    "checkpoint_id": row.get("checkpoint_id"),
+                    "chain_id": row.get("chain_id"),
+                    "cadence": row.get("cadence"),
+                    "period_id": row.get("period_id"),
+                    "valid": bool(proof.get("valid")),
+                    "signature_valid": bool(proof.get("signature_valid")),
+                    "head_hash_match": bool(proof.get("head_hash_match")),
+                    "head_seq_match": bool(proof.get("head_seq_match")),
+                    "event_count_match": bool(proof.get("event_count_match")),
+                    "reason": proof.get("chain_reason") or proof.get("reason"),
+                }
+                if not item["valid"]:
+                    valid = False
+                items.append(item)
+
+            payload = {
+                "tenant_id": tenant_id,
+                "from": from_period,
+                "to": to_period,
+                "count": len(items),
+                "valid": bool(valid and len(items) > 0),
+                "items": items,
+            }
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+            else:
+                print(f"tenant_id: {tenant_id}")
+                print(f"from: {from_period}")
+                print(f"to: {to_period}")
+                print(f"count: {len(items)}")
+                print(f"valid: {payload['valid']}")
+                if not items:
+                    print("reason: no checkpoints found in requested range")
+                for item in items:
+                    print(
+                        f"- [{item.get('period_id')}] {item.get('chain_id')} ({item.get('cadence')}): "
+                        f"valid={item.get('valid')}"
+                    )
+                    if not item.get("valid") and item.get("reason"):
+                        print(f"  reason={item.get('reason')}")
+            return 0 if payload["valid"] else 1
 
     if args.cmd == "db-migrate":
         from releasegate.storage.migrate import migrate
