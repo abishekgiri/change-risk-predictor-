@@ -23,8 +23,8 @@ def base_request():
 def test_resolve_policies_fail_open(base_request):
     """Test that missing config returns empty list (Allow)."""
     gate = WorkflowGate()
-    # Mock resolve to check logic (or create temp file)
-    with patch("builtins.open", side_effect=FileNotFoundError):
+    # Simulate missing transition map.
+    with patch.object(gate, "_load_transition_map", return_value=None):
         policies = gate._resolve_policies(base_request)
         assert policies == []
 

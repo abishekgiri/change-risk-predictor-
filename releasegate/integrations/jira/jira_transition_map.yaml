@@ -1,12 +1,7 @@
 version: 1
 jira:
-  project_keys:
-    - DEMO
-    - RG
-  issue_types:
-    - Bug
-    - Task
-    - Story
+  project_keys: []
+  issue_types: []
 
 gate_bindings:
   release_gate:
