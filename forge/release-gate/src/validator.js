@@ -344,7 +344,7 @@ export const run = async (event, _context) => {
       issue_type: issueMeta.issue_type,
       context_overrides: {
         repo: "abishekgiri/change-risk-predictor-",
-        pr_number: 27,
+        pr_number: 28,
       },
     };
 
