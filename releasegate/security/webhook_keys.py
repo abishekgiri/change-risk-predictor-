@@ -55,10 +55,10 @@ def create_webhook_key(
         storage.execute(
             """
             UPDATE webhook_signing_keys
-            SET is_active = 0, rotated_at = COALESCE(rotated_at, ?)
-            WHERE tenant_id = ? AND integration_id = ? AND is_active = 1
+            SET is_active = ?, rotated_at = COALESCE(rotated_at, ?)
+            WHERE tenant_id = ? AND integration_id = ? AND is_active = ?
             """,
-            (created_at, effective_tenant, effective_integration),
+            (False, created_at, effective_tenant, effective_integration, True),
         )
 
     storage.execute(
@@ -66,7 +66,7 @@ def create_webhook_key(
         INSERT INTO webhook_signing_keys (
             tenant_id, integration_id, key_id, encrypted_secret, secret_hash,
             created_by, created_at, is_active
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             effective_tenant,
@@ -76,6 +76,7 @@ def create_webhook_key(
             hashlib.sha256(secret_value.encode("utf-8")).hexdigest(),
             created_by,
             created_at,
+            True,
         ),
     )
 
@@ -95,10 +96,10 @@ def lookup_active_webhook_key(key_id: str) -> Optional[Dict[str, Any]]:
         """
         SELECT tenant_id, integration_id, key_id, encrypted_secret, created_at
         FROM webhook_signing_keys
-        WHERE key_id = ? AND is_active = 1
+        WHERE key_id = ? AND is_active = ?
         LIMIT 1
         """,
-        (str(key_id or "").strip(),),
+        (str(key_id or "").strip(), True),
     )
     if not row:
         return None
