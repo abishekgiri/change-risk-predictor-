@@ -1324,6 +1324,149 @@ def _migration_20260219_018_lock_chain_governance(cursor) -> None:
     )
 
 
+def _migration_20260220_019_replay_and_evidence_graph(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_decision_replays (
+            tenant_id TEXT NOT NULL,
+            replay_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            match INTEGER NOT NULL,
+            diff_json TEXT NOT NULL,
+            old_output_hash TEXT,
+            new_output_hash TEXT,
+            old_policy_hash TEXT,
+            new_policy_hash TEXT,
+            old_input_hash TEXT,
+            new_input_hash TEXT,
+            ran_engine_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, replay_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_decision_created
+        ON audit_decision_replays(tenant_id, decision_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_audit_decision_replays_update
+        BEFORE UPDATE ON audit_decision_replays
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision replay log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_audit_decision_replays_delete
+        BEFORE DELETE ON audit_decision_replays
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision replay log is append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_nodes (
+            tenant_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            ref TEXT NOT NULL,
+            hash TEXT,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, node_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_nodes_tenant_type_ref
+        ON evidence_nodes(tenant_id, type, ref)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_nodes_tenant_type_created
+        ON evidence_nodes(tenant_id, type, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_nodes_update
+        BEFORE UPDATE ON evidence_nodes
+        BEGIN
+            SELECT RAISE(FAIL, 'Evidence nodes are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_nodes_delete
+        BEFORE DELETE ON evidence_nodes
+        BEGIN
+            SELECT RAISE(FAIL, 'Evidence nodes are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_edges (
+            tenant_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            from_node_id TEXT NOT NULL,
+            to_node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, edge_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_edges_tenant_from_to_type
+        ON evidence_edges(tenant_id, from_node_id, to_node_id, type)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_from_created
+        ON evidence_edges(tenant_id, from_node_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_to_created
+        ON evidence_edges(tenant_id, to_node_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_edges_update
+        BEFORE UPDATE ON evidence_edges
+        BEGIN
+            SELECT RAISE(FAIL, 'Evidence edges are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_evidence_edges_delete
+        BEFORE DELETE ON evidence_edges
+        BEGIN
+            SELECT RAISE(FAIL, 'Evidence edges are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1414,6 +1557,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260219_018_lock_chain_governance",
         description="Add Jira lock hash-chain fields, lock checkpoints, and override governance metrics tables.",
         apply=_migration_20260219_018_lock_chain_governance,
+    ),
+    Migration(
+        migration_id="20260220_019_replay_and_evidence_graph",
+        description="Add immutable decision replay events and evidence graph node/edge tables.",
+        apply=_migration_20260220_019_replay_and_evidence_graph,
     ),
 ]
 

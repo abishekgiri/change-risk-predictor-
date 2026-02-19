@@ -162,6 +162,29 @@ class PolicyReleaseRollbackRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class DeployGateCheckRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    issue_key: Optional[str] = None
+    correlation_id: Optional[str] = None
+    deploy_id: Optional[str] = None
+    repo: str
+    env: str
+    commit_sha: Optional[str] = None
+    artifact_digest: Optional[str] = None
+
+
+class IncidentCloseCheckRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    incident_id: str
+    decision_id: Optional[str] = None
+    issue_key: Optional[str] = None
+    correlation_id: Optional[str] = None
+    deploy_id: Optional[str] = None
+    repo: Optional[str] = None
+    env: Optional[str] = None
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str
     roles: list[str] = Field(default_factory=lambda: ["operator"])
@@ -2272,8 +2295,10 @@ def replay_stored_decision(
     from releasegate.audit.reader import AuditReader
     from releasegate.decision.types import Decision
     from releasegate.replay.decision_replay import replay_decision
+    from releasegate.replay.events import record_replay_event
 
-    row = AuditReader.get_decision(decision_id, tenant_id=_effective_tenant(auth, tenant_id))
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
 
@@ -2287,23 +2312,72 @@ def replay_stored_decision(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Stored decision payload is invalid: {exc}") from exc
 
+    snapshot_binding = AuditReader.get_decision_with_policy_snapshot(
+        decision_id=decision_id,
+        tenant_id=effective_tenant,
+    )
+    if not snapshot_binding:
+        raise HTTPException(status_code=422, detail="Decision policy snapshot binding not found")
+    snapshot_wrapper = snapshot_binding.get("snapshot") if isinstance(snapshot_binding, dict) else {}
+    policy_snapshot = snapshot_wrapper.get("snapshot") if isinstance(snapshot_wrapper, dict) else None
+    if not isinstance(policy_snapshot, dict):
+        raise HTTPException(status_code=422, detail="Stored policy snapshot payload is invalid")
+
     try:
-        report = replay_decision(decision)
+        report = replay_decision(
+            decision,
+            policy_snapshot=policy_snapshot,
+            stored_engine_version=str(row.get("engine_version") or ""),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    replay_event = record_replay_event(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        match=bool(report.get("match")),
+        diff=report.get("diff") or [],
+        old_output_hash=(report.get("old") or {}).get("output_hash"),
+        new_output_hash=(report.get("new") or {}).get("output_hash"),
+        old_policy_hash=(report.get("old") or {}).get("policy_hash"),
+        new_policy_hash=(report.get("new") or {}).get("policy_hash"),
+        old_input_hash=(report.get("old") or {}).get("input_hash"),
+        new_input_hash=(report.get("new") or {}).get("input_hash"),
+        ran_engine_version=str(report.get("engine_version_replay") or report.get("engine_version_original") or ""),
+    )
+    try:
+        from releasegate.evidence.graph import record_replay_evidence
+
+        record_replay_evidence(
+            tenant_id=effective_tenant,
+            decision_id=decision_id,
+            replay_id=str(replay_event.get("replay_id") or ""),
+            match=bool(replay_event.get("match")),
+            diff=report.get("diff") or [],
+            replay_hash=str((report.get("new") or {}).get("replay_hash") or report.get("replay_hash_replay") or ""),
+        )
+    except Exception:
+        # Evidence graph is best effort.
+        pass
 
     report["created_at"] = row.get("created_at")
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
     report["attestation_id"] = decision.attestation_id
+    report["replay_id"] = replay_event.get("replay_id")
     log_security_event(
-        tenant_id=decision.tenant_id,
+        tenant_id=effective_tenant,
         principal_id=auth.principal_id,
         auth_method=auth.auth_method,
         action="decision_replay",
         target_type="decision",
         target_id=decision_id,
-        metadata={"repo": report.get("repo"), "pr_number": report.get("pr_number")},
+        metadata={
+            "repo": report.get("repo"),
+            "pr_number": report.get("pr_number"),
+            "replay_id": replay_event.get("replay_id"),
+            "match": bool(report.get("match")),
+        },
     )
     return report
 
@@ -2344,6 +2418,134 @@ def verify_decision_policy_snapshot(
     if not report.get("exists"):
         raise HTTPException(status_code=404, detail="Decision policy snapshot binding not found")
     return report
+
+
+@app.get("/decisions/{decision_id}/evidence-graph")
+def get_decision_evidence_graph_endpoint(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    depth: int = 2,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.evidence.graph import get_decision_evidence_graph
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_decision_evidence_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        max_depth=depth,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Evidence graph not found for decision")
+    return payload
+
+
+@app.get("/decisions/{decision_id}/explain")
+def explain_decision_endpoint(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.evidence.graph import explain_decision
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = explain_decision(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Decision evidence explanation not found")
+    return payload
+
+
+@app.post("/gate/deploy/check")
+def deploy_gate_check_endpoint(
+    payload: DeployGateCheckRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.enforcement import evaluate_deploy_gate
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    result = evaluate_deploy_gate(
+        tenant_id=effective_tenant,
+        decision_id=payload.decision_id,
+        issue_key=payload.issue_key,
+        correlation_id=payload.correlation_id,
+        deploy_id=payload.deploy_id,
+        repo=payload.repo,
+        env=payload.env,
+        commit_sha=payload.commit_sha,
+        artifact_digest=payload.artifact_digest,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="deploy_gate_check",
+        target_type="deployment",
+        target_id=str(payload.deploy_id or payload.correlation_id or payload.repo),
+        metadata={
+            "result": result.get("status"),
+            "reason_code": result.get("reason_code"),
+            "repo": payload.repo,
+            "env": payload.env,
+            "decision_id": result.get("decision_id"),
+            "correlation_id": result.get("correlation_id"),
+        },
+    )
+    return result
+
+
+@app.post("/gate/incident/close-check")
+def incident_close_check_endpoint(
+    payload: IncidentCloseCheckRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.enforcement import evaluate_incident_close_gate
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    result = evaluate_incident_close_gate(
+        tenant_id=effective_tenant,
+        incident_id=payload.incident_id,
+        decision_id=payload.decision_id,
+        issue_key=payload.issue_key,
+        correlation_id=payload.correlation_id,
+        deploy_id=payload.deploy_id,
+        repo=payload.repo,
+        env=payload.env,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="incident_close_gate_check",
+        target_type="incident",
+        target_id=str(payload.incident_id),
+        metadata={
+            "result": result.get("status"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "correlation_id": result.get("correlation_id"),
+            "deploy_id": payload.deploy_id,
+        },
+    )
+    return result
 
 
 @app.post("/verify")

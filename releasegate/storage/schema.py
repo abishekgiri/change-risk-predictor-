@@ -895,6 +895,222 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_decision_replays (
+            tenant_id TEXT NOT NULL,
+            replay_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            match BOOLEAN NOT NULL,
+            diff_json JSONB NOT NULL,
+            old_output_hash TEXT,
+            new_output_hash TEXT,
+            old_policy_hash TEXT,
+            new_policy_hash TEXT,
+            old_input_hash TEXT,
+            new_input_hash TEXT,
+            ran_engine_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, replay_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_decision_created
+        ON audit_decision_replays(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_decision_replay_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Decision replay ledger is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_decision_replays_update'
+            ) THEN
+                CREATE TRIGGER prevent_decision_replays_update
+                BEFORE UPDATE ON audit_decision_replays
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_decision_replay_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_decision_replays_delete'
+            ) THEN
+                CREATE TRIGGER prevent_decision_replays_delete
+                BEFORE DELETE ON audit_decision_replays
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_decision_replay_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_nodes (
+            tenant_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            ref TEXT NOT NULL,
+            hash TEXT,
+            payload_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, node_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_nodes_tenant_type_ref
+        ON evidence_nodes(tenant_id, type, ref)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_nodes_tenant_type_created
+        ON evidence_nodes(tenant_id, type, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_evidence_node_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Evidence nodes are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_nodes_update'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_nodes_update
+                BEFORE UPDATE ON evidence_nodes
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_node_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_nodes_delete'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_nodes_delete
+                BEFORE DELETE ON evidence_nodes
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_node_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_edges (
+            tenant_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            from_node_id TEXT NOT NULL,
+            to_node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, edge_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_edges_tenant_from_to_type
+        ON evidence_edges(tenant_id, from_node_id, to_node_id, type)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_from_created
+        ON evidence_edges(tenant_id, from_node_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_to_created
+        ON evidence_edges(tenant_id, to_node_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_evidence_edge_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Evidence edges are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_edges_update'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_edges_update
+                BEFORE UPDATE ON evidence_edges
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_edge_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_edges_delete'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_edges_delete
+                BEFORE DELETE ON evidence_edges
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_edge_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS api_keys (
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,

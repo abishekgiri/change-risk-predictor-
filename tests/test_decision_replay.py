@@ -103,10 +103,29 @@ def test_replay_endpoint_recomputes_status_and_policy_hash():
     assert body["decision_hash_match"] is True
     assert body["replay_hash_match"] is True
     assert body["matches_original"] is True
+    assert body["match"] is True
     assert body["mismatch_reason"] is None
+    assert body["diff"] == []
+    assert body["replay_id"]
     assert body["triggered_policies"] == ["RG-POL-1"]
     assert body["repo"] == repo
     assert body["pr_number"] == pr_number
+
+    from releasegate.storage import get_storage_backend
+
+    storage = get_storage_backend()
+    replay_row = storage.fetchone(
+        """
+        SELECT replay_id, decision_id, match, diff_json
+        FROM audit_decision_replays
+        WHERE tenant_id = ? AND replay_id = ?
+        """,
+        ("tenant-test", body["replay_id"]),
+    )
+    assert replay_row is not None
+    assert replay_row["decision_id"] == stored.decision_id
+    assert int(replay_row["match"]) == 1
+    assert json.loads(replay_row["diff_json"]) == []
 
 
 def test_replay_endpoint_requires_policy_bindings():
@@ -147,3 +166,70 @@ def test_replay_endpoint_requires_policy_bindings():
     assert resp.status_code == 422
     detail = resp.json().get("detail", "")
     assert "no policy bindings" in detail.lower()
+
+
+def test_replay_endpoint_returns_diff_when_output_mismatches():
+    repo = f"replay-mismatch-{uuid.uuid4().hex[:8]}"
+    pr_number = 103
+    policy_dict = {
+        "policy_id": "RG-POL-2",
+        "version": "1.0.0",
+        "name": "Block high risk",
+        "description": "Block when risk is high",
+        "scope": "pull_request",
+        "enabled": True,
+        "controls": [
+            {"signal": "raw.risk.level", "operator": "==", "value": "HIGH"},
+        ],
+        "enforcement": {"result": "BLOCK", "message": "High risk blocked"},
+        "metadata": {"source": "unit-test"},
+    }
+    binding = PolicyBinding(
+        policy_id="RG-POL-2",
+        policy_version="1.0.0",
+        policy_hash=_policy_hash(policy_dict),
+        policy=policy_dict,
+    )
+    bundle_hash = _bindings_hash([binding.model_dump(mode="json")])
+    decision = Decision(
+        timestamp=datetime.now(timezone.utc),
+        release_status="ALLOWED",
+        context_id=f"jira-{repo}-{pr_number}",
+        message="ALLOWED by stale decision payload",
+        policy_bundle_hash=bundle_hash,
+        evaluation_key=f"{repo}:{pr_number}:{uuid.uuid4().hex}",
+        actor_id="actor-999",
+        reason_code="POLICY_ALLOWED",
+        inputs_present={"releasegate_risk": True},
+        input_snapshot={
+            "signal_map": {
+                "repo": repo,
+                "pr_number": pr_number,
+                "diff": {},
+                "risk": {"level": "HIGH"},
+                "labels": [],
+            },
+            "policies_requested": ["RG-POL-2"],
+        },
+        policy_bindings=[binding],
+        enforcement_targets=EnforcementTargets(
+            repository=repo,
+            pr_number=pr_number,
+            ref="HEAD",
+            external={"jira": ["RG-3"]},
+        ),
+    )
+    stored = AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number)
+
+    resp = client.post(
+        f"/decisions/{stored.decision_id}/replay",
+        params={"tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["policy:read"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["match"] is False
+    assert body["status_match"] is False
+    assert body["replay_status"] == "BLOCKED"
+    assert isinstance(body["diff"], list) and body["diff"]
+    assert any(item.get("path") == "/status" for item in body["diff"])

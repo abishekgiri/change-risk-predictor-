@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from releasegate.audit.policy_bundles import store_policy_bundle
 from releasegate.decision.hashing import (
@@ -96,7 +96,7 @@ class AuditRecorder:
         decision: Decision,
         repo: str,
         pr_number: Optional[int],
-    ) -> None:
+    ) -> Dict[str, Any]:
         policy_bindings = [
             binding.model_dump(mode="json", exclude_none=True)
             for binding in sorted(decision.policy_bindings, key=lambda b: b.policy_id)
@@ -156,6 +156,12 @@ class AuditRecorder:
             reason_codes=reason_codes,
             signal_bundle_hash=decision.input_hash,
         )
+        return {
+            "snapshot_id": str(persisted.get("snapshot_id") or ""),
+            "policy_hash": str(persisted.get("policy_hash") or ""),
+            "issue_key": issue_key,
+            "transition_id": transition_id,
+        }
 
     @staticmethod
     def _extract_decision_refs(decision: Decision) -> List[tuple[str, str]]:
@@ -275,12 +281,37 @@ class AuditRecorder:
                 decision=decision,
                 created_at=created_at,
             )
-            AuditRecorder._persist_resolved_policy_snapshot_record(
+            resolved_snapshot = AuditRecorder._persist_resolved_policy_snapshot_record(
                 tenant_id=effective_tenant,
                 decision=decision,
                 repo=repo,
                 pr_number=pr_number,
             )
+            try:
+                from releasegate.evidence.graph import record_decision_evidence
+
+                record_decision_evidence(
+                    tenant_id=effective_tenant,
+                    decision_id=decision.decision_id,
+                    status=decision.release_status.value if hasattr(decision.release_status, "value") else str(decision.release_status),
+                    reason_code=decision.reason_code,
+                    decision_hash=decision.decision_hash,
+                    repo=repo,
+                    pr_number=pr_number,
+                    issue_key=resolved_snapshot.get("issue_key"),
+                    input_hash=decision.input_hash,
+                    policy_snapshot_id=resolved_snapshot.get("snapshot_id"),
+                    policy_hash=resolved_snapshot.get("policy_hash"),
+                    attestation_id=decision.attestation_id,
+                    context={
+                        "context_id": decision.context_id,
+                        "evaluation_key": decision.evaluation_key,
+                        "transition_id": resolved_snapshot.get("transition_id"),
+                    },
+                )
+            except Exception:
+                # Evidence graph is auxiliary; do not block decision recording.
+                pass
             try:
                 AuditRecorder._persist_decision_refs(
                     tenant_id=effective_tenant,

@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260219_")
+    assert current.startswith("20260220_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -35,6 +35,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260218_016_decision_external_refs" in migration_ids
         assert "20260219_017_policy_snapshot_rollout" in migration_ids
         assert "20260219_018_lock_chain_governance" in migration_ids
+        assert "20260220_019_replay_and_evidence_graph" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -200,11 +201,41 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         } <= metrics_cols
         assert metrics_pk == ["tenant_id", "date_utc", "chain_id", "actor"]
 
+        cur.execute("PRAGMA table_info(audit_decision_replays)")
+        replay_info = cur.fetchall()
+        replay_cols = {row[1] for row in replay_info}
+        replay_pk = [row[1] for row in sorted((r for r in replay_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "replay_id",
+            "decision_id",
+            "match",
+            "diff_json",
+            "old_output_hash",
+            "new_output_hash",
+            "ran_engine_version",
+        } <= replay_cols
+        assert replay_pk == ["tenant_id", "replay_id"]
+
+        cur.execute("PRAGMA table_info(evidence_nodes)")
+        en_info = cur.fetchall()
+        en_cols = {row[1] for row in en_info}
+        en_pk = [row[1] for row in sorted((r for r in en_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "node_id", "type", "ref", "hash", "payload_json"} <= en_cols
+        assert en_pk == ["tenant_id", "node_id"]
+
+        cur.execute("PRAGMA table_info(evidence_edges)")
+        ee_info = cur.fetchall()
+        ee_cols = {row[1] for row in ee_info}
+        ee_pk = [row[1] for row in sorted((r for r in ee_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "edge_id", "from_node_id", "to_node_id", "type", "metadata_json"} <= ee_cols
+        assert ee_pk == ["tenant_id", "edge_id"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260219_018_lock_chain_governance"
-        assert state[1] == "20260219_018_lock_chain_governance"
+        assert state[0] == "20260220_019_replay_and_evidence_graph"
+        assert state[1] == "20260220_019_replay_and_evidence_graph"
     finally:
         conn.close()
 
