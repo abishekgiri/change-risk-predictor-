@@ -1,5 +1,6 @@
 import pytest
 import os
+import requests
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 from releasegate.integrations.jira.types import TransitionCheckRequest
@@ -46,6 +47,13 @@ def test_compute_key_stability(base_request):
     base_request.context_overrides = {"idempotency_key": "req-2"}
     k5 = gate._compute_key(base_request)
     assert k4 == k5
+
+    # Changing canonical transition inputs must change the key.
+    base_request.context_overrides = {"repo": "abishekgiri/change-risk-predictor-", "pr_number": 27}
+    k6 = gate._compute_key(base_request)
+    base_request.context_overrides = {"repo": "abishekgiri/change-risk-predictor-", "pr_number": 28}
+    k7 = gate._compute_key(base_request)
+    assert k6 != k7
 
 
 def test_build_decision_id_is_deterministic(base_request):
@@ -147,7 +155,9 @@ def test_gate_prod_conditional_block(MockRecorder, MockEngine, base_request):
 
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_skips_when_risk_metadata_missing(MockRecorder, base_request):
-    gate = WorkflowGate()
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
     gate.client.get_issue_property = MagicMock(return_value={})
 
     mock_decision = Decision(
@@ -173,10 +183,12 @@ def test_gate_uses_ci_score_fallback_when_risk_metadata_missing(MockRecorder, ba
     with patch.dict(
         os.environ,
         {
+            "RELEASEGATE_STRICT_MODE": "false",
             "GITHUB_TOKEN": "test-github-token",
         },
     ):
         gate = WorkflowGate()
+    base_request.environment = "STAGING"
     base_request.context_overrides = {
         "repo": "abishekgiri/change-risk-predictor-",
         "pr_number": 27,
@@ -232,7 +244,9 @@ def test_gate_strict_mode_blocks_when_risk_missing(MockRecorder, base_request):
 
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_skips_when_no_policies_mapped(MockRecorder, base_request):
-    gate = WorkflowGate()
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
     gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
 
     mock_decision = Decision(
@@ -255,7 +269,9 @@ def test_gate_skips_when_no_policies_mapped(MockRecorder, base_request):
 @patch("releasegate.engine.ComplianceEngine")
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_skips_when_policy_mapping_invalid(MockRecorder, MockEngine, base_request):
-    gate = WorkflowGate()
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
     gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
 
     mock_run_result = MagicMock()
@@ -538,7 +554,9 @@ def test_gate_strict_mode_blocks_on_risk_fetch_error(MockRecorder, base_request)
 
 
 def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
-    gate = WorkflowGate()
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
     with patch.object(gate, "_resolve_policies", side_effect=TimeoutError("policy registry timed out")), patch.object(
         gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
     ):
@@ -557,11 +575,14 @@ def test_gate_policy_registry_timeout_strict_blocks(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
+    assert resp.reason_code == "TIMEOUT_DEPENDENCY"
     assert "dependency timeout" in resp.reason
 
 
 def test_gate_jira_timeout_in_permissive_mode_is_skipped(base_request):
-    gate = WorkflowGate()
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
     gate.client.get_issue_property = MagicMock(side_effect=JiraDependencyTimeout("jira timed out"))
     with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch.object(
         gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
@@ -570,6 +591,58 @@ def test_gate_jira_timeout_in_permissive_mode_is_skipped(base_request):
     assert resp.allow is True
     assert resp.status == "SKIPPED"
     assert "dependency timeout" in resp.reason
+
+
+def test_gate_prod_without_mapping_blocks_fail_closed(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
+        gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
+    with patch.object(gate, "_resolve_policies", return_value=[]), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "NO_POLICIES_MAPPED_STRICT"
+    assert "no policies configured" in resp.reason.lower()
+
+
+def test_gate_strict_blocks_when_role_map_missing(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    gate.client.get_issue_property = MagicMock(return_value={"risk_level": "LOW"})
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch.object(
+        gate, "_load_role_map", return_value=None
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "ROLE_MAPPING_MISSING"
+    assert "role mapping unavailable" in resp.reason.lower()
+
+
+def test_gate_strict_blocks_when_risk_fallback_fetch_fails(base_request):
+    with patch.dict(
+        os.environ,
+        {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
+    ):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 27,
+    }
+    gate.client.get_issue_property = MagicMock(return_value={})
+    with patch("releasegate.integrations.jira.workflow_gate.requests.get", side_effect=requests.RequestException("boom")), patch.object(
+        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+    ):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "MISSING_RISK_METADATA_STRICT"
+    assert "missing issue property" in resp.reason.lower()
 
 
 def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
@@ -582,4 +655,5 @@ def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
+    assert resp.reason_code == "TIMEOUT_DEPENDENCY"
     assert "dependency timeout" in resp.reason

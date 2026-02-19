@@ -97,7 +97,8 @@ class WorkflowGate:
         self._policy_hash_cache = None
         evaluation_key = self._compute_key(request, tenant_id=tenant_id)
         repo, pr_number = self._repo_and_pr(request)
-        strict_mode = self.strict_mode
+        is_prod = request.environment.upper() == "PRODUCTION"
+        strict_mode = self.strict_mode or is_prod
         self._resolved_mode_hint = None
         self._resolved_gate_hint = None
         self._unresolved_gate_hint = None
@@ -111,10 +112,10 @@ class WorkflowGate:
                 repo=repo,
                 pr_number=pr_number,
                 tenant_id=tenant_id,
-                strict_mode=strict_mode,
+                strict_mode=strict_mode or is_prod,
                 detail=str(exc),
             )
-        strict_mode = self._effective_strict_mode(self._resolved_mode_hint, default=strict_mode)
+        strict_mode = self._effective_strict_mode(self._resolved_mode_hint, default=strict_mode) or is_prod
         request_id = (
             request.context_overrides.get("delivery_id")
             or request.context_overrides.get("idempotency_key")
@@ -198,6 +199,7 @@ class WorkflowGate:
                     reason=final_blocked.message,
                     decision_id=final_blocked.decision_id,
                     status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -238,6 +240,7 @@ class WorkflowGate:
                     reason=final_blocked.message,
                     decision_id=final_blocked.decision_id,
                     status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -278,6 +281,7 @@ class WorkflowGate:
                     reason=final_blocked.message,
                     decision_id=final_blocked.decision_id,
                     status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -318,6 +322,7 @@ class WorkflowGate:
                     reason=final_blocked.message,
                     decision_id=final_blocked.decision_id,
                     status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
                     unlock_conditions=final_blocked.unlock_conditions,
                     policy_hash=final_blocked.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -410,6 +415,7 @@ class WorkflowGate:
                 reason=final_decision.message,
                 decision_id=final_decision.decision_id,
                 status=final_decision.release_status.value,
+                reason_code=final_decision.reason_code,
                 unlock_conditions=final_decision.unlock_conditions,
                 policy_hash=final_decision.policy_bundle_hash,
                 tenant_id=tenant_id,
@@ -522,6 +528,7 @@ class WorkflowGate:
                 reason=final_skipped.message,
                 decision_id=final_skipped.decision_id,
                 status=final_skipped.release_status.value,
+                reason_code=final_skipped.reason_code,
                 requirements=["Missing `releasegate_risk` metadata"],
                 unlock_conditions=final_skipped.unlock_conditions,
                 policy_hash=final_skipped.policy_bundle_hash,
@@ -533,6 +540,51 @@ class WorkflowGate:
             # In a real high-throughput system you might check DB reader here.
             # For now, we rely on the DB unique constraint in the Recorder to catch duplicates at write time,
             # or we could peek. Let's proceed to evaluate; Recorder handles the "already exists" case safely now.
+
+            role_map = self._load_role_map(tenant_id=tenant_id)
+            if strict_mode and role_map is None:
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: Jira role mapping unavailable (strict mode)",
+                    evaluation_key=f"{evaluation_key}:missing-role-map",
+                    unlock_conditions=["Restore valid jira_role_map.yaml and retry transition."],
+                    reason_code="ROLE_MAPPING_MISSING",
+                    inputs_present={"releasegate_risk": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                    },
+                )
+                final_blocked = self._record_with_timeout(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    dependency_context="storage",
+                )
+                self._log_decision(
+                    event="jira.transition.role_map_missing",
+                    request=request,
+                    decision=final_blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    mode=strict_mode,
+                    gate=self._resolved_gate_hint,
+                )
+                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
+                )
             
             # 2. Context Construction
             context = self._build_context(request)
@@ -583,6 +635,7 @@ class WorkflowGate:
                     reason=final_invalid.message,
                     decision_id=final_invalid.decision_id,
                     status=final_invalid.release_status.value,
+                    reason_code=final_invalid.reason_code,
                     unlock_conditions=final_invalid.unlock_conditions,
                     policy_hash=final_invalid.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -634,6 +687,7 @@ class WorkflowGate:
                     reason=final_skipped.message,
                     decision_id=final_skipped.decision_id,
                     status=final_skipped.release_status.value,
+                    reason_code=final_skipped.reason_code,
                     unlock_conditions=final_skipped.unlock_conditions,
                     policy_hash=final_skipped.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -740,6 +794,7 @@ class WorkflowGate:
                     reason=final_invalid.message,
                     decision_id=final_invalid.decision_id,
                     status=final_invalid.release_status.value,
+                    reason_code=final_invalid.reason_code,
                     unlock_conditions=final_invalid.unlock_conditions,
                     policy_hash=final_invalid.policy_bundle_hash,
                     tenant_id=tenant_id,
@@ -818,6 +873,7 @@ class WorkflowGate:
                 reason=reason,
                 decision_id=final_decision.decision_id,
                 status=status.value,
+                reason_code=final_decision.reason_code,
                 requirements=resp_requirements,
                 unlock_conditions=final_decision.unlock_conditions,
                 policy_hash=final_decision.policy_bundle_hash,
@@ -1449,6 +1505,7 @@ class WorkflowGate:
             reason=final_decision.message,
             decision_id=final_decision.decision_id,
             status=final_decision.release_status.value,
+            reason_code=final_decision.reason_code,
             unlock_conditions=final_decision.unlock_conditions,
             policy_hash=final_decision.policy_bundle_hash,
             tenant_id=tenant_id,
@@ -1557,6 +1614,7 @@ class WorkflowGate:
             reason=final_fallback.message,
             decision_id=final_fallback.decision_id,
             status=fallback_status.value,
+            reason_code=final_fallback.reason_code,
             policy_hash=final_fallback.policy_bundle_hash,
             tenant_id=tenant_id,
         )

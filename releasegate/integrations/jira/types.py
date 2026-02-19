@@ -41,8 +41,9 @@ class TransitionCheckResponse(BaseModel):
     reason: str = Field(..., description="Short explanation for the decision")
     
     # Full Metadata
-    decision_id: str = Field(..., description="ReleaseGate Decision UUID")
+    decision_id: str = Field(..., description="ReleaseGate deterministic decision identifier")
     status: Literal["ALLOWED", "CONDITIONAL", "BLOCKED", "SKIPPED", "ERROR"] = Field(..., description="ReleaseGate Status")
+    reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
     policy_hash: Optional[str] = Field(None, description="Hash fingerprint of compiled policy bundle")
     tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
     
