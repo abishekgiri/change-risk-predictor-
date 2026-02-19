@@ -154,8 +154,7 @@ def test_gate_uses_ci_score_fallback_when_risk_metadata_missing(MockRecorder, ba
     with patch.dict(
         os.environ,
         {
-            "RELEASEGATE_INTERNAL_SERVICE_KEY": "test-internal-key",
-            "RELEASEGATE_CI_SCORE_URL": "https://example.invalid/ci/score",
+            "GITHUB_TOKEN": "test-github-token",
         },
     ):
         gate = WorkflowGate()
@@ -167,7 +166,7 @@ def test_gate_uses_ci_score_fallback_when_risk_metadata_missing(MockRecorder, ba
     gate.client.set_issue_property = MagicMock(return_value=True)
 
     mock_ci_response = MagicMock(status_code=200)
-    mock_ci_response.json.return_value = {"level": "MEDIUM", "score": 60}
+    mock_ci_response.json.return_value = {"changed_files": 9, "additions": 120, "deletions": 21}
 
     mock_decision = Decision(
         decision_id="uuid-ci-fallback",
@@ -180,7 +179,7 @@ def test_gate_uses_ci_score_fallback_when_risk_metadata_missing(MockRecorder, ba
     )
     MockRecorder.record_with_context.return_value = mock_decision
 
-    with patch("releasegate.integrations.jira.workflow_gate.requests.post", return_value=mock_ci_response), patch.object(
+    with patch("releasegate.integrations.jira.workflow_gate.requests.get", return_value=mock_ci_response), patch.object(
         gate, "_resolve_policies", return_value=[]
     ):
         resp = gate.check_transition(base_request)

@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable, TypeVar
 import requests
+from releasegate.integrations.github_risk import PRRiskInput, build_issue_risk_property, classify_pr_risk
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient, JiraDependencyTimeout
 from releasegate.integrations.jira.config import (
@@ -76,8 +77,6 @@ class WorkflowGate:
         self.ci_score_timeout_seconds = float(os.getenv("RELEASEGATE_CI_SCORE_TIMEOUT_SECONDS", "5"))
         self.storage_timeout_seconds = float(os.getenv("RELEASEGATE_STORAGE_TIMEOUT_SECONDS", "3"))
         self.policy_timeout_seconds = float(os.getenv("RELEASEGATE_POLICY_REGISTRY_TIMEOUT_SECONDS", "3"))
-        self.internal_service_key = (os.getenv("RELEASEGATE_INTERNAL_SERVICE_KEY") or "").strip()
-        self.ci_score_url = self._resolve_ci_score_url()
         self.transition_map_cache_ttl_seconds = _env_float("RELEASEGATE_TRANSITION_MAP_CACHE_TTL_SECONDS", 300.0)
         self.role_map_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_MAP_CACHE_TTL_SECONDS", 300.0)
         self.role_resolution_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_RESOLUTION_CACHE_TTL_SECONDS", 180.0)
@@ -1559,40 +1558,23 @@ class WorkflowGate:
             pr = None
         return repo, pr
 
-    def _resolve_ci_score_url(self) -> str:
-        explicit = (os.getenv("RELEASEGATE_CI_SCORE_URL") or "").strip()
-        if explicit:
-            return explicit.rstrip("/")
-
-        base = (
-            (os.getenv("RELEASEGATE_GATE_URL") or "").strip()
-            or (os.getenv("RELEASEGATE_BASE_URL") or "").strip()
-            or (os.getenv("RELEASEGATE_PUBLIC_BASE_URL") or "").strip()
-        )
-        if base:
-            return f"{base.rstrip('/')}/ci/score"
-
-        port = (os.getenv("PORT") or "").strip()
-        if port:
-            return f"http://127.0.0.1:{port}/ci/score"
-        return ""
-
     def _fetch_risk_metadata_from_ci(self, *, repo: str, pr_number: Optional[int]) -> Dict[str, Any]:
-        if not self.ci_score_url or not self.internal_service_key:
-            return {}
         if not repo or repo == "unknown" or pr_number is None:
             return {}
 
-        payload = {"repo": repo, "pr": int(pr_number)}
+        github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
+        if not github_token:
+            return {}
+
+        url = f"https://api.github.com/repos/{repo}/pulls/{int(pr_number)}"
         headers = {
-            "Content-Type": "application/json",
-            "X-Internal-Service-Key": self.internal_service_key,
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
         }
         tenant_id = self._active_tenant_id or "default"
         try:
-            response = requests.post(
-                self.ci_score_url,
-                json=payload,
+            response = requests.get(
+                url,
                 headers=headers,
                 timeout=max(self.ci_score_timeout_seconds, 0.1),
             )
@@ -1609,7 +1591,7 @@ class WorkflowGate:
                 pr_number=pr_number,
                 mode="unknown",
                 result="PENDING",
-                reason_code="CI_SCORE_REQUEST_FAILED",
+                reason_code="GITHUB_PR_FETCH_FAILED",
                 policy_bundle_hash=self._current_policy_hash(),
                 error=str(exc),
             )
@@ -1628,35 +1610,30 @@ class WorkflowGate:
                 pr_number=pr_number,
                 mode="unknown",
                 result="PENDING",
-                reason_code="CI_SCORE_HTTP_ERROR",
+                reason_code="GITHUB_PR_FETCH_HTTP_ERROR",
                 policy_bundle_hash=self._current_policy_hash(),
                 status_code=response.status_code,
             )
             return {}
 
         try:
-            data = response.json() or {}
+            pr_data = response.json() or {}
         except ValueError:
             return {}
 
-        level_raw = data.get("level") or data.get("risk_level") or data.get("releasegate_risk")
-        level = str(level_raw or "").strip().upper()
-        if not level:
-            return {}
-        score = data.get("score", data.get("risk_score"))
-        risk_meta: Dict[str, Any] = {
-            "releasegate_risk": level,
-            "risk_level": level,
-            "source": "ci_score",
-            "repo": repo,
-            "pr_number": int(pr_number),
-        }
-        if score is not None:
-            try:
-                risk_meta["risk_score"] = float(score)
-            except Exception:
-                pass
-        return risk_meta
+        metrics = PRRiskInput(
+            changed_files=int(pr_data.get("changed_files", 0) or 0),
+            additions=int(pr_data.get("additions", 0) or 0),
+            deletions=int(pr_data.get("deletions", 0) or 0),
+        )
+        risk_level = classify_pr_risk(metrics)
+        return build_issue_risk_property(
+            repo=repo,
+            pr_number=int(pr_number),
+            risk_level=risk_level,
+            metrics=metrics,
+            source="github",
+        )
 
     def _build_decision(
         self,
