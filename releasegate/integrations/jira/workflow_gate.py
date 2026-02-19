@@ -143,7 +143,11 @@ class WorkflowGate:
 
         # In strict mode, when repo/PR context is provided, verify dependency truth before
         # trusting persisted Jira issue properties. This prevents stale metadata replay.
-        strict_dependency_failure = self._strict_dependency_failure(repo=repo, pr_number=pr_number)
+        strict_dependency_failure = self._strict_dependency_failure(
+            tenant_id=tenant_id,
+            repo=repo,
+            pr_number=pr_number,
+        )
         if strict_mode and strict_dependency_failure is not None:
             reason_code, message, unlock_conditions = strict_dependency_failure
             blocked = self._build_decision(
@@ -1759,6 +1763,7 @@ class WorkflowGate:
     def _strict_dependency_failure(
         self,
         *,
+        tenant_id: str,
         repo: str,
         pr_number: Optional[int],
     ) -> Optional[tuple[str, str, List[str]]]:
@@ -1780,6 +1785,15 @@ class WorkflowGate:
                 "INVALID_PR_NUMBER",
                 "BLOCKED: invalid PR number for strict mode",
                 ["Provide a positive pull request number."],
+            )
+
+        allowed_repos = self._allowed_repos_for_tenant(tenant_id)
+        if allowed_repos and repo not in allowed_repos:
+            allowed_text = ", ".join(sorted(allowed_repos))
+            return (
+                "REPO_NOT_ALLOWED",
+                f"BLOCKED: repository `{repo}` is not allowed for tenant `{tenant_id}`",
+                [f"Use one of the allowed repositories: {allowed_text}"],
             )
 
         github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
@@ -1841,6 +1855,30 @@ class WorkflowGate:
             f"BLOCKED: GitHub PR lookup failed with status {response.status_code}",
             ["Retry after GitHub API dependency recovers."],
         )
+
+    def _allowed_repos_for_tenant(self, tenant_id: str) -> set[str]:
+        """
+        Optional repo allowlist enforcement.
+        Supports tenant-specific and global env vars:
+        - RELEASEGATE_ALLOWED_REPOS_<TENANT>
+        - RELEASEGATE_ALLOWED_REPOS
+        """
+        tenant = (tenant_id or "").strip()
+        normalized_tenant = "".join(ch if ch.isalnum() else "_" for ch in tenant.upper())
+        env_keys = []
+        if normalized_tenant:
+            env_keys.append(f"RELEASEGATE_ALLOWED_REPOS_{normalized_tenant}")
+        env_keys.append("RELEASEGATE_ALLOWED_REPOS")
+
+        raw = ""
+        for key in env_keys:
+            raw = (os.getenv(key) or "").strip()
+            if raw:
+                break
+
+        if not raw:
+            return set()
+        return {item.strip() for item in raw.split(",") if item and item.strip()}
 
     def _build_decision(
         self,

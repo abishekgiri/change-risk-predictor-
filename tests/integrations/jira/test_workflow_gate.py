@@ -667,6 +667,33 @@ def test_gate_strict_blocks_when_repo_or_pr_not_found(base_request):
     assert "not found" in resp.reason.lower()
 
 
+def test_gate_strict_blocks_when_repo_not_allowed_for_tenant(base_request):
+    with patch.dict(
+        os.environ,
+        {
+            "RELEASEGATE_STRICT_MODE": "true",
+            "RELEASEGATE_ALLOWED_REPOS_DEFAULT": "abishekgiri/another-repo",
+            "RELEASEGATE_ALLOWED_REPOS_TENANT_TEST": "abishekgiri/another-repo",
+            "GITHUB_TOKEN": "test-github-token",
+        },
+    ):
+        gate = WorkflowGate()
+        base_request.environment = "STAGING"
+        base_request.context_overrides = {
+            "repo": "abishekgiri/change-risk-predictor-",
+            "pr_number": 27,
+        }
+        with patch("releasegate.integrations.jira.workflow_gate.requests.get") as mock_get, patch.object(
+            gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+        ):
+            resp = gate.check_transition(base_request)
+        mock_get.assert_not_called()
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "REPO_NOT_ALLOWED"
+    assert "not allowed" in resp.reason.lower()
+
+
 def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
         gate = WorkflowGate()
