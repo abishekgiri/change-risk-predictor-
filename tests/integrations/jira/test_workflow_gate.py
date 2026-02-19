@@ -755,6 +755,31 @@ def test_gate_strict_blocks_when_risk_fallback_fetch_fails(base_request):
     assert "dependency unavailable" in resp.reason.lower()
 
 
+def test_gate_strict_blocks_when_risk_scoring_fails(base_request):
+    with patch.dict(
+        os.environ,
+        {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
+    ):
+        gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 27,
+    }
+    gate.client.get_issue_property = MagicMock(return_value={})
+    ok_pr = MagicMock(status_code=200)
+    ok_pr.json.return_value = {"changed_files": 3, "additions": 10, "deletions": 1}
+    with patch("releasegate.integrations.jira.workflow_gate.requests.get", return_value=ok_pr), patch(
+        "releasegate.integrations.jira.workflow_gate.classify_pr_risk",
+        side_effect=RuntimeError("model load failed"),
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "RISK_SCORING_FAILED"
+    assert "model load failed" in resp.reason.lower()
+
+
 def test_gate_strict_blocks_when_repo_or_pr_not_found(base_request):
     with patch.dict(
         os.environ,

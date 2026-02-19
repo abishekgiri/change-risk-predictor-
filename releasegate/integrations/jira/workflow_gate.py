@@ -520,7 +520,20 @@ class WorkflowGate:
             )
 
         if self._is_missing_risk_metadata(risk_meta):
-            ci_risk_meta = self._fetch_risk_metadata_from_ci(repo=repo, pr_number=pr_number)
+            try:
+                ci_risk_meta = self._fetch_risk_metadata_from_ci(repo=repo, pr_number=pr_number)
+            except Exception as e:
+                return self._error_response(
+                    request,
+                    evaluation_key=evaluation_key,
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    message=f"System Error: failed to compute risk metadata ({e})",
+                    reason_code="RISK_SCORING_FAILED",
+                    strict_mode=strict_mode,
+                    error_code="RISK_SCORING_FAILED",
+                )
             if ci_risk_meta:
                 risk_meta = ci_risk_meta
                 try:
