@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from releasegate.integrations.jira.types import TransitionCheckRequest
 from releasegate.integrations.jira.client import JiraDependencyTimeout
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
-from releasegate.decision.types import Decision, EnforcementTargets
+from releasegate.decision.types import Decision, EnforcementTargets, DecisionType
 
 @pytest.fixture
 def base_request():
@@ -40,12 +40,31 @@ def test_compute_key_stability(base_request):
     k3 = gate._compute_key(base_request)
     assert k1 != k3
 
-    # Caller-provided idempotency key should affect the hash deterministically.
+    # Delivery/idempotency keys must not change canonical evaluation key.
     base_request.context_overrides = {"idempotency_key": "req-1"}
     k4 = gate._compute_key(base_request)
     base_request.context_overrides = {"idempotency_key": "req-2"}
     k5 = gate._compute_key(base_request)
-    assert k4 != k5
+    assert k4 == k5
+
+
+def test_build_decision_id_is_deterministic(base_request):
+    gate = WorkflowGate()
+    eval_key = gate._compute_key(base_request)
+
+    d1 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+    )
+    d2 = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=eval_key,
+    )
+    assert d1.decision_id == d2.decision_id == eval_key
 
 @patch("releasegate.engine.ComplianceEngine")
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")

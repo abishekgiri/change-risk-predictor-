@@ -2,11 +2,11 @@ import hashlib
 import json
 import logging
 import os
-import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable, TypeVar
 import requests
+from releasegate.attestation.canonicalize import canonicalize_json_bytes
 from releasegate.integrations.github_risk import PRRiskInput, build_issue_risk_property, classify_pr_risk
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient, JiraDependencyTimeout
@@ -865,18 +865,24 @@ class WorkflowGate:
             )
 
     def _compute_key(self, req: TransitionCheckRequest, tenant_id: Optional[str] = None) -> str:
-        """SHA256(issue + transition + status_change + env + actor)"""
-        request_id = (
-            req.context_overrides.get("delivery_id")
-            or req.context_overrides.get("webhook_delivery_id")
-            or req.context_overrides.get("transition_request_id")
-            or req.context_overrides.get("idempotency_key")
-            or ""
-        )
+        """Deterministic SHA256 key over canonical transition inputs."""
         effective_tenant = resolve_tenant_id(tenant_id or req.tenant_id or req.context_overrides.get("tenant_id"))
-        # Include target_status as critical differentiator
-        raw = f"{effective_tenant}:{req.issue_key}:{req.transition_id}:{req.source_status}:{req.target_status}:{req.environment}:{req.actor_account_id}:{request_id}"
-        return hashlib.sha256(raw.encode()).hexdigest()
+        repo, pr_number = self._repo_and_pr(req)
+        seed = {
+            "version": 1,
+            "tenant_id": effective_tenant,
+            "issue_key": req.issue_key,
+            "transition_id": req.transition_id,
+            "source_status": req.source_status,
+            "target_status": req.target_status,
+            "environment": req.environment,
+            "project_key": req.project_key,
+            "issue_type": req.issue_type,
+            "repo": repo,
+            "pr_number": pr_number,
+            "actor_account_id": req.actor_account_id,
+        }
+        return hashlib.sha256(canonicalize_json_bytes(seed)).hexdigest()
 
     def _tenant_id(self, req: TransitionCheckRequest) -> str:
         return resolve_tenant_id(req.tenant_id or req.context_overrides.get("tenant_id"))
@@ -1370,9 +1376,15 @@ class WorkflowGate:
                 if strict_mode
                 else f"SKIPPED: dependency timeout while persisting decision ({dependency_context})"
             )
+            fallback_id_seed = {
+                "version": 1,
+                "prior_decision_id": decision.decision_id,
+                "dependency_context": dependency_context,
+                "fallback": "persist_timeout",
+            }
             return decision.model_copy(
                 update={
-                    "decision_id": str(uuid.uuid4()),
+                    "decision_id": hashlib.sha256(canonicalize_json_bytes(fallback_id_seed)).hexdigest(),
                     "timestamp": datetime.now(timezone.utc),
                     "release_status": fallback_status,
                     "message": fallback_message,
@@ -1656,8 +1668,9 @@ class WorkflowGate:
         for binding in effective_policy_bindings:
             if not binding.tenant_id:
                 binding.tenant_id = tenant_id
+        decision_id = str(evaluation_key)
         return Decision(
-            decision_id=str(uuid.uuid4()),
+            decision_id=decision_id,
             tenant_id=tenant_id,
             timestamp=datetime.now(timezone.utc),
             release_status=release_status,
