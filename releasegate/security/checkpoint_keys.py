@@ -43,16 +43,16 @@ def rotate_checkpoint_signing_key(
     storage.execute(
         """
         UPDATE checkpoint_signing_keys
-        SET is_active = 0, rotated_at = COALESCE(rotated_at, ?)
-        WHERE tenant_id = ? AND is_active = 1
+        SET is_active = ?, rotated_at = COALESCE(rotated_at, ?)
+        WHERE tenant_id = ? AND is_active = ?
         """,
-        (now, effective_tenant),
+        (False, now, effective_tenant, True),
     )
     storage.execute(
         """
         INSERT INTO checkpoint_signing_keys (
             tenant_id, key_id, encrypted_key, key_hash, created_by, created_at, is_active
-        ) VALUES (?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             effective_tenant,
@@ -61,6 +61,7 @@ def rotate_checkpoint_signing_key(
             key_hash,
             created_by,
             now,
+            True,
         ),
     )
     return {
@@ -84,11 +85,11 @@ def get_active_checkpoint_signing_key_record(tenant_id: str) -> Optional[Dict[st
         """
         SELECT key_id, encrypted_key
         FROM checkpoint_signing_keys
-        WHERE tenant_id = ? AND is_active = 1
+        WHERE tenant_id = ? AND is_active = ?
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (resolve_tenant_id(tenant_id),),
+        (resolve_tenant_id(tenant_id), True),
     )
     if not row:
         return None

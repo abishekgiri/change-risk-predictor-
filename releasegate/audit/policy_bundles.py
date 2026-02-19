@@ -27,7 +27,7 @@ def store_policy_bundle(
         ON CONFLICT(tenant_id, policy_bundle_hash) DO UPDATE SET
             bundle_json = excluded.bundle_json,
             is_active = CASE
-                WHEN excluded.is_active = 1 THEN 1
+                WHEN excluded.is_active THEN excluded.is_active
                 ELSE policy_bundles.is_active
             END
         """,
@@ -35,7 +35,7 @@ def store_policy_bundle(
             effective_tenant,
             policy_bundle_hash,
             bundle_json,
-            1 if is_active else 0,
+            bool(is_active),
             datetime.now(timezone.utc).isoformat(),
         ),
     )
@@ -78,11 +78,11 @@ def get_latest_active_policy_bundle(*, tenant_id: Optional[str]) -> Optional[Dic
         """
         SELECT tenant_id, policy_bundle_hash, bundle_json, is_active, created_at
         FROM policy_bundles
-        WHERE tenant_id = ? AND is_active = 1
+        WHERE tenant_id = ? AND is_active = ?
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (effective_tenant,),
+        (effective_tenant, True),
     )
     if not row:
         return None
@@ -98,4 +98,3 @@ def get_latest_active_policy_bundle(*, tenant_id: Optional[str]) -> Optional[Dic
         "is_active": bool(row.get("is_active")),
         "created_at": row.get("created_at"),
     }
-

@@ -1661,8 +1661,8 @@ def publish_policy_bundle(
 
     if payload.activate:
         get_storage_backend().execute(
-            "UPDATE policy_bundles SET is_active = 0 WHERE tenant_id = ?",
-            (effective_tenant,),
+            "UPDATE policy_bundles SET is_active = ? WHERE tenant_id = ?",
+            (False, effective_tenant),
         )
     store_policy_bundle(
         tenant_id=effective_tenant,

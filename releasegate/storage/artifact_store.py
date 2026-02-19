@@ -40,7 +40,7 @@ class ArtifactStore:
                 effective_tenant,
                 policy_bundle_hash,
                 json.dumps(policy_snapshot or [], sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-                1 if is_active else 0,
+                bool(is_active),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -75,11 +75,11 @@ class ArtifactStore:
             """
             SELECT tenant_id, policy_bundle_hash, bundle_json, is_active, created_at
             FROM policy_bundles
-            WHERE tenant_id = ? AND is_active = 1
+            WHERE tenant_id = ? AND is_active = ?
             ORDER BY created_at DESC
             LIMIT 1
             """,
-            (effective_tenant,),
+            (effective_tenant, True),
         )
         if not row:
             return None
