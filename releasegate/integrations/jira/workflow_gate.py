@@ -141,6 +141,57 @@ class WorkflowGate:
         )
         incr("transitions_evaluated", tenant_id=tenant_id)
 
+        # In strict mode, when repo/PR context is provided, verify dependency truth before
+        # trusting persisted Jira issue properties. This prevents stale metadata replay.
+        strict_dependency_failure = self._strict_dependency_failure(repo=repo, pr_number=pr_number)
+        if strict_mode and strict_dependency_failure is not None:
+            reason_code, message, unlock_conditions = strict_dependency_failure
+            blocked = self._build_decision(
+                request,
+                release_status=DecisionType.BLOCKED,
+                message=message,
+                evaluation_key=f"{evaluation_key}:strict-dependency",
+                unlock_conditions=unlock_conditions,
+                reason_code=reason_code,
+                inputs_present={"releasegate_risk": False},
+                policy_hash=self._current_policy_hash(),
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "repo": repo,
+                    "pr_number": pr_number,
+                },
+            )
+            final_blocked = self._record_with_timeout(
+                blocked,
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                dependency_context="storage",
+            )
+            self._log_decision(
+                event="jira.transition.strict_dependency_failed",
+                request=request,
+                decision=final_blocked,
+                repo=repo,
+                pr_number=pr_number,
+                mode=strict_mode,
+                gate=self._resolved_gate_hint,
+                error_code=reason_code,
+                dependency="github",
+            )
+            self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
+            return TransitionCheckResponse(
+                allow=False,
+                reason=final_blocked.message,
+                decision_id=final_blocked.decision_id,
+                status=final_blocked.release_status.value,
+                reason_code=final_blocked.reason_code,
+                unlock_conditions=final_blocked.unlock_conditions,
+                policy_hash=final_blocked.policy_bundle_hash,
+                tenant_id=tenant_id,
+            )
+
         # Override path with explicit ledger recording
         if request.context_overrides.get("override") is True:
             override_reason = str(request.context_overrides.get("override_reason", "") or "").strip()
@@ -1703,6 +1754,92 @@ class WorkflowGate:
             risk_level=risk_level,
             metrics=metrics,
             source="github",
+        )
+
+    def _strict_dependency_failure(
+        self,
+        *,
+        repo: str,
+        pr_number: Optional[int],
+    ) -> Optional[tuple[str, str, List[str]]]:
+        """
+        Return a fail-closed reason tuple when strict mode dependency truth cannot
+        be established for an explicitly provided repo/PR context.
+        """
+        if not repo or repo == "unknown" or pr_number is None:
+            return None
+
+        if repo.count("/") != 1 or any(not part.strip() for part in repo.split("/", 1)):
+            return (
+                "INVALID_REPO_CONTEXT",
+                "BLOCKED: invalid repository context for strict mode",
+                ["Provide repo in OWNER/REPO format."],
+            )
+        if int(pr_number) <= 0:
+            return (
+                "INVALID_PR_NUMBER",
+                "BLOCKED: invalid PR number for strict mode",
+                ["Provide a positive pull request number."],
+            )
+
+        github_token = (os.getenv("GITHUB_TOKEN") or "").strip()
+        if not github_token:
+            return (
+                "GITHUB_AUTH_FAILED",
+                "BLOCKED: GitHub token is required for strict mode validation",
+                ["Set GITHUB_TOKEN with read access to the configured repository."],
+            )
+
+        url = f"https://api.github.com/repos/{repo}/pulls/{int(pr_number)}"
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        timeout = max(self.ci_score_timeout_seconds, 0.1)
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+        except requests.RequestException as exc:
+            self._log_event(
+                "warning",
+                event="jira.transition.strict_dependency.request_failed",
+                tenant_id=self._active_tenant_id or "default",
+                decision_id="pending",
+                request_id="strict-dependency",
+                issue_key="unknown",
+                transition_id="unknown",
+                repo=repo,
+                pr_number=pr_number,
+                mode="strict",
+                result="PENDING",
+                reason_code="GITHUB_UNAVAILABLE",
+                policy_bundle_hash=self._current_policy_hash(),
+                error=str(exc),
+            )
+            return (
+                "GITHUB_UNAVAILABLE",
+                "BLOCKED: GitHub dependency unavailable in strict mode",
+                ["Retry after GitHub API connectivity recovers."],
+            )
+
+        if response.status_code == 200:
+            return None
+        if response.status_code == 404:
+            return (
+                "REPO_OR_PR_NOT_FOUND",
+                f"BLOCKED: repository or pull request not found ({repo}#{int(pr_number)})",
+                ["Use a valid repository and pull request mapping for this transition."],
+            )
+        if response.status_code in {401, 403}:
+            return (
+                "GITHUB_AUTH_FAILED",
+                "BLOCKED: GitHub authentication/authorization failed in strict mode",
+                ["Fix GitHub token permissions for repository and pull request access."],
+            )
+
+        return (
+            "GITHUB_UNAVAILABLE",
+            f"BLOCKED: GitHub PR lookup failed with status {response.status_code}",
+            ["Retry after GitHub API dependency recovers."],
         )
 
     def _build_decision(

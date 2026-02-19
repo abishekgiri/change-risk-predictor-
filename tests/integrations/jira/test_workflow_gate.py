@@ -641,8 +641,30 @@ def test_gate_strict_blocks_when_risk_fallback_fetch_fails(base_request):
         resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
-    assert resp.reason_code == "MISSING_RISK_METADATA_STRICT"
-    assert "missing issue property" in resp.reason.lower()
+    assert resp.reason_code == "GITHUB_UNAVAILABLE"
+    assert "dependency unavailable" in resp.reason.lower()
+
+
+def test_gate_strict_blocks_when_repo_or_pr_not_found(base_request):
+    with patch.dict(
+        os.environ,
+        {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
+    ):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 999999,
+    }
+    with patch(
+        "releasegate.integrations.jira.workflow_gate.requests.get",
+        return_value=MagicMock(status_code=404),
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "REPO_OR_PR_NOT_FOUND"
+    assert "not found" in resp.reason.lower()
 
 
 def test_gate_jira_timeout_in_strict_mode_blocks(base_request):
