@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 from typing import Optional, List, Dict, Any, Literal
 
 class TransitionCheckRequest(BaseModel):
@@ -9,7 +9,11 @@ class TransitionCheckRequest(BaseModel):
     issue_key: str = Field(..., description="Jira Issue Key e.g. PROJ-123")
     
     # Transition Details (for Idempotency & Routing)
-    transition_id: str = Field(..., description="ID of the transition being attempted")
+    transition_id: str = Field(
+        ...,
+        validation_alias=AliasChoices("transition_id", "transitionId"),
+        description="ID of the transition being attempted",
+    )
     transition_name: Optional[str] = Field(None, description="Human readable name of transition")
     source_status: str = Field(..., description="Current status of the issue")
     target_status: str = Field(..., description="Destination status of the issue")

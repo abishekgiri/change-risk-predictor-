@@ -150,6 +150,47 @@ def test_gate_skips_when_risk_metadata_missing(MockRecorder, base_request):
 
 
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_uses_ci_score_fallback_when_risk_metadata_missing(MockRecorder, base_request):
+    with patch.dict(
+        os.environ,
+        {
+            "RELEASEGATE_INTERNAL_SERVICE_KEY": "test-internal-key",
+            "RELEASEGATE_CI_SCORE_URL": "https://example.invalid/ci/score",
+        },
+    ):
+        gate = WorkflowGate()
+    base_request.context_overrides = {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 27,
+    }
+    gate.client.get_issue_property = MagicMock(return_value={})
+    gate.client.set_issue_property = MagicMock(return_value=True)
+
+    mock_ci_response = MagicMock(status_code=200)
+    mock_ci_response.json.return_value = {"level": "MEDIUM", "score": 60}
+
+    mock_decision = Decision(
+        decision_id="uuid-ci-fallback",
+        timestamp=datetime.now(timezone.utc),
+        release_status="SKIPPED",
+        context_id="ctx-ci-fallback",
+        message="SKIPPED: no policies configured for this transition",
+        policy_bundle_hash="abc",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h")
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch("releasegate.integrations.jira.workflow_gate.requests.post", return_value=mock_ci_response), patch.object(
+        gate, "_resolve_policies", return_value=[]
+    ):
+        resp = gate.check_transition(base_request)
+
+    assert resp.status == "SKIPPED"
+    assert "no policies configured" in resp.reason
+    gate.client.set_issue_property.assert_called_once()
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_strict_mode_blocks_when_risk_missing(MockRecorder, base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
         gate = WorkflowGate()

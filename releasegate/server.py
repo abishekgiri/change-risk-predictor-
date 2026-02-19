@@ -282,6 +282,7 @@ def ci_score(
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
         scopes=["enforcement:write"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):

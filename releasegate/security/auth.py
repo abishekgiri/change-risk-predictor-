@@ -73,6 +73,8 @@ def _present_auth_methods(request: Request) -> List[str]:
         methods.append("jwt")
     if (request.headers.get("X-API-Key") or "").strip():
         methods.append("api_key")
+    if (request.headers.get("X-Internal-Service-Key") or "").strip():
+        methods.append("internal_service")
     signature_headers = (
         "X-Signature",
         "X-Key-Id",
@@ -354,10 +356,44 @@ async def _authenticate_signature(request: Request, *, rate_profile: str) -> Opt
     )
 
 
+def _authenticate_internal_service(request: Request, *, rate_profile: str) -> AuthContext:
+    configured = (os.getenv("RELEASEGATE_INTERNAL_SERVICE_KEY") or "").strip()
+    if not configured:
+        raise _auth_error(
+            401,
+            "AUTH_INTERNAL_SERVICE_UNAVAILABLE",
+            "Internal service authentication is not configured",
+        )
+
+    provided = (request.headers.get("X-Internal-Service-Key") or "").strip()
+    if not provided or not hmac.compare_digest(provided, configured):
+        raise _auth_error(401, "AUTH_INTERNAL_SERVICE_INVALID", "Internal service key is invalid")
+
+    tenant_hint = (
+        (request.headers.get("X-Tenant-Id") or "").strip()
+        or (os.getenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID") or "").strip()
+        or "default"
+    )
+    tenant_id = resolve_tenant_id(tenant_hint)
+    enforce_tenant_rate_limit(tenant_id=tenant_id, profile=rate_profile)
+    request.state.pre_tenant_rate_limited = True
+
+    roles = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_ROLES", "operator")) or ["operator"]
+    scopes = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "enforcement:write"))
+    return AuthContext(
+        tenant_id=tenant_id,
+        principal_id="internal_service",
+        auth_method="internal_service",
+        roles=sorted(set(roles)),
+        scopes=sorted(set(scopes)),
+    )
+
+
 async def authenticate_request(
     request: Request,
     *,
     allow_signature: bool = False,
+    allow_internal_service: bool = False,
     rate_profile: str = "default",
 ) -> AuthContext:
     methods = _present_auth_methods(request)
@@ -391,6 +427,15 @@ async def authenticate_request(
             metadata={"methods": methods},
         )
         raise _auth_error(401, "AUTH_SIGNATURE_FORBIDDEN", "Signature authentication is only allowed on webhook routes")
+
+    if methods == ["internal_service"]:
+        if not allow_internal_service:
+            raise _auth_error(
+                401,
+                "AUTH_INTERNAL_SERVICE_FORBIDDEN",
+                "Internal service authentication is not allowed on this endpoint",
+            )
+        return _authenticate_internal_service(request, rate_profile=rate_profile)
 
     if methods == ["api_key"]:
         api_key_raw = (request.headers.get("X-API-Key") or "").strip()
@@ -438,6 +483,7 @@ def require_access(
     roles: Optional[Iterable[str]] = None,
     scopes: Optional[Iterable[str]] = None,
     allow_signature: bool = False,
+    allow_internal_service: bool = False,
     rate_profile: str = "default",
 ):
     async def _dependency(request: Request) -> AuthContext:
@@ -452,6 +498,7 @@ def require_access(
         auth = await authenticate_request(
             request,
             allow_signature=allow_signature,
+            allow_internal_service=allow_internal_service,
             rate_profile=rate_profile,
         )
         _authorize(auth, roles=roles or [], scopes=scopes or [])

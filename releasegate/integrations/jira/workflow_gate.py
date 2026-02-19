@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable, TypeVar
+import requests
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient, JiraDependencyTimeout
 from releasegate.integrations.jira.config import (
@@ -72,8 +73,11 @@ class WorkflowGate:
         self.role_map_path = "releasegate/integrations/jira/jira_role_map.yaml"
         self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
         self.dependency_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_DEP_TIMEOUT_SECONDS", "5"))
+        self.ci_score_timeout_seconds = float(os.getenv("RELEASEGATE_CI_SCORE_TIMEOUT_SECONDS", "5"))
         self.storage_timeout_seconds = float(os.getenv("RELEASEGATE_STORAGE_TIMEOUT_SECONDS", "3"))
         self.policy_timeout_seconds = float(os.getenv("RELEASEGATE_POLICY_REGISTRY_TIMEOUT_SECONDS", "3"))
+        self.internal_service_key = (os.getenv("RELEASEGATE_INTERNAL_SERVICE_KEY") or "").strip()
+        self.ci_score_url = self._resolve_ci_score_url()
         self.transition_map_cache_ttl_seconds = _env_float("RELEASEGATE_TRANSITION_MAP_CACHE_TTL_SECONDS", 300.0)
         self.role_map_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_MAP_CACHE_TTL_SECONDS", 300.0)
         self.role_resolution_cache_ttl_seconds = _env_float("RELEASEGATE_ROLE_RESOLUTION_CACHE_TTL_SECONDS", 180.0)
@@ -455,6 +459,23 @@ class WorkflowGate:
                 strict_mode=strict_mode,
                 error_code="RISK_METADATA_FETCH_ERROR",
             )
+
+        if self._is_missing_risk_metadata(risk_meta):
+            ci_risk_meta = self._fetch_risk_metadata_from_ci(repo=repo, pr_number=pr_number)
+            if ci_risk_meta:
+                risk_meta = ci_risk_meta
+                try:
+                    self._call_with_timeout(
+                        "jira_api",
+                        self.client.set_issue_property,
+                        self.dependency_timeout_seconds,
+                        request.issue_key,
+                        "releasegate_risk",
+                        ci_risk_meta,
+                    )
+                except Exception:
+                    # Best-effort persistence. Keep evaluation moving even if Jira write fails.
+                    pass
 
         if self._is_missing_risk_metadata(risk_meta):
             missing_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
@@ -1537,6 +1558,105 @@ class WorkflowGate:
         except Exception:
             pr = None
         return repo, pr
+
+    def _resolve_ci_score_url(self) -> str:
+        explicit = (os.getenv("RELEASEGATE_CI_SCORE_URL") or "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+
+        base = (
+            (os.getenv("RELEASEGATE_GATE_URL") or "").strip()
+            or (os.getenv("RELEASEGATE_BASE_URL") or "").strip()
+            or (os.getenv("RELEASEGATE_PUBLIC_BASE_URL") or "").strip()
+        )
+        if base:
+            return f"{base.rstrip('/')}/ci/score"
+
+        port = (os.getenv("PORT") or "").strip()
+        if port:
+            return f"http://127.0.0.1:{port}/ci/score"
+        return ""
+
+    def _fetch_risk_metadata_from_ci(self, *, repo: str, pr_number: Optional[int]) -> Dict[str, Any]:
+        if not self.ci_score_url or not self.internal_service_key:
+            return {}
+        if not repo or repo == "unknown" or pr_number is None:
+            return {}
+
+        payload = {"repo": repo, "pr": int(pr_number)}
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Service-Key": self.internal_service_key,
+        }
+        tenant_id = self._active_tenant_id or "default"
+        try:
+            response = requests.post(
+                self.ci_score_url,
+                json=payload,
+                headers=headers,
+                timeout=max(self.ci_score_timeout_seconds, 0.1),
+            )
+        except requests.RequestException as exc:
+            self._log_event(
+                "warning",
+                event="jira.transition.risk_fallback.request_failed",
+                tenant_id=tenant_id,
+                decision_id="pending",
+                request_id="ci-score",
+                issue_key="unknown",
+                transition_id="unknown",
+                repo=repo,
+                pr_number=pr_number,
+                mode="unknown",
+                result="PENDING",
+                reason_code="CI_SCORE_REQUEST_FAILED",
+                policy_bundle_hash=self._current_policy_hash(),
+                error=str(exc),
+            )
+            return {}
+
+        if response.status_code != 200:
+            self._log_event(
+                "warning",
+                event="jira.transition.risk_fallback.http_error",
+                tenant_id=tenant_id,
+                decision_id="pending",
+                request_id="ci-score",
+                issue_key="unknown",
+                transition_id="unknown",
+                repo=repo,
+                pr_number=pr_number,
+                mode="unknown",
+                result="PENDING",
+                reason_code="CI_SCORE_HTTP_ERROR",
+                policy_bundle_hash=self._current_policy_hash(),
+                status_code=response.status_code,
+            )
+            return {}
+
+        try:
+            data = response.json() or {}
+        except ValueError:
+            return {}
+
+        level_raw = data.get("level") or data.get("risk_level") or data.get("releasegate_risk")
+        level = str(level_raw or "").strip().upper()
+        if not level:
+            return {}
+        score = data.get("score", data.get("risk_score"))
+        risk_meta: Dict[str, Any] = {
+            "releasegate_risk": level,
+            "risk_level": level,
+            "source": "ci_score",
+            "repo": repo,
+            "pr_number": int(pr_number),
+        }
+        if score is not None:
+            try:
+                risk_meta["risk_score"] = float(score)
+            except Exception:
+                pass
+        return risk_meta
 
     def _build_decision(
         self,

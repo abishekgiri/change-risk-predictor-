@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
+from unittest.mock import patch
 
 import jwt
 from fastapi.testclient import TestClient
@@ -47,6 +48,23 @@ def test_health_endpoint_is_public():
 def test_ops_health_endpoint_is_public():
     resp = client.get("/health")
     assert resp.status_code == 200
+
+
+def test_ci_score_allows_internal_service_key(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "phase3-internal-service")
+    with patch(
+        "releasegate.server.get_pr_details",
+        return_value={"changed_files": 3, "additions": 14, "deletions": 4},
+    ):
+        resp = client.post(
+            "/ci/score",
+            json={"repo": "org/repo", "pr": 27},
+            headers={"X-Internal-Service-Key": "phase3-internal-service"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["level"] in {"LOW", "MEDIUM", "HIGH"}
+    assert isinstance(body["score"], int)
 
 
 def test_audit_export_requires_auth():
