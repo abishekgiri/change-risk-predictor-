@@ -205,11 +205,14 @@ def evaluate_deploy_gate(
     env: str,
     commit_sha: Optional[str],
     artifact_digest: Optional[str],
+    policy_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_repo = str(repo or "").strip()
     normalized_env = str(env or "").strip().lower()
     normalized_issue = str(issue_key or "").strip() or None
+    overrides = policy_overrides or {}
+    allow_derive_correlation_id = bool(overrides.get("allow_derive_correlation_id", False))
 
     if not normalized_repo:
         return _deny(
@@ -236,6 +239,19 @@ def evaluate_deploy_gate(
             pr_number=None,
             commit_sha=commit_sha,
             env=None,
+        ).to_dict()
+    if not str(correlation_id or "").strip() and not allow_derive_correlation_id:
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code="CORRELATION_ID_MISSING",
+            reason="Deployment correlation_id is required by policy.",
+            decision_id=decision_id,
+            issue_key=normalized_issue,
+            correlation_id=None,
+            repo=normalized_repo,
+            pr_number=None,
+            commit_sha=commit_sha,
+            env=normalized_env,
         ).to_dict()
 
     decision_row: Optional[Dict[str, Any]] = None
@@ -435,14 +451,30 @@ def evaluate_incident_close_gate(
     deploy_id: Optional[str],
     repo: Optional[str],
     env: Optional[str],
+    policy_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_incident = str(incident_id or "").strip()
+    overrides = policy_overrides or {}
+    requires_deploy_link = bool(overrides.get("incident_close_requires_deploy_link", True))
     if not normalized_incident:
         return _deny(
             tenant_id=effective_tenant,
             reason_code="INCIDENT_ID_REQUIRED",
             reason="incident_id is required.",
+            decision_id=decision_id,
+            issue_key=issue_key,
+            correlation_id=correlation_id,
+            repo=repo,
+            pr_number=None,
+            commit_sha=None,
+            env=env,
+        ).to_dict()
+    if requires_deploy_link and not str(deploy_id or "").strip() and not str(correlation_id or "").strip():
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code="DEPLOY_LINK_REQUIRED",
+            reason="Incident close requires deploy linkage (deploy_id or correlation_id).",
             decision_id=decision_id,
             issue_key=issue_key,
             correlation_id=correlation_id,
@@ -525,6 +557,42 @@ def evaluate_incident_close_gate(
         )
         return denied.to_dict()
 
+    if requires_deploy_link:
+        from releasegate.evidence.graph import get_decision_evidence_graph
+
+        graph = get_decision_evidence_graph(
+            tenant_id=effective_tenant,
+            decision_id=str(decision_row.get("decision_id") or ""),
+            max_depth=2,
+        ) or {"nodes": []}
+        deploy_nodes = [
+            node
+            for node in (graph.get("nodes") or [])
+            if str(node.get("type") or "") == "DEPLOYMENT"
+        ]
+        target_ref = str(deploy_id or correlation_id or "").strip()
+        deploy_match = None
+        for node in deploy_nodes:
+            ref = str(node.get("ref") or "").strip()
+            payload = node.get("payload") or {}
+            node_corr = str((payload or {}).get("correlation_id") or "").strip()
+            if target_ref and (ref == target_ref or node_corr == target_ref):
+                deploy_match = node
+                break
+        if deploy_match is None:
+            return _deny(
+                tenant_id=effective_tenant,
+                reason_code="DEPLOY_NOT_FOUND_FOR_CORRELATION",
+                reason="No deployment history found for incident correlation.",
+                decision_id=str(decision_row.get("decision_id") or ""),
+                issue_key=bound_issue,
+                correlation_id=correlation_id or computed_correlation,
+                repo=bound_repo or repo,
+                pr_number=decision_row.get("pr_number"),
+                commit_sha=bound_commit or None,
+                env=bound_env,
+            ).to_dict()
+
     allowed = _allow(
         tenant_id=effective_tenant,
         reason="Incident closure correlation checks passed.",
@@ -546,4 +614,3 @@ def evaluate_incident_close_gate(
         allowed=True,
     )
     return allowed.to_dict()
-

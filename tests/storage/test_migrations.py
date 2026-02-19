@@ -36,6 +36,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260219_017_policy_snapshot_rollout" in migration_ids
         assert "20260219_018_lock_chain_governance" in migration_ids
         assert "20260220_019_replay_and_evidence_graph" in migration_ids
+        assert "20260220_020_replay_status_column" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -210,6 +211,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "replay_id",
             "decision_id",
             "match",
+            "status",
             "diff_json",
             "old_output_hash",
             "new_output_hash",
@@ -234,8 +236,8 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260220_019_replay_and_evidence_graph"
-        assert state[1] == "20260220_019_replay_and_evidence_graph"
+        assert state[0] == "20260220_020_replay_status_column"
+        assert state[1] == "20260220_020_replay_status_column"
     finally:
         conn.close()
 

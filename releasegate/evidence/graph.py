@@ -23,6 +23,7 @@ NODE_REPLAY = "REPLAY"
 NODE_DEPLOYMENT = "DEPLOYMENT"
 NODE_INCIDENT = "INCIDENT"
 NODE_ARTIFACT = "ARTIFACT"
+NODE_OVERRIDE = "OVERRIDE"
 
 EDGE_USED_POLICY = "USED_POLICY"
 EDGE_USED_SIGNAL = "USED_SIGNAL"
@@ -31,6 +32,8 @@ EDGE_PRODUCED_ARTIFACT = "PRODUCED_ARTIFACT"
 EDGE_REPLAYED = "REPLAYED"
 EDGE_AUTHORIZED_BY = "AUTHORIZED_BY"
 EDGE_DERIVED_FROM = "DERIVED_FROM"
+EDGE_OVERRIDDEN_BY = "OVERRIDDEN_BY"
+EDGE_RESOLVED_BY = "RESOLVED_BY"
 
 
 def _utc_now() -> str:
@@ -338,6 +341,28 @@ def record_decision_evidence(
         )
         linked_nodes["attestation"] = attestation_node
 
+    override_used = bool((context or {}).get("override_used"))
+    if override_used:
+        override_ref = str((context or {}).get("override_event_id") or f"override:{decision_id}")
+        override_hash = str((context or {}).get("override_hash") or "") or None
+        override_node = upsert_node(
+            tenant_id=effective_tenant,
+            node_type=NODE_OVERRIDE,
+            ref=override_ref,
+            node_hash=override_hash,
+            payload={
+                "reason": (context or {}).get("override_reason"),
+                "expires_at": (context or {}).get("override_expires_at"),
+            },
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=decision_node["node_id"],
+            to_node_id=override_node["node_id"],
+            edge_type=EDGE_OVERRIDDEN_BY,
+        )
+        linked_nodes["override"] = override_node
+
     return linked_nodes
 
 
@@ -487,7 +512,7 @@ def record_incident_evidence(
             tenant_id=effective_tenant,
             from_node_id=incident_node["node_id"],
             to_node_id=deployment_node["node_id"],
-            edge_type=EDGE_RELATED_TO,
+            edge_type=EDGE_RESOLVED_BY,
         )
     if issue_key:
         jira_node = upsert_node(
@@ -503,6 +528,114 @@ def record_incident_evidence(
             edge_type=EDGE_RELATED_TO,
         )
     return {"incident": incident_node, "decision": decision_node}
+
+
+def record_proof_pack_evidence(
+    *,
+    tenant_id: Optional[str],
+    decision_id: str,
+    proof_pack_id: str,
+    output_format: str,
+    export_checksum: Optional[str],
+    bundle_version: Optional[str] = None,
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    decision_node = upsert_node(
+        tenant_id=effective_tenant,
+        node_type=NODE_DECISION,
+        ref=str(decision_id),
+        payload={"decision_id": decision_id},
+    )
+    artifact_node = upsert_node(
+        tenant_id=effective_tenant,
+        node_type=NODE_ARTIFACT,
+        ref=f"proof_pack:{proof_pack_id}",
+        node_hash=str(export_checksum or "") or None,
+        payload={
+            "artifact_type": "PROOF_PACK",
+            "proof_pack_id": proof_pack_id,
+            "output_format": output_format,
+            "bundle_version": bundle_version,
+        },
+    )
+    append_edge(
+        tenant_id=effective_tenant,
+        from_node_id=decision_node["node_id"],
+        to_node_id=artifact_node["node_id"],
+        edge_type=EDGE_PRODUCED_ARTIFACT,
+        metadata={"proof_pack_id": proof_pack_id},
+    )
+    return {"decision": decision_node, "artifact": artifact_node}
+
+
+def record_override_evidence(
+    *,
+    tenant_id: Optional[str],
+    decision_id: Optional[str],
+    override_id: str,
+    override_hash: Optional[str],
+    issue_key: Optional[str],
+    repo: Optional[str],
+    pr_number: Optional[int],
+    reason: Optional[str],
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    override_node = upsert_node(
+        tenant_id=effective_tenant,
+        node_type=NODE_OVERRIDE,
+        ref=str(override_id),
+        node_hash=str(override_hash or "") or None,
+        payload={
+            "issue_key": issue_key,
+            "repo": repo,
+            "pr_number": pr_number,
+            "reason": reason,
+        },
+    )
+    result: Dict[str, Any] = {"override": override_node}
+    if decision_id:
+        decision_node = upsert_node(
+            tenant_id=effective_tenant,
+            node_type=NODE_DECISION,
+            ref=str(decision_id),
+            payload={"decision_id": decision_id},
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=decision_node["node_id"],
+            to_node_id=override_node["node_id"],
+            edge_type=EDGE_OVERRIDDEN_BY,
+        )
+        result["decision"] = decision_node
+    if issue_key:
+        issue_node = upsert_node(
+            tenant_id=effective_tenant,
+            node_type=NODE_JIRA_ISSUE,
+            ref=str(issue_key),
+            payload={"issue_key": issue_key},
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=override_node["node_id"],
+            to_node_id=issue_node["node_id"],
+            edge_type=EDGE_RELATED_TO,
+        )
+        result["jira_issue"] = issue_node
+    if repo and pr_number:
+        pr_node = upsert_node(
+            tenant_id=effective_tenant,
+            node_type=NODE_PULL_REQUEST,
+            ref=f"{repo}#{pr_number}",
+            payload={"repo": repo, "pr_number": pr_number},
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=override_node["node_id"],
+            to_node_id=pr_node["node_id"],
+            edge_type=EDGE_RELATED_TO,
+        )
+        result["pull_request"] = pr_node
+    return result
 
 
 def _fetch_edges_for_nodes(*, tenant_id: str, node_ids: Sequence[str]) -> List[Dict[str, Any]]:
@@ -615,6 +748,8 @@ def explain_decision(
     pr_nodes = [n for n in nodes if n.get("type") == NODE_PULL_REQUEST]
     deployment_nodes = [n for n in nodes if n.get("type") == NODE_DEPLOYMENT]
     incident_nodes = [n for n in nodes if n.get("type") == NODE_INCIDENT]
+    artifact_nodes = [n for n in nodes if n.get("type") == NODE_ARTIFACT]
+    override_nodes = [n for n in nodes if n.get("type") == NODE_OVERRIDE]
 
     status = decision_row.get("release_status") or "UNKNOWN"
     reason_code = ""
@@ -644,6 +779,10 @@ def explain_decision(
         summary_parts.append(
             f"Latest replay {latest_replay.get('replay_id')} match={str(bool(latest_replay.get('match'))).lower()}."
         )
+    if artifact_nodes:
+        summary_parts.append(f"Artifacts linked: {len(artifact_nodes)}.")
+    if override_nodes:
+        summary_parts.append(f"Overrides linked: {len(override_nodes)}.")
 
     return {
         "tenant_id": effective_tenant,
@@ -663,8 +802,9 @@ def explain_decision(
             "pull_requests": pr_nodes,
             "deployments": deployment_nodes,
             "incidents": incident_nodes,
+            "artifacts": artifact_nodes,
+            "overrides": override_nodes,
             "replays": replay_events,
         },
         "graph": graph,
     }
-

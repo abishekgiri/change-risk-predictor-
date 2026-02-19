@@ -128,6 +128,70 @@ def test_deploy_gate_allows_when_decision_and_correlation_match(monkeypatch):
     assert body["decision_id"] == decision.decision_id
 
 
+def test_deploy_gate_blocks_when_correlation_id_missing_by_default(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-504"
+    commit_sha = "4444444444444444444444444444444444444444"
+    decision = _seed_allowed_decision(repo, 31, issue_key, commit_sha)
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "deploy_id": "deploy-no-corr",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "CORRELATION_ID_MISSING"
+
+
+def test_deploy_gate_can_derive_correlation_when_policy_override_enabled(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-505"
+    commit_sha = "5555555555555555555555555555555555555555"
+    decision = _seed_allowed_decision(repo, 32, issue_key, commit_sha)
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "deploy_id": "deploy-derive-corr",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+            "policy_overrides": {"allow_derive_correlation_id": True},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is True
+    assert body["status"] == "ALLOWED"
+    assert body["reason_code"] == "CORRELATION_ALLOWED"
+    assert body["correlation_id"]
+
+
 def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
     repo = f"corr-{uuid.uuid4().hex[:8]}"
     issue_key = "RG-502"
@@ -148,6 +212,7 @@ def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
             "repo": repo,
             "env": "prod",
             "commit_sha": "2222222222222222222222222222222222222222",
+            "policy_overrides": {"allow_derive_correlation_id": True},
         },
         headers=jwt_headers(scopes=["enforcement:write"]),
     )
@@ -156,6 +221,93 @@ def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
     assert body["allow"] is False
     assert body["status"] == "BLOCKED"
     assert body["reason_code"] == "DEPLOY_COMMIT_MISMATCH"
+
+
+def test_incident_close_gate_blocks_when_deploy_history_missing():
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-506"
+    commit_sha = "6666666666666666666666666666666666666666"
+    decision = _seed_allowed_decision(repo, 33, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    resp = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-NO-DEPLOY",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "repo": repo,
+            "env": "prod",
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "DEPLOY_NOT_FOUND_FOR_CORRELATION"
+
+
+def test_incident_close_gate_allows_with_valid_deploy_history(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-507"
+    commit_sha = "7777777777777777777777777777777777777777"
+    decision = _seed_allowed_decision(repo, 34, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    deploy_resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-linked",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert deploy_resp.status_code == 200
+    assert deploy_resp.json()["allow"] is True
+
+    incident_resp = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-LINKED",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-linked",
+            "repo": repo,
+            "env": "prod",
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert incident_resp.status_code == 200
+    body = incident_resp.json()
+    assert body["allow"] is True
+    assert body["status"] == "ALLOWED"
+    assert body["reason_code"] == "CORRELATION_ALLOWED"
 
 
 def test_incident_close_gate_blocks_on_correlation_mismatch():
@@ -181,4 +333,3 @@ def test_incident_close_gate_blocks_on_correlation_mismatch():
     body = resp.json()
     assert body["allow"] is False
     assert body["reason_code"] == "CORRELATION_ID_MISMATCH"
-

@@ -41,6 +41,7 @@ def record_replay_event(
     old_input_hash: Optional[str],
     new_input_hash: Optional[str],
     ran_engine_version: str,
+    status: str = "COMPLETED",
 ) -> Dict[str, Any]:
     init_db()
     storage = get_storage_backend()
@@ -50,15 +51,16 @@ def record_replay_event(
     storage.execute(
         """
         INSERT INTO audit_decision_replays (
-            tenant_id, replay_id, decision_id, match, diff_json, old_output_hash, new_output_hash,
+            tenant_id, replay_id, decision_id, match, status, diff_json, old_output_hash, new_output_hash,
             old_policy_hash, new_policy_hash, old_input_hash, new_input_hash, ran_engine_version, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             effective_tenant,
             replay_id,
             str(decision_id),
             1 if match else 0,
+            str(status or "COMPLETED"),
             canonical_json(diff or []),
             str(old_output_hash or "") or None,
             str(new_output_hash or "") or None,
@@ -75,6 +77,7 @@ def record_replay_event(
         "replay_id": replay_id,
         "decision_id": str(decision_id),
         "match": bool(match),
+        "status": str(status or "COMPLETED"),
         "diff": diff or [],
         "old_output_hash": old_output_hash,
         "new_output_hash": new_output_hash,
@@ -99,7 +102,7 @@ def list_replay_events(
     rows = storage.fetchall(
         """
         SELECT tenant_id, replay_id, decision_id, match, diff_json, old_output_hash, new_output_hash,
-               old_policy_hash, new_policy_hash, old_input_hash, new_input_hash, ran_engine_version, created_at
+               old_policy_hash, new_policy_hash, old_input_hash, new_input_hash, ran_engine_version, status, created_at
         FROM audit_decision_replays
         WHERE tenant_id = ? AND decision_id = ?
         ORDER BY created_at DESC
@@ -115,6 +118,7 @@ def list_replay_events(
                 "replay_id": row.get("replay_id"),
                 "decision_id": row.get("decision_id"),
                 "match": bool(int(row.get("match") or 0)),
+                "status": row.get("status") or "COMPLETED",
                 "diff": _loads(row.get("diff_json"), []),
                 "old_output_hash": row.get("old_output_hash"),
                 "new_output_hash": row.get("new_output_hash"),
@@ -127,4 +131,3 @@ def list_replay_events(
             }
         )
     return items
-

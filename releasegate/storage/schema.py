@@ -900,6 +900,7 @@ def _init_postgres_schema() -> str:
             replay_id TEXT NOT NULL,
             decision_id TEXT NOT NULL,
             match BOOLEAN NOT NULL,
+            status TEXT NOT NULL DEFAULT 'COMPLETED',
             diff_json JSONB NOT NULL,
             old_output_hash TEXT,
             new_output_hash TEXT,
@@ -917,6 +918,13 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_decision_created
         ON audit_decision_replays(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cur.execute("ALTER TABLE audit_decision_replays ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'COMPLETED'")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_status_created
+        ON audit_decision_replays(tenant_id, status, created_at DESC)
         """
     )
     cur.execute(

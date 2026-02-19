@@ -1332,6 +1332,7 @@ def _migration_20260220_019_replay_and_evidence_graph(cursor) -> None:
             replay_id TEXT NOT NULL,
             decision_id TEXT NOT NULL,
             match INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'COMPLETED',
             diff_json TEXT NOT NULL,
             old_output_hash TEXT,
             new_output_hash TEXT,
@@ -1351,6 +1352,13 @@ def _migration_20260220_019_replay_and_evidence_graph(cursor) -> None:
         ON audit_decision_replays(tenant_id, decision_id, created_at)
         """
     )
+    if not _column_exists(cursor, "audit_decision_replays", "status"):
+        cursor.execute(
+            """
+            ALTER TABLE audit_decision_replays
+            ADD COLUMN status TEXT NOT NULL DEFAULT 'COMPLETED'
+            """
+        )
     cursor.execute(
         """
         CREATE TRIGGER IF NOT EXISTS prevent_audit_decision_replays_update
@@ -1467,6 +1475,29 @@ def _migration_20260220_019_replay_and_evidence_graph(cursor) -> None:
     )
 
 
+def _migration_20260220_020_replay_status_column(cursor) -> None:
+    if not _column_exists(cursor, "audit_decision_replays", "status"):
+        cursor.execute(
+            """
+            ALTER TABLE audit_decision_replays
+            ADD COLUMN status TEXT NOT NULL DEFAULT 'COMPLETED'
+            """
+        )
+    cursor.execute(
+        """
+        UPDATE audit_decision_replays
+        SET status = 'COMPLETED'
+        WHERE status IS NULL OR TRIM(status) = ''
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_status_created
+        ON audit_decision_replays(tenant_id, status, created_at)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1562,6 +1593,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260220_019_replay_and_evidence_graph",
         description="Add immutable decision replay events and evidence graph node/edge tables.",
         apply=_migration_20260220_019_replay_and_evidence_graph,
+    ),
+    Migration(
+        migration_id="20260220_020_replay_status_column",
+        description="Add replay status classification for invalid stored state and replay outcomes.",
+        apply=_migration_20260220_020_replay_status_column,
     ),
 ]
 

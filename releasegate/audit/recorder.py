@@ -289,6 +289,19 @@ class AuditRecorder:
                     pr_number=pr_number,
                 )
                 from releasegate.evidence.graph import record_decision_evidence
+                override_context: Dict[str, Any] = {}
+                if isinstance(decision.input_snapshot, dict):
+                    request_payload = decision.input_snapshot.get("request")
+                    if isinstance(request_payload, dict):
+                        context_overrides = request_payload.get("context_overrides")
+                        if isinstance(context_overrides, dict):
+                            override_context = {
+                                "override_used": bool(context_overrides.get("override")),
+                                "override_event_id": context_overrides.get("override_event_id"),
+                                "override_hash": context_overrides.get("override_hash"),
+                                "override_reason": context_overrides.get("override_reason"),
+                                "override_expires_at": context_overrides.get("override_expires_at"),
+                            }
 
                 record_decision_evidence(
                     tenant_id=effective_tenant,
@@ -307,6 +320,7 @@ class AuditRecorder:
                         "context_id": decision.context_id,
                         "evaluation_key": decision.evaluation_key,
                         "transition_id": resolved_snapshot.get("transition_id"),
+                        **override_context,
                     },
                 )
                 AuditRecorder._persist_decision_refs(

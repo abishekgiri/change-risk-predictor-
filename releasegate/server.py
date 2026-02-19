@@ -22,7 +22,7 @@ import csv
 import io
 import zipfile
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from releasegate.security.auth import require_access, tenant_from_request
 from releasegate.security.audit import log_security_event
@@ -172,6 +172,7 @@ class DeployGateCheckRequest(BaseModel):
     env: str
     commit_sha: Optional[str] = None
     artifact_digest: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
 class IncidentCloseCheckRequest(BaseModel):
@@ -183,6 +184,7 @@ class IncidentCloseCheckRequest(BaseModel):
     deploy_id: Optional[str] = None
     repo: Optional[str] = None
     env: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -1627,6 +1629,16 @@ def audit_proof_pack(
         "checkpoint_proof": checkpoint_proof,
     }
     export_checksum = sha256_json(bundle)
+    from releasegate.evidence.graph import record_proof_pack_evidence
+
+    record_proof_pack_evidence(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        proof_pack_id=proof_pack_id,
+        output_format="json" if format.lower() == "json" else "zip",
+        export_checksum=export_checksum,
+        bundle_version="audit_proof_v1",
+    )
 
     if format.lower() == "json":
         log_security_event(
@@ -1802,6 +1814,18 @@ def create_manual_override(
         tenant_id=effective_tenant,
         target_type=effective_target_type,
         target_id=effective_target_id,
+    )
+    from releasegate.evidence.graph import record_override_evidence
+
+    record_override_evidence(
+        tenant_id=effective_tenant,
+        decision_id=payload.decision_id,
+        override_id=str(override.get("override_id") or ""),
+        override_hash=str(override.get("event_hash") or ""),
+        issue_key=payload.issue_key,
+        repo=payload.repo,
+        pr_number=payload.pr_number,
+        reason=validation.justification or payload.reason,
     )
     log_security_event(
         tenant_id=effective_tenant,
@@ -2302,26 +2326,171 @@ def replay_stored_decision(
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
 
+    def _build_deterministic_block(report_payload: Dict[str, Any]) -> Dict[str, Any]:
+        old = report_payload.get("old") or {}
+        new = report_payload.get("new") or {}
+        return {
+            "match": bool(report_payload.get("match")),
+            "old_output": {
+                "status": old.get("status"),
+                "reason_code": old.get("reason_code"),
+            },
+            "new_output": {
+                "status": new.get("status"),
+                "reason_code": new.get("reason_code"),
+            },
+            "diff": report_payload.get("diff") or [],
+            "old_hash": {
+                "output_hash": old.get("output_hash"),
+                "decision_hash": old.get("decision_hash"),
+                "replay_hash": old.get("replay_hash"),
+            },
+            "new_hash": {
+                "output_hash": new.get("output_hash"),
+                "decision_hash": new.get("decision_hash"),
+                "replay_hash": new.get("replay_hash"),
+            },
+            "policy_hash": {
+                "old": old.get("policy_hash"),
+                "new": new.get("policy_hash"),
+                "match": bool(report_payload.get("policy_hash_match")),
+            },
+            "inputs_hash": {
+                "old": old.get("input_hash"),
+                "new": new.get("input_hash"),
+                "match": bool(report_payload.get("input_hash_match")),
+            },
+        }
+
+    def _record_replay_evidence_safe(
+        replay_event: Dict[str, Any],
+        diff: List[Dict[str, Any]],
+        replay_hash: Optional[str],
+    ) -> None:
+        try:
+            from releasegate.evidence.graph import record_replay_evidence
+
+            record_replay_evidence(
+                tenant_id=effective_tenant,
+                decision_id=decision_id,
+                replay_id=str(replay_event.get("replay_id") or ""),
+                match=bool(replay_event.get("match")),
+                diff=diff,
+                replay_hash=str(replay_hash or ""),
+            )
+        except Exception:
+            # Evidence graph is best effort.
+            pass
+
+    def _invalid_stored_state(reason: str, details: str) -> Dict[str, Any]:
+        diff_item = {
+            "error": "STORED_DECISION_INVALID",
+            "reason": str(reason),
+            "details": str(details),
+        }
+        report = {
+            "decision_id": decision_id,
+            "tenant_id": effective_tenant,
+            "match": False,
+            "matches_original": False,
+            "mismatch_reason": "STORED_DECISION_INVALID",
+            "diff": [diff_item],
+            "old": {
+                "policy_hash": row.get("policy_hash"),
+                "engine_version": str(row.get("engine_version") or ""),
+                "output_hash": None,
+                "status": row.get("release_status"),
+                "reason_code": row.get("reason_code"),
+                "input_hash": row.get("input_hash"),
+                "decision_hash": row.get("decision_hash"),
+                "replay_hash": row.get("replay_hash"),
+            },
+            "new": {
+                "policy_hash": None,
+                "engine_version": str(row.get("engine_version") or ""),
+                "output_hash": None,
+                "status": None,
+                "reason_code": None,
+                "input_hash": None,
+                "decision_hash": None,
+                "replay_hash": None,
+            },
+            "policy_hash_match": False,
+            "input_hash_match": False,
+            "created_at": row.get("created_at"),
+            "repo": row.get("repo"),
+            "pr_number": row.get("pr_number"),
+            "attestation_id": None,
+        }
+        replay_event = record_replay_event(
+            tenant_id=effective_tenant,
+            decision_id=decision_id,
+            match=False,
+            diff=[diff_item],
+            old_output_hash=None,
+            new_output_hash=None,
+            old_policy_hash=row.get("policy_hash"),
+            new_policy_hash=None,
+            old_input_hash=row.get("input_hash"),
+            new_input_hash=None,
+            ran_engine_version=str(row.get("engine_version") or ""),
+            status="INVALID_STORED_STATE",
+        )
+        _record_replay_evidence_safe(
+            replay_event=replay_event,
+            diff=[diff_item],
+            replay_hash=None,
+        )
+        report["replay_id"] = replay_event.get("replay_id")
+        report["deterministic"] = _build_deterministic_block(report)
+        report["deterministic"]["diff"] = {
+            "error": "STORED_DECISION_INVALID",
+            "details": str(details),
+        }
+        report["meta"] = {
+            "replay_id": replay_event.get("replay_id"),
+            "replayed_at": replay_event.get("created_at"),
+            "actor": auth.principal_id,
+            "status": replay_event.get("status"),
+        }
+        log_security_event(
+            tenant_id=effective_tenant,
+            principal_id=auth.principal_id,
+            auth_method=auth.auth_method,
+            action="decision_replay",
+            target_type="decision",
+            target_id=decision_id,
+            metadata={
+                "repo": report.get("repo"),
+                "pr_number": report.get("pr_number"),
+                "replay_id": replay_event.get("replay_id"),
+                "match": False,
+                "status": "INVALID_STORED_STATE",
+                "reason": str(reason),
+            },
+        )
+        return report
+
     raw = row.get("full_decision_json")
     if not raw:
-        raise HTTPException(status_code=422, detail="Decision payload missing full_decision_json")
+        return _invalid_stored_state("MISSING_FULL_DECISION_JSON", "Decision payload missing full_decision_json")
 
     try:
         payload = json.loads(raw) if isinstance(raw, str) else raw
         decision = Decision.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Stored decision payload is invalid: {exc}") from exc
+        return _invalid_stored_state("INVALID_DECISION_PAYLOAD", str(exc))
 
     snapshot_binding = AuditReader.get_decision_with_policy_snapshot(
         decision_id=decision_id,
         tenant_id=effective_tenant,
     )
     if not snapshot_binding:
-        raise HTTPException(status_code=422, detail="Decision policy snapshot binding not found")
+        return _invalid_stored_state("MISSING_POLICY_SNAPSHOT_BINDING", "Decision policy snapshot binding not found")
     snapshot_wrapper = snapshot_binding.get("snapshot") if isinstance(snapshot_binding, dict) else {}
     policy_snapshot = snapshot_wrapper.get("snapshot") if isinstance(snapshot_wrapper, dict) else None
     if not isinstance(policy_snapshot, dict):
-        raise HTTPException(status_code=422, detail="Stored policy snapshot payload is invalid")
+        return _invalid_stored_state("INVALID_POLICY_SNAPSHOT", "Stored policy snapshot payload is invalid")
 
     try:
         report = replay_decision(
@@ -2330,7 +2499,7 @@ def replay_stored_decision(
             stored_engine_version=str(row.get("engine_version") or ""),
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _invalid_stored_state("INVALID_REPLAY_STATE", str(exc))
 
     replay_event = record_replay_event(
         tenant_id=effective_tenant,
@@ -2344,27 +2513,26 @@ def replay_stored_decision(
         old_input_hash=(report.get("old") or {}).get("input_hash"),
         new_input_hash=(report.get("new") or {}).get("input_hash"),
         ran_engine_version=str(report.get("engine_version_replay") or report.get("engine_version_original") or ""),
+        status="COMPLETED",
     )
-    try:
-        from releasegate.evidence.graph import record_replay_evidence
-
-        record_replay_evidence(
-            tenant_id=effective_tenant,
-            decision_id=decision_id,
-            replay_id=str(replay_event.get("replay_id") or ""),
-            match=bool(replay_event.get("match")),
-            diff=report.get("diff") or [],
-            replay_hash=str((report.get("new") or {}).get("replay_hash") or report.get("replay_hash_replay") or ""),
-        )
-    except Exception:
-        # Evidence graph is best effort.
-        pass
+    _record_replay_evidence_safe(
+        replay_event=replay_event,
+        diff=report.get("diff") or [],
+        replay_hash=str((report.get("new") or {}).get("replay_hash") or report.get("replay_hash_replay") or ""),
+    )
 
     report["created_at"] = row.get("created_at")
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
     report["attestation_id"] = decision.attestation_id
     report["replay_id"] = replay_event.get("replay_id")
+    report["deterministic"] = _build_deterministic_block(report)
+    report["meta"] = {
+        "replay_id": replay_event.get("replay_id"),
+        "replayed_at": replay_event.get("created_at"),
+        "actor": auth.principal_id,
+        "status": replay_event.get("status"),
+    }
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -2377,6 +2545,7 @@ def replay_stored_decision(
             "pr_number": report.get("pr_number"),
             "replay_id": replay_event.get("replay_id"),
             "match": bool(report.get("match")),
+            "status": replay_event.get("status"),
         },
     )
     return report
@@ -2488,6 +2657,7 @@ def deploy_gate_check_endpoint(
         env=payload.env,
         commit_sha=payload.commit_sha,
         artifact_digest=payload.artifact_digest,
+        policy_overrides=payload.policy_overrides,
     )
     log_security_event(
         tenant_id=effective_tenant,
@@ -2529,6 +2699,7 @@ def incident_close_check_endpoint(
         deploy_id=payload.deploy_id,
         repo=payload.repo,
         env=payload.env,
+        policy_overrides=payload.policy_overrides,
     )
     log_security_event(
         tenant_id=effective_tenant,

@@ -100,6 +100,31 @@ def test_evidence_graph_and_explain_endpoints():
         headers=jwt_headers(scopes=["policy:read"]),
     )
     assert replay_resp.status_code == 200
+    proof_pack_resp = client.get(
+        f"/audit/proof-pack/{stored.decision_id}",
+        params={"tenant_id": "tenant-test", "format": "json"},
+        headers=jwt_headers(scopes=["proofpack:read"]),
+    )
+    assert proof_pack_resp.status_code == 200
+    override_resp = client.post(
+        "/audit/overrides",
+        params={"tenant_id": "tenant-test"},
+        headers={
+            **jwt_headers(scopes=["override:write"], roles=["admin"]),
+            "Idempotency-Key": f"override-{uuid.uuid4().hex}",
+        },
+        json={
+            "repo": repo,
+            "pr_number": pr_number,
+            "issue_key": issue_key,
+            "decision_id": stored.decision_id,
+            "reason": "Emergency override justified by approved incident mitigation plan.",
+            "ttl_seconds": 3600,
+            "target_type": "pr",
+            "target_id": f"{repo}#{pr_number}",
+        },
+    )
+    assert override_resp.status_code == 200
 
     graph_resp = client.get(
         f"/decisions/{stored.decision_id}/evidence-graph",
@@ -115,7 +140,12 @@ def test_evidence_graph_and_explain_endpoints():
     assert "PULL_REQUEST" in node_types
     assert "JIRA_ISSUE" in node_types
     assert "REPLAY" in node_types
+    assert "ARTIFACT" in node_types
+    assert "OVERRIDE" in node_types
     assert graph.get("edges")
+    edge_types = {edge.get("type") for edge in graph.get("edges", [])}
+    assert "PRODUCED_ARTIFACT" in edge_types
+    assert "OVERRIDDEN_BY" in edge_types
 
     explain_resp = client.get(
         f"/decisions/{stored.decision_id}/explain",
@@ -128,4 +158,5 @@ def test_evidence_graph_and_explain_endpoints():
     assert "Decision" in explanation.get("summary", "")
     assert explanation.get("graph", {}).get("nodes")
     assert explanation.get("evidence", {}).get("replays")
-
+    assert explanation.get("evidence", {}).get("artifacts")
+    assert explanation.get("evidence", {}).get("overrides")
