@@ -116,7 +116,8 @@ class ManualOverrideRequest(BaseModel):
     pr_number: Optional[int] = None
     issue_key: Optional[str] = None
     decision_id: Optional[str] = None
-    reason: str = Field(min_length=3)
+    reason: str
+    ttl_seconds: Optional[int] = None
     target_type: str = "pr"
     target_id: Optional[str] = None
     idempotency_key: Optional[str] = None
@@ -127,6 +128,38 @@ class PublishPolicyRequest(BaseModel):
     policy_snapshot: list[dict] = Field(default_factory=list)
     activate: bool = True
     note: Optional[str] = None
+
+
+class PolicyReleaseCreateRequest(BaseModel):
+    policy_id: str
+    target_env: str
+    snapshot_id: Optional[str] = None
+    policy_hash: Optional[str] = None
+    state: str = "DRAFT"
+    effective_at: Optional[str] = None
+    created_by: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class PolicyReleasePromoteRequest(BaseModel):
+    policy_id: str
+    source_env: str
+    target_env: str
+    state: str = "DRAFT"
+    effective_at: Optional[str] = None
+    created_by: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class PolicyReleaseRollbackRequest(BaseModel):
+    policy_id: str
+    target_env: str
+    to_release_id: str
+    actor_id: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -164,6 +197,7 @@ LEDGER_VERIFY_ON_STARTUP = os.getenv("RELEASEGATE_LEDGER_VERIFY_ON_STARTUP", "fa
 LEDGER_FAIL_ON_CORRUPTION = os.getenv("RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION", "true").strip().lower() in {"1", "true", "yes", "on"}
 CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
 HASH_ALGORITHM = "sha256"
+GITHUB_API_TIMEOUT_SECONDS = float(os.getenv("RELEASEGATE_GITHUB_API_TIMEOUT_SECONDS", "10"))
 
 
 def _effective_tenant(auth: AuthContext, requested_tenant: Optional[str]) -> str:
@@ -187,7 +221,7 @@ def get_pr_details(repo_full_name: str, pr_number: int) -> Dict:
     }
 
     try:
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1))
         if resp.status_code == 200:
             return resp.json()
         logger.warning("Failed to fetch PR details: status_code=%s", resp.status_code)
@@ -220,7 +254,12 @@ def post_pr_comment(repo_full_name: str, pr_number: int, body: str):
         "Accept": "application/vnd.github.v3+json"
     }
     try:
-        requests.post(url, json={"body": body}, headers=headers)
+        requests.post(
+            url,
+            json={"body": body},
+            headers=headers,
+            timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1),
+        )
         logger.info("Posted comment to PR #%s", pr_number)
     except Exception:
         logger.exception("Failed to post comment")
@@ -263,7 +302,12 @@ def create_check_run(repo_full_name: str, head_sha: str, score: int, risk_level:
         payload["details_url"] = WEBHOOK_URL
 
     try:
-        resp = requests.post(url, json=payload, headers=headers)
+        resp = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=max(GITHUB_API_TIMEOUT_SECONDS, 0.1),
+        )
         if resp.status_code not in [200, 201]:
             logger.warning(
                 "Failed to create check run: status_code=%s response=%s",
@@ -282,6 +326,7 @@ def ci_score(
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
         scopes=["enforcement:write"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -792,13 +837,20 @@ def verify_ledger_on_startup():
     if not LEDGER_VERIFY_ON_STARTUP:
         return
     from releasegate.audit.overrides import verify_all_override_chains
+    from releasegate.integrations.jira.lock_store import verify_all_lock_chains
 
     result = verify_all_override_chains()
     app.state.override_chain_last_verification = result
+    lock_result = verify_all_lock_chains()
+    app.state.jira_lock_chain_last_verification = lock_result
     if not result.get("valid", True):
         logger.error("Override ledger corruption detected at startup: %s", result)
         if LEDGER_FAIL_ON_CORRUPTION:
             raise RuntimeError("Override ledger corruption detected")
+    if not lock_result.get("valid", True):
+        logger.error("Jira lock ledger corruption detected at startup: %s", lock_result)
+        if LEDGER_FAIL_ON_CORRUPTION:
+            raise RuntimeError("Jira lock ledger corruption detected")
     else:
         logger.info(
             "Override ledger verified at startup: checked_chains=%s",
@@ -810,6 +862,8 @@ def verify_ledger_on_startup():
 def verify_ledger(
     repo: Optional[str] = None,
     pr: Optional[int] = None,
+    chain_id: Optional[str] = None,
+    ledger: str = "override",
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -818,8 +872,16 @@ def verify_ledger(
     ),
 ):
     from releasegate.audit.overrides import verify_all_override_chains, verify_override_chain
+    from releasegate.integrations.jira.lock_store import verify_all_lock_chains, verify_lock_chain
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    normalized = str(ledger or "override").strip().lower()
+    if normalized in {"jira", "jira_lock", "lock"}:
+        if chain_id:
+            result = verify_lock_chain(tenant_id=effective_tenant, chain_id=chain_id)
+            return {"tenant_id": effective_tenant, "chain_id": chain_id, **result}
+        return verify_all_lock_chains(tenant_id=effective_tenant)
+
     if repo:
         result = verify_override_chain(repo=repo, pr=pr, tenant_id=effective_tenant)
         return {"tenant_id": effective_tenant, "repo": repo, **result}
@@ -1255,6 +1317,92 @@ def verify_override_checkpoint(
     return result
 
 
+@app.post("/audit/checkpoints/jira-lock")
+def create_jira_lock_checkpoint(
+    chain_id: str,
+    cadence: str = "daily",
+    at: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import create_jira_lock_checkpoint as create_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = create_checkpoint(
+            chain_id=chain_id,
+            cadence=cadence,
+            at=at,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="checkpoint_create",
+        target_type="jira_lock_chain",
+        target_id=chain_id,
+        metadata={"cadence": cadence},
+    )
+    return result
+
+
+@app.get("/audit/checkpoints/jira-lock/verify")
+def verify_jira_lock_checkpoint(
+    chain_id: str,
+    period_id: str,
+    cadence: str = "daily",
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import verify_jira_lock_checkpoint as verify_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = verify_checkpoint(
+            chain_id=chain_id,
+            cadence=cadence,
+            period_id=period_id,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("exists", False):
+        raise HTTPException(status_code=404, detail=result.get("reason", "Checkpoint not found"))
+    return result
+
+
+@app.get("/governance/override-metrics")
+def governance_override_metrics(
+    tenant_id: Optional[str] = None,
+    days: int = 30,
+    top_n: int = 10,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.integrations.jira.override_metrics import get_override_metrics_summary
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return get_override_metrics_summary(
+        tenant_id=effective_tenant,
+        days=days,
+        top_n=top_n,
+    )
+
+
 @app.get("/policy/simulate")
 def simulate_policy_impact(
     repo: str,
@@ -1532,14 +1680,32 @@ def create_manual_override(
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
-        roles=["admin", "operator"],
+        roles=["admin"],
         scopes=["override:write"],
         rate_profile="default",
     ),
 ):
     from releasegate.audit.overrides import get_active_override, record_override
+    from releasegate.integrations.jira.override_validation import ACTION_OVERRIDE, validate_override_request
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    validation = validate_override_request(
+        action=ACTION_OVERRIDE,
+        ttl_seconds=payload.ttl_seconds,
+        justification=payload.reason,
+        actor_roles=auth.roles,
+        idempotency_key=idempotency_key,
+    )
+    if not validation.allowed:
+        status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error_code": validation.reason_code,
+                "message": validation.message,
+            },
+        )
+
     operation = "manual_override_create"
     claim = claim_idempotency(
         tenant_id=effective_tenant,
@@ -1608,7 +1774,7 @@ def create_manual_override(
         issue_key=payload.issue_key,
         decision_id=payload.decision_id,
         actor=auth.principal_id,
-        reason=payload.reason,
+        reason=validation.justification or payload.reason,
         idempotency_key=idempotency_key,
         tenant_id=effective_tenant,
         target_type=effective_target_type,
@@ -1621,9 +1787,21 @@ def create_manual_override(
         action="override_create",
         target_type=payload.target_type,
         target_id=payload.target_id or payload.repo,
-        metadata={"repo": payload.repo, "pr_number": payload.pr_number, "decision_id": payload.decision_id},
+        metadata={
+            "repo": payload.repo,
+            "pr_number": payload.pr_number,
+            "decision_id": payload.decision_id,
+            "ttl_seconds": validation.ttl_seconds,
+            "expires_at": validation.expires_at,
+        },
     )
-    response_payload = {**override, "idempotency_key": idempotency_key}
+    response_payload = {
+        **override,
+        "idempotency_key": idempotency_key,
+        "ttl_seconds": validation.ttl_seconds,
+        "expires_at": validation.expires_at,
+        "justification": validation.justification,
+    }
     if payload.decision_id:
         from releasegate.audit.reader import AuditReader
         att = AuditReader.get_attestation_by_decision(payload.decision_id, tenant_id=effective_tenant)
@@ -1686,6 +1864,216 @@ def publish_policy_bundle(
         "active": payload.activate,
         "policy_count": len(snapshot),
     }
+
+
+@app.post("/policy/releases")
+def create_policy_release_endpoint(
+    payload: PolicyReleaseCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import create_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        created = create_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            target_env=payload.target_env,
+            snapshot_id=payload.snapshot_id,
+            policy_hash=payload.policy_hash,
+            state=payload.state,
+            effective_at=payload.effective_at,
+            created_by=payload.created_by or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_create",
+        target_type="policy_release",
+        target_id=created.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "target_env": payload.target_env,
+            "state": payload.state,
+        },
+    )
+    return created
+
+
+@app.post("/policy/releases/promote")
+def promote_policy_release_endpoint(
+    payload: PolicyReleasePromoteRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import promote_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        promoted = promote_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            source_env=payload.source_env,
+            target_env=payload.target_env,
+            state=payload.state,
+            effective_at=payload.effective_at,
+            created_by=payload.created_by or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_promote",
+        target_type="policy_release",
+        target_id=promoted.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "source_env": payload.source_env,
+            "target_env": payload.target_env,
+            "state": payload.state,
+        },
+    )
+    return promoted
+
+
+@app.post("/policy/releases/{release_id}/activate")
+def activate_policy_release_endpoint(
+    release_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import activate_policy_release
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        activated = activate_policy_release(
+            tenant_id=effective_tenant,
+            release_id=release_id,
+            actor_id=auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_activate",
+        target_type="policy_release",
+        target_id=release_id,
+        metadata={"policy_id": activated.get("policy_id"), "target_env": activated.get("target_env")},
+    )
+    return activated
+
+
+@app.post("/policy/releases/rollback")
+def rollback_policy_release_endpoint(
+    payload: PolicyReleaseRollbackRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import rollback_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        rolled_back = rollback_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            target_env=payload.target_env,
+            to_release_id=payload.to_release_id,
+            actor_id=payload.actor_id or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_rollback",
+        target_type="policy_release",
+        target_id=rolled_back.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "target_env": payload.target_env,
+            "rollback_to_release_id": payload.to_release_id,
+        },
+    )
+    return rolled_back
+
+
+@app.post("/policy/releases/scheduler/run")
+def run_policy_release_scheduler_endpoint(
+    tenant_id: Optional[str] = None,
+    now: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import run_policy_release_scheduler
+
+    effective_tenant = _effective_tenant(auth, tenant_id) if tenant_id else None
+    result = run_policy_release_scheduler(
+        tenant_id=effective_tenant,
+        actor_id=auth.principal_id,
+        now=now,
+    )
+    log_security_event(
+        tenant_id=effective_tenant or (auth.tenant_id if auth and auth.tenant_id else "default"),
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_scheduler_run",
+        target_type="policy_release",
+        target_id="scheduler",
+        metadata={"activated_count": result.get("activated_count")},
+    )
+    return result
+
+
+@app.get("/policy/releases/active")
+def get_active_policy_release_endpoint(
+    policy_id: str,
+    target_env: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import get_active_policy_release
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_active_policy_release(
+        tenant_id=effective_tenant,
+        policy_id=policy_id,
+        target_env=target_env,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Active policy release not found")
+    return payload
 
 
 @app.post("/auth/api-keys")
@@ -1917,6 +2305,44 @@ def replay_stored_decision(
         target_id=decision_id,
         metadata={"repo": report.get("repo"), "pr_number": report.get("pr_number")},
     )
+    return report
+
+
+@app.get("/decisions/{decision_id}/policy-snapshot")
+def get_decision_policy_snapshot(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.reader import AuditReader
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = AuditReader.get_decision_with_policy_snapshot(decision_id, tenant_id=effective_tenant)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Decision policy snapshot not found")
+    return payload
+
+
+@app.get("/decisions/{decision_id}/policy-snapshot/verify")
+def verify_decision_policy_snapshot(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.reader import AuditReader
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    report = AuditReader.verify_decision_policy_snapshot(decision_id, tenant_id=effective_tenant)
+    if not report.get("exists"):
+        raise HTTPException(status_code=404, detail="Decision policy snapshot binding not found")
     return report
 
 

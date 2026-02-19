@@ -68,6 +68,103 @@ def test_policy_lint_detects_ambiguous_overlap(tmp_path):
     assert any(i["code"] == "AMBIGUOUS_OVERLAP" for i in report["issues"])
 
 
+def test_policy_lint_detects_conflicting_overlap_same_priority(tmp_path):
+    policy_dir = tmp_path / "compiled"
+    _write_policy(
+        policy_dir,
+        "P1.yaml",
+        {
+            "policy_id": "P1",
+            "name": "Block high risk",
+            "scope": "pull_request",
+            "controls": [{"signal": "risk.score", "operator": ">=", "value": 70}],
+            "enforcement": {"result": "BLOCK", "message": "x"},
+            "metadata": {"priority": 100},
+        },
+    )
+    _write_policy(
+        policy_dir,
+        "P2.yaml",
+        {
+            "policy_id": "P2",
+            "name": "Warn very high risk",
+            "scope": "pull_request",
+            "controls": [{"signal": "risk.score", "operator": ">=", "value": 80}],
+            "enforcement": {"result": "WARN", "message": "y"},
+            "metadata": {"priority": 100},
+        },
+    )
+
+    report = lint_compiled_policies(policy_dir="compiled", strict_schema=True, base_dir=tmp_path)
+
+    assert report["ok"] is False
+    assert any(i["code"] == "CONTRADICTORY_RULES" for i in report["issues"])
+
+
+def test_policy_lint_detects_shadowed_rule(tmp_path):
+    policy_dir = tmp_path / "compiled"
+    _write_policy(
+        policy_dir,
+        "P1.yaml",
+        {
+            "policy_id": "P1",
+            "name": "Block high risk",
+            "scope": "pull_request",
+            "controls": [{"signal": "risk.score", "operator": ">=", "value": 50}],
+            "enforcement": {"result": "BLOCK", "message": "x"},
+            "metadata": {"priority": 90},
+        },
+    )
+    _write_policy(
+        policy_dir,
+        "P2.yaml",
+        {
+            "policy_id": "P2",
+            "name": "Block critical files at same threshold",
+            "scope": "pull_request",
+            "controls": [
+                {"signal": "risk.score", "operator": ">=", "value": 50},
+                {"signal": "change.critical_files_count", "operator": ">", "value": 0},
+            ],
+            "enforcement": {"result": "BLOCK", "message": "y"},
+            "metadata": {"priority": 100},
+        },
+    )
+
+    report = lint_compiled_policies(policy_dir="compiled", strict_schema=True, base_dir=tmp_path)
+
+    assert any(i["code"] == "RULE_UNREACHABLE_SHADOWED" for i in report["issues"])
+
+
+def test_policy_lint_detects_coverage_gap(tmp_path):
+    policy_dir = tmp_path / "compiled"
+    _write_policy(
+        policy_dir,
+        "P1.yaml",
+        {
+            "policy_id": "P1",
+            "name": "Prod rule",
+            "scope": "pull_request",
+            "controls": [{"signal": "risk.level", "operator": "==", "value": "HIGH"}],
+            "enforcement": {"result": "BLOCK", "message": "x"},
+            "metadata": {"environment": "prod", "workflow_id": "wf-release", "transition_id": "2"},
+        },
+    )
+
+    report = lint_compiled_policies(
+        policy_dir="compiled",
+        strict_schema=True,
+        base_dir=tmp_path,
+        coverage_targets=[
+            {"env": "prod", "workflow_id": "wf-release", "transition_id": "2"},
+            {"env": "prod", "workflow_id": "wf-release", "transition_id": "3"},
+        ],
+    )
+
+    assert report["ok"] is False
+    assert any(i["code"] == "COVERAGE_GAP" for i in report["issues"])
+
+
 def test_policy_lint_passes_valid_policies(tmp_path):
     policy_dir = tmp_path / "compiled"
     _write_policy(

@@ -45,6 +45,185 @@ Decision output fields, `reason_code` meanings, and strict/permissive behavior a
 Other docs (including this README) are descriptive and defer to that spec.
 Forge runtime hardening and failure handling is documented in `docs/forge-hardening.md`.
 
+## Core Architecture
+
+ReleaseGate is built on two foundational enforcement pillars.
+
+### Pillar 1: Transition-Level Enforcement (Hard ALLOW / DENY)
+
+#### What it guarantees
+
+No Jira transition, PR merge, or release decision proceeds unless ReleaseGate explicitly returns `ALLOW` or `DENY`.
+There is no advisory mode in production enforcement.
+
+#### Authoritative gate
+
+All enforcement flows through a single deterministic gate:
+
+```text
+check_transition(issue_key, transition_id, actor, context) -> ALLOW | DENY
+```
+
+This function:
+
+- Evaluates the resolved policy bundle
+- Binds the decision to an immutable snapshot
+- Produces `decision_hash`, `input_hash`, `policy_hash`, and `replay_hash`
+- Emits an auditable decision record
+
+#### Deterministic and idempotent
+
+Same input yields the same decision. ReleaseGate stores:
+
+- `decision_id`
+- `evaluation_key`
+- `input_snapshot`
+- `policy_bundle_hash`
+
+This guarantees replayability, forensic traceability, and no nondeterministic drift.
+
+#### Audit search API
+
+Decisions are queryable through:
+
+```text
+GET /audit/search
+```
+
+Each decision includes `release_status`, `policy_bindings`, `engine_version`, `full_decision_json`, and timestamp fields.
+
+#### Risk-aware enforcement
+
+Signals include:
+
+- GitHub PR risk score
+- Churn metrics
+- Severity level
+- Dependency provenance
+- Privileged path detection
+- Transition metadata
+- Actor role
+
+Policies evaluate these signals declaratively.
+
+#### Pillar 1 outcome
+
+A workflow transition cannot move forward unless ReleaseGate explicitly authorizes it under a versioned, bound policy snapshot.
+
+### Pillar 2: Declarative Policy Engine and Immutable Rollout
+
+Pillar 2 transforms ReleaseGate from a rule checker into a governance platform.
+
+#### Declarative policy DSL
+
+Policies are defined in YAML:
+
+```yaml
+policy_id: SEC-PR-001
+controls:
+  - signal: core_risk.severity_level
+    operator: in
+    value: ["HIGH", "CRITICAL"]
+enforcement:
+  result: BLOCK
+```
+
+Policies are versioned, schema validated, compiled, and hashed.
+
+#### Snapshot binding (immutable)
+
+Every decision stores:
+
+- `snapshot_id`
+- Full resolved policy snapshot
+- `policy_hash`
+- `compiler_version`
+- `resolution_inputs`
+
+Snapshots are immutable, hash-verifiable, and bound to each decision.
+
+Verification endpoint:
+
+```text
+GET /decisions/{decision_id}/policy-snapshot/verify
+```
+
+Expected response includes:
+
+```json
+{ "verified": true }
+```
+
+#### Staged policy rollout (Dev -> Staging -> Prod)
+
+Policies are deployed like software:
+
+- Active in dev
+- Promoted to staging
+- Scheduled for prod
+- Activated via scheduler
+- Rolled back via pointer switch
+
+Endpoints:
+
+- `POST /policy/releases`
+- `POST /policy/releases/promote`
+- `POST /policy/releases/scheduler/run`
+- `POST /policy/releases/rollback`
+- `GET /policy/releases/active`
+
+Each environment maintains an atomic active pointer.
+
+#### Advanced lint gate
+
+ReleaseGate includes a pre-rollout linter that detects:
+
+- `CONTRADICTORY_RULES`
+- `AMBIGUOUS_OVERLAP`
+- `COVERAGE_GAP`
+- `RULE_UNREACHABLE_SHADOWED` (warning)
+
+Lint runs before activation, and blocking issues prevent rollout.
+
+#### Hash-linked integrity
+
+Every snapshot includes:
+
+- `policy_hash`
+- `policy_bundle_hash`
+- `compiler_version`
+- `schema_version`
+
+This supports deterministic rebuilds, external verification, audit defense, and compliance reporting.
+
+#### Pillar 2 outcome
+
+You can answer auditors with precision:
+
+`This release was authorized under policy bundle hash X, compiled with version Y, activated in prod at timestamp Z.`
+
+### Why this matters
+
+Most governance systems are procedural, manual, non-verifiable, and environment-inconsistent.
+
+ReleaseGate provides:
+
+- Deterministic enforcement
+- Immutable policy binding
+- Staged governance rollout
+- Cryptographic integrity
+
+It treats policy as versioned, deployable infrastructure.
+
+### Combined effect
+
+| Pillar | Capability |
+| --- | --- |
+| Pillar 1 | Hard real-time enforcement gate |
+| Pillar 2 | Immutable, versioned, staged policy governance |
+
+Together, ReleaseGate is a verifiable change authorization system.
+
 ## Core Capabilities
 
 ### 1. Transition-Level Hard Enforcement

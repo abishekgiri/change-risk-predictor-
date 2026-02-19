@@ -13,6 +13,7 @@ from releasegate.integrations.jira.lock_store import (
     apply_transition_lock_update,
     expire_override_if_needed,
     get_current_lock_state,
+    verify_lock_chain,
 )
 from releasegate.storage import get_storage_backend
 from releasegate.storage.schema import init_db
@@ -32,10 +33,10 @@ def _events(tenant_id: str, issue_key: str):
     storage = get_storage_backend()
     return storage.fetchall(
         """
-        SELECT event_type, reason_codes_json
+        SELECT event_type, reason_codes_json, chain_id, seq, prev_hash, event_hash
         FROM jira_lock_events
         WHERE tenant_id = ? AND issue_key = ?
-        ORDER BY created_at ASC
+        ORDER BY seq ASC, created_at ASC
         """,
         (tenant_id, issue_key),
     )
@@ -169,3 +170,42 @@ def test_lock_event_ledger_is_append_only(clean_db):
             "DELETE FROM jira_lock_events WHERE tenant_id = ? AND issue_key = ?",
             (tenant, issue),
         )
+
+
+def test_lock_event_hash_chain_verifies(clean_db):
+    tenant = "tenant-hash"
+    issue = "PROJ-42"
+    apply_transition_lock_update(
+        tenant_id=tenant,
+        issue_key=issue,
+        desired_locked=True,
+        reason_codes=["POLICY_BLOCKED"],
+        decision_id="d42a",
+        policy_hash="ph",
+        policy_resolution_hash="prh",
+        repo="org/repo",
+        pr_number=42,
+        actor="actor",
+    )
+    apply_transition_lock_update(
+        tenant_id=tenant,
+        issue_key=issue,
+        desired_locked=False,
+        reason_codes=["POLICY_ALLOWED"],
+        decision_id="d42b",
+        policy_hash="ph",
+        policy_resolution_hash="prh",
+        repo="org/repo",
+        pr_number=42,
+        actor="actor",
+    )
+
+    result = verify_lock_chain(tenant_id=tenant, chain_id=f"jira-lock:{issue}")
+    assert result["valid"] is True
+    assert result["checked"] == 2
+    assert result["head_seq"] == 2
+
+    events = _events(tenant, issue)
+    assert all(row.get("chain_id") for row in events)
+    assert all(int(row.get("seq") or 0) > 0 for row in events)
+    assert all(str(row.get("event_hash") or "").strip() for row in events)

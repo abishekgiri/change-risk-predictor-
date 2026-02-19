@@ -1,11 +1,7 @@
 version: 1
 jira:
-  project_keys:
-    - DEMO
-  issue_types:
-    - Bug
-    - Task
-    - Story
+  project_keys: []
+  issue_types: []
 
 gate_bindings:
   release_gate:
@@ -31,3 +27,13 @@ transitions:
     applies_to:
       environments:
         - STAGING
+
+  - transition_id: "2"
+    transition_name: "Done"
+    gate: release_gate
+    mode: strict
+    applies_to:
+      branches:
+        - main
+      environments:
+        - PRODUCTION

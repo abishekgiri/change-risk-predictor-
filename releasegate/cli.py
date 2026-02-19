@@ -104,6 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow invalid policy files to be skipped (lint still runs on valid files).",
     )
+    lint_p.add_argument(
+        "--coverage-targets",
+        help="Optional YAML/JSON file containing required coverage targets (list of objects).",
+    )
 
     jira_validate_p = sub.add_parser(
         "validate-jira-config",
@@ -133,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-schema-strict",
         action="store_true",
         help="Allow invalid policy files to be skipped while validating policy bundle.",
+    )
+    bundle_validate_p.add_argument(
+        "--coverage-targets",
+        help="Optional YAML/JSON file containing required coverage targets (list of objects).",
     )
 
     policy_compile_p = sub.add_parser(
@@ -173,6 +181,98 @@ def build_parser() -> argparse.ArgumentParser:
         help="List merge strategy mapping like path=strategy (e.g., approvals.security_team_slugs=union)",
     )
     policy_validate_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    decision_policy_show_p = sub.add_parser(
+        "show-decision-policy-snapshot",
+        help="Show immutable policy snapshot bound to a decision.",
+    )
+    decision_policy_show_p.add_argument("--decision-id", required=True)
+    decision_policy_show_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    decision_policy_show_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    decision_policy_verify_p = sub.add_parser(
+        "verify-decision-policy-snapshot",
+        help="Verify decision -> policy snapshot hash binding.",
+    )
+    decision_policy_verify_p.add_argument("--decision-id", required=True)
+    decision_policy_verify_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    decision_policy_verify_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_create_p = sub.add_parser(
+        "policy-release-create",
+        help="Create a policy release (draft/scheduled/active) for an environment.",
+    )
+    policy_release_create_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    policy_release_create_p.add_argument("--policy-id", required=True)
+    policy_release_create_p.add_argument("--env", required=True, help="Target environment (dev/staging/prod)")
+    policy_release_create_p.add_argument("--snapshot-id")
+    policy_release_create_p.add_argument("--policy-hash")
+    policy_release_create_p.add_argument(
+        "--state",
+        default="DRAFT",
+        choices=["DRAFT", "SCHEDULED", "ACTIVE", "SUPERSEDED", "ROLLED_BACK"],
+    )
+    policy_release_create_p.add_argument("--effective-at", help="ISO-8601 effective timestamp (required for SCHEDULED)")
+    policy_release_create_p.add_argument("--created-by")
+    policy_release_create_p.add_argument("--change-ticket")
+    policy_release_create_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_promote_p = sub.add_parser(
+        "policy-release-promote",
+        help="Promote active policy snapshot from one environment to another.",
+    )
+    policy_release_promote_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    policy_release_promote_p.add_argument("--policy-id", required=True)
+    policy_release_promote_p.add_argument("--from-env", required=True, help="Source environment")
+    policy_release_promote_p.add_argument("--to-env", required=True, help="Target environment")
+    policy_release_promote_p.add_argument(
+        "--state",
+        default="DRAFT",
+        choices=["DRAFT", "SCHEDULED", "ACTIVE"],
+    )
+    policy_release_promote_p.add_argument("--effective-at", help="ISO-8601 effective timestamp for scheduled rollout")
+    policy_release_promote_p.add_argument("--created-by")
+    policy_release_promote_p.add_argument("--change-ticket")
+    policy_release_promote_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_activate_p = sub.add_parser(
+        "policy-release-activate",
+        help="Activate an existing policy release and update environment pointer.",
+    )
+    policy_release_activate_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    policy_release_activate_p.add_argument("--release-id", required=True)
+    policy_release_activate_p.add_argument("--actor")
+    policy_release_activate_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_active_p = sub.add_parser(
+        "policy-release-active",
+        help="Show active policy release + snapshot for an environment.",
+    )
+    policy_release_active_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    policy_release_active_p.add_argument("--policy-id", required=True)
+    policy_release_active_p.add_argument("--env", required=True, help="Target environment")
+    policy_release_active_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_rollback_p = sub.add_parser(
+        "policy-release-rollback",
+        help="Rollback an environment pointer to a prior release snapshot.",
+    )
+    policy_release_rollback_p.add_argument("--tenant", required=True, help="Tenant/org identifier")
+    policy_release_rollback_p.add_argument("--policy-id", required=True)
+    policy_release_rollback_p.add_argument("--env", required=True, help="Target environment")
+    policy_release_rollback_p.add_argument("--to-release-id", required=True)
+    policy_release_rollback_p.add_argument("--actor")
+    policy_release_rollback_p.add_argument("--change-ticket")
+    policy_release_rollback_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_release_scheduler_p = sub.add_parser(
+        "policy-release-run-scheduler",
+        help="Activate scheduled policy releases whose effective_at is due.",
+    )
+    policy_release_scheduler_p.add_argument("--tenant", help="Tenant/org identifier (optional, defaults to all)")
+    policy_release_scheduler_p.add_argument("--now", help="ISO-8601 timestamp override (defaults to current UTC)")
+    policy_release_scheduler_p.add_argument("--actor", default="scheduler")
+    policy_release_scheduler_p.add_argument("--format", default="json", choices=["json", "text"])
 
     checkpoint_p = sub.add_parser("checkpoint-override", help="Create signed override-ledger root checkpoint.")
     checkpoint_p.add_argument("--repo", required=True)
@@ -396,6 +496,133 @@ def main() -> int:
                     print(f"- {err}")
 
         return 0 if ok else 1
+
+    if args.cmd in {"show-decision-policy-snapshot", "verify-decision-policy-snapshot"}:
+        from releasegate.policy.snapshots import (
+            get_decision_with_snapshot,
+            verify_decision_snapshot_binding,
+        )
+
+        tenant_id = resolve_tenant_id(args.tenant)
+        if args.cmd == "show-decision-policy-snapshot":
+            payload = get_decision_with_snapshot(
+                tenant_id=tenant_id,
+                decision_id=str(args.decision_id),
+            )
+            if not payload:
+                print("Decision policy snapshot not found.", file=sys.stderr)
+                return 1
+            if args.format == "json":
+                print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+            else:
+                snapshot = payload.get("snapshot") or {}
+                print(f"Decision: {payload.get('decision_id')}")
+                print(f"Policy Hash: {payload.get('policy_hash')}")
+                print(f"Snapshot ID: {payload.get('snapshot_id')}")
+                print(f"Snapshot Policy Hash: {snapshot.get('policy_hash') if isinstance(snapshot, dict) else ''}")
+            return 0
+
+        report = verify_decision_snapshot_binding(
+            tenant_id=tenant_id,
+            decision_id=str(args.decision_id),
+        )
+        if args.format == "json":
+            print(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+        else:
+            print(f"exists: {report.get('exists')}")
+            print(f"verified: {report.get('verified')}")
+            print(f"decision_id: {report.get('decision_id')}")
+            print(f"snapshot_id: {report.get('snapshot_id')}")
+            print(f"expected_policy_hash: {report.get('expected_policy_hash')}")
+            print(f"computed_policy_hash: {report.get('computed_policy_hash')}")
+        return 0 if report.get("verified") else 1
+
+    if args.cmd in {
+        "policy-release-create",
+        "policy-release-promote",
+        "policy-release-activate",
+        "policy-release-active",
+        "policy-release-rollback",
+        "policy-release-run-scheduler",
+    }:
+        from releasegate.policy.releases import (
+            activate_policy_release,
+            create_policy_release,
+            get_active_policy_release,
+            promote_policy_release,
+            rollback_policy_release,
+            run_policy_release_scheduler,
+        )
+
+        tenant_id = resolve_tenant_id(getattr(args, "tenant", None), allow_none=(args.cmd == "policy-release-run-scheduler"))
+        try:
+            if args.cmd == "policy-release-create":
+                payload = create_policy_release(
+                    tenant_id=tenant_id,
+                    policy_id=args.policy_id,
+                    target_env=args.env,
+                    snapshot_id=args.snapshot_id,
+                    policy_hash=args.policy_hash,
+                    state=args.state,
+                    effective_at=args.effective_at,
+                    created_by=args.created_by,
+                    change_ticket=args.change_ticket,
+                )
+            elif args.cmd == "policy-release-promote":
+                payload = promote_policy_release(
+                    tenant_id=tenant_id,
+                    policy_id=args.policy_id,
+                    source_env=args.from_env,
+                    target_env=args.to_env,
+                    state=args.state,
+                    effective_at=args.effective_at,
+                    created_by=args.created_by,
+                    change_ticket=args.change_ticket,
+                )
+            elif args.cmd == "policy-release-activate":
+                payload = activate_policy_release(
+                    tenant_id=tenant_id,
+                    release_id=args.release_id,
+                    actor_id=args.actor,
+                )
+            elif args.cmd == "policy-release-active":
+                payload = get_active_policy_release(
+                    tenant_id=tenant_id,
+                    policy_id=args.policy_id,
+                    target_env=args.env,
+                )
+                if payload is None:
+                    print("No active policy release found for scope.", file=sys.stderr)
+                    return 1
+            elif args.cmd == "policy-release-rollback":
+                payload = rollback_policy_release(
+                    tenant_id=tenant_id,
+                    policy_id=args.policy_id,
+                    target_env=args.env,
+                    to_release_id=args.to_release_id,
+                    actor_id=args.actor,
+                    change_ticket=args.change_ticket,
+                )
+            else:
+                payload = run_policy_release_scheduler(
+                    tenant_id=tenant_id,
+                    actor_id=args.actor,
+                    now=args.now,
+                )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
+        if args.format == "json":
+            print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+        else:
+            if args.cmd == "policy-release-run-scheduler":
+                print(f"activated_count: {payload.get('activated_count')}")
+            else:
+                print(f"release_id: {payload.get('release_id') or (payload.get('release') or {}).get('release_id')}")
+                if payload.get("state"):
+                    print(f"state: {payload.get('state')}")
+        return 0
 
     if args.cmd == "analyze-pr":
         # Set token if provided
@@ -1144,9 +1371,18 @@ def main() -> int:
     if args.cmd == "lint-policies":
         from releasegate.policy.lint import lint_compiled_policies, format_lint_report
 
+        coverage_targets = None
+        if getattr(args, "coverage_targets", None):
+            with open(args.coverage_targets, "r", encoding="utf-8") as handle:
+                loaded_targets = yaml.safe_load(handle) or []
+            if not isinstance(loaded_targets, list):
+                raise ValueError("coverage targets file must contain a list")
+            coverage_targets = loaded_targets
+
         report = lint_compiled_policies(
             policy_dir=args.policy_dir,
             strict_schema=not args.no_schema_strict,
+            coverage_targets=coverage_targets,
         )
         if args.format == "json":
             print(json.dumps(report, indent=2))
@@ -1157,9 +1393,18 @@ def main() -> int:
     if args.cmd == "validate-policy-bundle":
         from releasegate.policy.lint import lint_compiled_policies, format_lint_report
 
+        coverage_targets = None
+        if getattr(args, "coverage_targets", None):
+            with open(args.coverage_targets, "r", encoding="utf-8") as handle:
+                loaded_targets = yaml.safe_load(handle) or []
+            if not isinstance(loaded_targets, list):
+                raise ValueError("coverage targets file must contain a list")
+            coverage_targets = loaded_targets
+
         report = lint_compiled_policies(
             policy_dir=args.policy_dir,
             strict_schema=not args.no_schema_strict,
+            coverage_targets=coverage_targets,
         )
         report = {
             **report,

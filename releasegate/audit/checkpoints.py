@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from releasegate.integrations.jira.lock_store import compute_lock_chain_root
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -113,6 +114,22 @@ def _checkpoint_path(
     return path / f"{period_id}.json"
 
 
+def _lock_checkpoint_path(
+    chain_id: str,
+    cadence: str,
+    period_id: str,
+    *,
+    tenant_id: str,
+    store_dir: Optional[str] = None,
+) -> Path:
+    root = _checkpoint_store_dir(store_dir)
+    tenant_dir = _sanitize_path_part(tenant_id)
+    chain_dir = _sanitize_path_part(chain_id)
+    path = root / tenant_dir / "jira-lock" / chain_dir / cadence
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f"{period_id}.json"
+
+
 def _load_rows(repo: str, pr: Optional[int] = None, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
@@ -154,6 +171,14 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
 def _checkpoint_id(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(
         f"{payload.get('tenant_id')}:{payload.get('repo')}:{payload.get('cadence')}:{payload.get('period_id')}:{payload.get('pr_number')}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:32]
+
+
+def _lock_checkpoint_id(payload: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        f"{payload.get('tenant_id')}:{payload.get('chain_id')}:{payload.get('cadence')}:{payload.get('period_id')}".encode(
             "utf-8"
         )
     ).hexdigest()[:32]
@@ -280,6 +305,42 @@ def _record_checkpoint_metadata(checkpoint: Dict[str, Any], path: str) -> None:
             payload.get("period_id"),
             payload.get("period_end"),
             payload.get("root_hash"),
+            int(payload.get("event_count", 0)),
+            signature.get("algorithm") or "HMAC-SHA256",
+            signature.get("value") or "",
+            path,
+            payload.get("generated_at") or datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+
+
+def _record_lock_checkpoint_metadata(checkpoint: Dict[str, Any], path: str) -> None:
+    payload = checkpoint.get("payload", {})
+    signature = checkpoint.get("signature", {})
+    checkpoint_id = (
+        checkpoint.get("ids", {}).get("checkpoint_id")
+        or _lock_checkpoint_id(payload)
+    )
+
+    init_db()
+    storage = get_storage_backend()
+    storage.execute(
+        """
+        INSERT INTO audit_lock_checkpoints (
+            tenant_id, checkpoint_id, chain_id, cadence, period_id, period_end, head_seq, head_hash, event_count,
+            signature_algorithm, signature_value, path, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, checkpoint_id) DO NOTHING
+        """,
+        (
+            payload.get("tenant_id"),
+            checkpoint_id,
+            payload.get("chain_id"),
+            payload.get("cadence"),
+            payload.get("period_id"),
+            payload.get("period_end"),
+            int(payload.get("head_seq", 0)),
+            payload.get("head_hash"),
             int(payload.get("event_count", 0)),
             signature.get("algorithm") or "HMAC-SHA256",
             signature.get("value") or "",
@@ -500,4 +561,228 @@ def verify_override_checkpoint(
     if not chain.get("valid_chain"):
         result["chain_reason"] = chain.get("reason")
         result["override_id"] = chain.get("override_id")
+    return result
+
+
+def create_jira_lock_checkpoint(
+    chain_id: str,
+    *,
+    cadence: str = DEFAULT_CADENCE,
+    at: Optional[Any] = None,
+    store_dir: Optional[str] = None,
+    signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    cadence = _resolve_cadence(cadence)
+    effective_tenant = resolve_tenant_id(tenant_id)
+    generated_at = parse_utc_datetime(at) if at is not None else datetime.now(timezone.utc)
+    period_id = period_id_for_timestamp(generated_at, cadence=cadence)
+
+    chain = compute_lock_chain_root(
+        tenant_id=effective_tenant,
+        chain_id=chain_id,
+        up_to=generated_at,
+    )
+    if not chain.get("valid_chain", False):
+        raise ValueError(f"Cannot checkpoint invalid lock chain: {chain.get('reason')}")
+
+    payload = {
+        "tenant_id": effective_tenant,
+        "chain_id": chain_id,
+        "cadence": cadence,
+        "period_id": period_id,
+        "period_end": generated_at.isoformat(),
+        "head_seq": int(chain.get("head_seq", 0)),
+        "head_hash": chain.get("head_hash") or EMPTY_ROOT_HASH,
+        "event_count": int(chain.get("event_count", 0)),
+        "first_event_at": chain.get("first_event_at"),
+        "last_event_at": chain.get("last_event_at"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    signature_obj = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
+    checkpoint_id = _lock_checkpoint_id(payload)
+    checkpoint = {
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": payload.get("generated_at"),
+        "tenant_id": effective_tenant,
+        "ids": {
+            "checkpoint_id": checkpoint_id,
+            "decision_id": "",
+            "proof_pack_id": "",
+            "policy_bundle_hash": "",
+            "repo": "",
+            "pr_number": None,
+            "period_id": period_id,
+            "cadence": cadence,
+            "chain_id": chain_id,
+        },
+        "integrity": {
+            "canonicalization": CANONICALIZATION_VERSION,
+            "hash_alg": HASH_ALGORITHM,
+            "input_hash": "",
+            "policy_hash": "",
+            "decision_hash": "",
+            "replay_hash": "",
+            "ledger": {
+                "ledger_tip_hash": payload.get("head_hash") or "",
+                "ledger_record_id": str(payload.get("head_seq") or ""),
+            },
+            "signatures": {
+                "checkpoint_signature": signature_obj.get("value") or "",
+                "signing_key_id": signature_obj.get("key_id") or "",
+            },
+        },
+        "checkpoint_version": "v1",
+        "payload": payload,
+        "signature": signature_obj,
+    }
+
+    path = _lock_checkpoint_path(
+        chain_id,
+        cadence,
+        period_id,
+        tenant_id=effective_tenant,
+        store_dir=store_dir,
+    )
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        existing["path"] = str(path)
+        existing["created"] = False
+        _record_lock_checkpoint_metadata(existing, str(path))
+        return existing
+
+    path.write_text(json.dumps(checkpoint, indent=2, sort_keys=True), encoding="utf-8")
+    checkpoint["path"] = str(path)
+    checkpoint["created"] = True
+    _record_lock_checkpoint_metadata(checkpoint, str(path))
+    return checkpoint
+
+
+def load_jira_lock_checkpoint(
+    chain_id: str,
+    *,
+    cadence: str = DEFAULT_CADENCE,
+    period_id: str,
+    store_dir: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    cadence = _resolve_cadence(cadence)
+    effective_tenant = resolve_tenant_id(tenant_id)
+    path = _lock_checkpoint_path(chain_id, cadence, period_id, tenant_id=effective_tenant, store_dir=store_dir)
+    if not path.exists():
+        return None
+    checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    checkpoint["path"] = str(path)
+    return checkpoint
+
+
+def latest_jira_lock_checkpoint(
+    chain_id: str,
+    *,
+    cadence: str = DEFAULT_CADENCE,
+    store_dir: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    cadence = _resolve_cadence(cadence)
+    effective_tenant = resolve_tenant_id(tenant_id)
+    dir_path = _lock_checkpoint_path(chain_id, cadence, "tmp", tenant_id=effective_tenant, store_dir=store_dir).parent
+    if not dir_path.exists():
+        return None
+    files = [p for p in dir_path.glob("*.json") if p.is_file()]
+    if not files:
+        return None
+    latest = sorted(files)[-1]
+    checkpoint = json.loads(latest.read_text(encoding="utf-8"))
+    checkpoint["path"] = str(latest)
+    return checkpoint
+
+
+def verify_jira_lock_checkpoint(
+    chain_id: str,
+    *,
+    cadence: str = DEFAULT_CADENCE,
+    period_id: str,
+    store_dir: Optional[str] = None,
+    signing_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    checkpoint = load_jira_lock_checkpoint(
+        chain_id=chain_id,
+        cadence=cadence,
+        period_id=period_id,
+        store_dir=store_dir,
+        tenant_id=effective_tenant,
+    )
+    if checkpoint is None:
+        return {
+            "exists": False,
+            "valid": False,
+            "schema_name": SCHEMA_NAME,
+            "schema_version": SCHEMA_VERSION,
+            "tenant_id": effective_tenant,
+            "chain_id": chain_id,
+            "cadence": cadence,
+            "period_id": period_id,
+            "reason": "checkpoint not found",
+        }
+
+    payload = checkpoint.get("payload", {})
+    payload_tenant = payload.get("tenant_id") or effective_tenant
+    payload_chain = payload.get("chain_id") or chain_id
+    period_end = payload.get("period_end")
+
+    signature_valid = False
+    signature_error = None
+    try:
+        signature_valid = verify_checkpoint_signature(checkpoint, signing_key=signing_key)
+    except ValueError as exc:
+        signature_error = str(exc)
+
+    chain = compute_lock_chain_root(
+        tenant_id=payload_tenant,
+        chain_id=payload_chain,
+        up_to=period_end,
+    )
+    head_hash_match = str(chain.get("head_hash") or EMPTY_ROOT_HASH) == str(payload.get("head_hash") or EMPTY_ROOT_HASH)
+    head_seq_match = int(chain.get("head_seq", -1)) == int(payload.get("head_seq", -2))
+    event_count_match = int(chain.get("event_count", -1)) == int(payload.get("event_count", -2))
+
+    valid = bool(
+        signature_valid
+        and chain.get("valid_chain")
+        and head_hash_match
+        and head_seq_match
+        and event_count_match
+    )
+    result = {
+        "exists": True,
+        "valid": valid,
+        "schema_name": checkpoint.get("schema_name", SCHEMA_NAME),
+        "schema_version": checkpoint.get("schema_version", SCHEMA_VERSION),
+        "generated_at": checkpoint.get("generated_at") or payload.get("generated_at"),
+        "ids": checkpoint.get("ids", {}),
+        "integrity": checkpoint.get("integrity", {}),
+        "tenant_id": payload_tenant,
+        "chain_id": payload_chain,
+        "cadence": payload.get("cadence", cadence),
+        "period_id": payload.get("period_id", period_id),
+        "signature_valid": bool(signature_valid),
+        "signature_error": signature_error,
+        "chain_valid": bool(chain.get("valid_chain")),
+        "head_hash_match": bool(head_hash_match),
+        "head_seq_match": bool(head_seq_match),
+        "event_count_match": bool(event_count_match),
+        "checkpoint_head_hash": payload.get("head_hash"),
+        "computed_head_hash": chain.get("head_hash"),
+        "checkpoint_head_seq": payload.get("head_seq"),
+        "computed_head_seq": chain.get("head_seq"),
+        "checkpoint_event_count": payload.get("event_count"),
+        "computed_event_count": chain.get("event_count"),
+        "period_end": period_end,
+        "path": checkpoint.get("path"),
+    }
+    if not chain.get("valid_chain"):
+        result["chain_reason"] = chain.get("reason")
     return result
