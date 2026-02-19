@@ -74,6 +74,18 @@ def test_build_decision_id_is_deterministic(base_request):
     )
     assert d1.decision_id == d2.decision_id == eval_key
 
+
+def test_build_decision_id_ignores_evaluation_suffix(base_request):
+    gate = WorkflowGate()
+    eval_key = gate._compute_key(base_request)
+    d = gate._build_decision(
+        base_request,
+        release_status=DecisionType.ALLOWED,
+        message="ok",
+        evaluation_key=f"{eval_key}:evaluated",
+    )
+    assert d.decision_id == eval_key
+
 @patch("releasegate.engine.ComplianceEngine")
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_flow_allowed(MockRecorder, MockEngine, base_request):

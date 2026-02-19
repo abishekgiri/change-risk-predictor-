@@ -1487,15 +1487,10 @@ class WorkflowGate:
                 if strict_mode
                 else f"SKIPPED: dependency timeout while persisting decision ({dependency_context})"
             )
-            fallback_id_seed = {
-                "version": 1,
-                "prior_decision_id": decision.decision_id,
-                "dependency_context": dependency_context,
-                "fallback": "persist_timeout",
-            }
             return decision.model_copy(
                 update={
-                    "decision_id": hashlib.sha256(canonicalize_json_bytes(fallback_id_seed)).hexdigest(),
+                    # Keep deterministic decision_id stable across retries/replays.
+                    "decision_id": decision.decision_id,
                     "timestamp": datetime.now(timezone.utc),
                     "release_status": fallback_status,
                     "message": fallback_message,
@@ -1901,7 +1896,7 @@ class WorkflowGate:
         for binding in effective_policy_bindings:
             if not binding.tenant_id:
                 binding.tenant_id = tenant_id
-        decision_id = str(evaluation_key)
+        decision_id = self._canonical_decision_id(evaluation_key)
         return Decision(
             decision_id=decision_id,
             tenant_id=tenant_id,
@@ -1926,6 +1921,18 @@ class WorkflowGate:
                 external={"jira": [request.issue_key]},
             ),
         )
+
+    def _canonical_decision_id(self, evaluation_key: str) -> str:
+        """
+        Produce deterministic decision_id from canonical evaluation input hash.
+        Evaluation phases append suffixes (e.g. ':evaluated'); the decision_id remains
+        anchored to the base canonical hash for reproducible audit replay.
+        """
+        raw = str(evaluation_key or "").strip()
+        base = raw.split(":", 1)[0] if raw else ""
+        if len(base) == 64 and all(ch in "0123456789abcdef" for ch in base.lower()):
+            return base.lower()
+        return hashlib.sha256(canonicalize_json_bytes({"evaluation_key": raw})).hexdigest()
 
     def _is_missing_risk_metadata(self, risk_meta: Dict[str, Any]) -> bool:
         if not risk_meta:
