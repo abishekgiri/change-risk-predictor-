@@ -21,7 +21,7 @@ modules:
 
   function:
     - key: validateTransition
-      handler: index.run
+      handler: validator.run
     - key: resolver
       handler: index.resolver
 
@@ -37,6 +37,12 @@ permissions:
     - read:jira-user
     - manage:jira-configuration
     - storage:app
+  external:
+    fetch:
+      backend:
+        - https://releasegate.dev
+        - https://api.releasegate.dev
+        - https://change-risk-predictor.onrender.com
 
 app:
   runtime:
