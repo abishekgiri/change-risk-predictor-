@@ -182,7 +182,30 @@ def test_manual_override_endpoint_rejects_missing_ttl():
         "target_id": f"{repo}#405",
     }
     response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
-    assert response.status_code == 422
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "OVERRIDE_TTL_REQUIRED"
+
+
+def test_manual_override_endpoint_rejects_missing_justification():
+    repo = f"phase4-override-no-justification-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 407)
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"]),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 407,
+        "issue_key": "PHASE4-407",
+        "decision_id": stored.decision_id,
+        "reason": "   ",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#407",
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "OVERRIDE_JUSTIFICATION_REQUIRED"
 
 
 def test_manual_override_endpoint_requires_admin_role():

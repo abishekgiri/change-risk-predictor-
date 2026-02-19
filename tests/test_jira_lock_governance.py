@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -61,7 +62,7 @@ def test_create_and_verify_jira_lock_checkpoint(monkeypatch):
     monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "jira-lock-checkpoint-test-key")
     monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID", "test-key")
     tenant = "tenant-test"
-    issue = "RG-CP-1"
+    issue = f"RG-CP-{uuid.uuid4().hex[:8]}"
     apply_transition_lock_update(
         tenant_id=tenant,
         issue_key=issue,

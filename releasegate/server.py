@@ -116,8 +116,8 @@ class ManualOverrideRequest(BaseModel):
     pr_number: Optional[int] = None
     issue_key: Optional[str] = None
     decision_id: Optional[str] = None
-    reason: str = Field(min_length=20)
-    ttl_seconds: int = Field(gt=0)
+    reason: str
+    ttl_seconds: Optional[int] = None
     target_type: str = "pr"
     target_id: Optional[str] = None
     idempotency_key: Optional[str] = None
