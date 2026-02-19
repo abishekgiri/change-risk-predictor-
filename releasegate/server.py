@@ -129,6 +129,38 @@ class PublishPolicyRequest(BaseModel):
     note: Optional[str] = None
 
 
+class PolicyReleaseCreateRequest(BaseModel):
+    policy_id: str
+    target_env: str
+    snapshot_id: Optional[str] = None
+    policy_hash: Optional[str] = None
+    state: str = "DRAFT"
+    effective_at: Optional[str] = None
+    created_by: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class PolicyReleasePromoteRequest(BaseModel):
+    policy_id: str
+    source_env: str
+    target_env: str
+    state: str = "DRAFT"
+    effective_at: Optional[str] = None
+    created_by: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class PolicyReleaseRollbackRequest(BaseModel):
+    policy_id: str
+    target_env: str
+    to_release_id: str
+    actor_id: Optional[str] = None
+    change_ticket: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str
     roles: list[str] = Field(default_factory=lambda: ["operator"])
@@ -1700,6 +1732,216 @@ def publish_policy_bundle(
     }
 
 
+@app.post("/policy/releases")
+def create_policy_release_endpoint(
+    payload: PolicyReleaseCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import create_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        created = create_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            target_env=payload.target_env,
+            snapshot_id=payload.snapshot_id,
+            policy_hash=payload.policy_hash,
+            state=payload.state,
+            effective_at=payload.effective_at,
+            created_by=payload.created_by or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_create",
+        target_type="policy_release",
+        target_id=created.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "target_env": payload.target_env,
+            "state": payload.state,
+        },
+    )
+    return created
+
+
+@app.post("/policy/releases/promote")
+def promote_policy_release_endpoint(
+    payload: PolicyReleasePromoteRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import promote_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        promoted = promote_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            source_env=payload.source_env,
+            target_env=payload.target_env,
+            state=payload.state,
+            effective_at=payload.effective_at,
+            created_by=payload.created_by or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_promote",
+        target_type="policy_release",
+        target_id=promoted.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "source_env": payload.source_env,
+            "target_env": payload.target_env,
+            "state": payload.state,
+        },
+    )
+    return promoted
+
+
+@app.post("/policy/releases/{release_id}/activate")
+def activate_policy_release_endpoint(
+    release_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import activate_policy_release
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        activated = activate_policy_release(
+            tenant_id=effective_tenant,
+            release_id=release_id,
+            actor_id=auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_activate",
+        target_type="policy_release",
+        target_id=release_id,
+        metadata={"policy_id": activated.get("policy_id"), "target_env": activated.get("target_env")},
+    )
+    return activated
+
+
+@app.post("/policy/releases/rollback")
+def rollback_policy_release_endpoint(
+    payload: PolicyReleaseRollbackRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import rollback_policy_release
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        rolled_back = rollback_policy_release(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            target_env=payload.target_env,
+            to_release_id=payload.to_release_id,
+            actor_id=payload.actor_id or auth.principal_id,
+            change_ticket=payload.change_ticket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_rollback",
+        target_type="policy_release",
+        target_id=rolled_back.get("release_id"),
+        metadata={
+            "policy_id": payload.policy_id,
+            "target_env": payload.target_env,
+            "rollback_to_release_id": payload.to_release_id,
+        },
+    )
+    return rolled_back
+
+
+@app.post("/policy/releases/scheduler/run")
+def run_policy_release_scheduler_endpoint(
+    tenant_id: Optional[str] = None,
+    now: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import run_policy_release_scheduler
+
+    effective_tenant = _effective_tenant(auth, tenant_id) if tenant_id else None
+    result = run_policy_release_scheduler(
+        tenant_id=effective_tenant,
+        actor_id=auth.principal_id,
+        now=now,
+    )
+    log_security_event(
+        tenant_id=effective_tenant or (auth.tenant_id if auth and auth.tenant_id else "default"),
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_release_scheduler_run",
+        target_type="policy_release",
+        target_id="scheduler",
+        metadata={"activated_count": result.get("activated_count")},
+    )
+    return result
+
+
+@app.get("/policy/releases/active")
+def get_active_policy_release_endpoint(
+    policy_id: str,
+    target_env: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.releases import get_active_policy_release
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_active_policy_release(
+        tenant_id=effective_tenant,
+        policy_id=policy_id,
+        target_env=target_env,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Active policy release not found")
+    return payload
+
+
 @app.post("/auth/api-keys")
 def create_scoped_api_key(
     payload: CreateApiKeyRequest,
@@ -1929,6 +2171,44 @@ def replay_stored_decision(
         target_id=decision_id,
         metadata={"repo": report.get("repo"), "pr_number": report.get("pr_number")},
     )
+    return report
+
+
+@app.get("/decisions/{decision_id}/policy-snapshot")
+def get_decision_policy_snapshot(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.reader import AuditReader
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = AuditReader.get_decision_with_policy_snapshot(decision_id, tenant_id=effective_tenant)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Decision policy snapshot not found")
+    return payload
+
+
+@app.get("/decisions/{decision_id}/policy-snapshot/verify")
+def verify_decision_policy_snapshot(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.reader import AuditReader
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    report = AuditReader.verify_decision_policy_snapshot(decision_id, tenant_id=effective_tenant)
+    if not report.get("exists"):
+        raise HTTPException(status_code=404, detail="Decision policy snapshot binding not found")
     return report
 
 

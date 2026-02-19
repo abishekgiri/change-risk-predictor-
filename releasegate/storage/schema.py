@@ -630,6 +630,112 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS policy_resolved_snapshots (
+            tenant_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            snapshot_json JSONB NOT NULL,
+            schema_version TEXT NOT NULL,
+            compiler_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, snapshot_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_resolved_snapshots_tenant_hash
+        ON policy_resolved_snapshots(tenant_id, policy_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_resolved_snapshots_tenant_created
+        ON policy_resolved_snapshots(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_decision_records (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            issue_key TEXT,
+            transition_id TEXT,
+            actor_id TEXT,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason_codes_json JSONB NOT NULL,
+            signal_bundle_hash TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_decision_records_tenant_snapshot
+        ON policy_decision_records(tenant_id, snapshot_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_releases (
+            tenant_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            state TEXT NOT NULL,
+            effective_at TIMESTAMPTZ,
+            activated_at TIMESTAMPTZ,
+            created_by TEXT,
+            change_ticket TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, release_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_releases_tenant_scope_state
+        ON policy_releases(tenant_id, policy_id, target_env, state, effective_at, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS active_policy_pointers (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            active_release_id TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, policy_id, target_env)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_release_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_release_events_tenant_release_created
+        ON policy_release_events(tenant_id, release_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS metrics_events (
             tenant_id TEXT NOT NULL,
             event_id TEXT NOT NULL,

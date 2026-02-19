@@ -1037,6 +1037,173 @@ def _migration_20260218_016_decision_external_refs(cursor) -> None:
     )
 
 
+def _migration_20260219_017_policy_snapshot_rollout(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_resolved_snapshots (
+            tenant_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            compiler_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, snapshot_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_resolved_snapshots_tenant_hash
+        ON policy_resolved_snapshots(tenant_id, policy_hash)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_resolved_snapshots_tenant_created
+        ON policy_resolved_snapshots(tenant_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_resolved_snapshots_update
+        BEFORE UPDATE ON policy_resolved_snapshots
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy snapshots are immutable: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_resolved_snapshots_delete
+        BEFORE DELETE ON policy_resolved_snapshots
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy snapshots are immutable: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_decision_records (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            issue_key TEXT,
+            transition_id TEXT,
+            actor_id TEXT,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL,
+            signal_bundle_hash TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_decision_records_tenant_snapshot
+        ON policy_decision_records(tenant_id, snapshot_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_decision_records_update
+        BEFORE UPDATE ON policy_decision_records
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy decision records are immutable: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_decision_records_delete
+        BEFORE DELETE ON policy_decision_records
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy decision records are immutable: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_releases (
+            tenant_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            state TEXT NOT NULL,
+            effective_at TEXT,
+            activated_at TEXT,
+            created_by TEXT,
+            change_ticket TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, release_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_releases_tenant_scope_state
+        ON policy_releases(tenant_id, policy_id, target_env, state, effective_at, created_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS active_policy_pointers (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            active_release_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, policy_id, target_env)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_release_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_release_events_tenant_release_created
+        ON policy_release_events(tenant_id, release_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_release_events_update
+        BEFORE UPDATE ON policy_release_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy release events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_release_events_delete
+        BEFORE DELETE ON policy_release_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy release events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1117,6 +1284,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260218_016_decision_external_refs",
         description="Add append-only decision reference index for cross-system search (e.g., Jira issue keys).",
         apply=_migration_20260218_016_decision_external_refs,
+    ),
+    Migration(
+        migration_id="20260219_017_policy_snapshot_rollout",
+        description="Add immutable resolved policy snapshots, decision bindings, and staged rollout control-plane tables.",
+        apply=_migration_20260219_017_policy_snapshot_rollout,
     ),
 ]
 

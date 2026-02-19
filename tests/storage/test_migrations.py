@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260218_")
+    assert current.startswith("20260219_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -33,6 +33,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260214_014_attestation_immutability" in migration_ids
         assert "20260218_015_jira_lock_ledger" in migration_ids
         assert "20260218_016_decision_external_refs" in migration_ids
+        assert "20260219_017_policy_snapshot_rollout" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -136,11 +137,39 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "decision_id", "repo", "ref_type", "ref_value"} <= ref_cols
         assert ref_pk == ["tenant_id", "decision_id", "ref_type", "ref_value"]
 
+        cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
+        snap_info = cur.fetchall()
+        snap_cols = {row[1] for row in snap_info}
+        snap_pk = [row[1] for row in sorted((r for r in snap_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "snapshot_id", "policy_hash", "snapshot_json"} <= snap_cols
+        assert snap_pk == ["tenant_id", "snapshot_id"]
+
+        cur.execute("PRAGMA table_info(policy_decision_records)")
+        pdr_info = cur.fetchall()
+        pdr_cols = {row[1] for row in pdr_info}
+        pdr_pk = [row[1] for row in sorted((r for r in pdr_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "decision_id", "snapshot_id", "policy_hash", "decision"} <= pdr_cols
+        assert pdr_pk == ["tenant_id", "decision_id"]
+
+        cur.execute("PRAGMA table_info(policy_releases)")
+        releases_info = cur.fetchall()
+        releases_cols = {row[1] for row in releases_info}
+        releases_pk = [row[1] for row in sorted((r for r in releases_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "release_id", "policy_id", "snapshot_id", "target_env", "state"} <= releases_cols
+        assert releases_pk == ["tenant_id", "release_id"]
+
+        cur.execute("PRAGMA table_info(active_policy_pointers)")
+        pointers_info = cur.fetchall()
+        pointers_cols = {row[1] for row in pointers_info}
+        pointers_pk = [row[1] for row in sorted((r for r in pointers_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "policy_id", "target_env", "active_release_id"} <= pointers_cols
+        assert pointers_pk == ["tenant_id", "policy_id", "target_env"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260218_016_decision_external_refs"
-        assert state[1] == "20260218_016_decision_external_refs"
+        assert state[0] == "20260219_017_policy_snapshot_rollout"
+        assert state[1] == "20260219_017_policy_snapshot_rollout"
     finally:
         conn.close()
 

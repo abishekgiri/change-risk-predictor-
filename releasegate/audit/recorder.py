@@ -12,6 +12,11 @@ from releasegate.decision.hashing import (
     compute_replay_hash,
 )
 from releasegate.decision.types import Decision
+from releasegate.policy.snapshots import (
+    build_resolved_policy_snapshot,
+    record_policy_decision_binding,
+    store_resolved_policy_snapshot,
+)
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -83,6 +88,74 @@ class AuditRecorder:
                     created_at,
                 ),
             )
+
+    @staticmethod
+    def _persist_resolved_policy_snapshot_record(
+        *,
+        tenant_id: str,
+        decision: Decision,
+        repo: str,
+        pr_number: Optional[int],
+    ) -> None:
+        policy_bindings = [
+            binding.model_dump(mode="json", exclude_none=True)
+            for binding in sorted(decision.policy_bindings, key=lambda b: b.policy_id)
+        ]
+        resolution_inputs = {
+            "tenant_id": tenant_id,
+            "repo": repo,
+            "pr_number": pr_number,
+            "context_id": decision.context_id,
+            "actor_id": decision.actor_id,
+            "evaluation_key": decision.evaluation_key,
+        }
+        if decision.input_snapshot:
+            resolution_inputs["input_context"] = {
+                "environment": decision.input_snapshot.get("environment"),
+                "transition_id": decision.input_snapshot.get("transition_id"),
+                "issue_key": decision.input_snapshot.get("issue_key"),
+            }
+
+        snapshot = build_resolved_policy_snapshot(
+            policy_id="releasegate.resolved_bundle",
+            policy_version=str(decision.policy_bundle_hash or "unknown"),
+            resolution_inputs=resolution_inputs,
+            resolved_policy={
+                "policy_bundle_hash": decision.policy_bundle_hash,
+                "policy_bindings": policy_bindings,
+            },
+        )
+        persisted = store_resolved_policy_snapshot(
+            tenant_id=tenant_id,
+            snapshot=snapshot,
+        )
+
+        issue_key: Optional[str] = None
+        try:
+            jira_keys = getattr(getattr(decision.enforcement_targets, "external", None), "jira", []) or []
+            if jira_keys:
+                issue_key = str(jira_keys[0]).strip() or None
+        except Exception:
+            issue_key = None
+        transition_id = None
+        if isinstance(decision.input_snapshot, dict):
+            raw_transition = decision.input_snapshot.get("transition_id")
+            if raw_transition is not None:
+                transition_id = str(raw_transition).strip() or None
+
+        reason_codes = [decision.reason_code] if decision.reason_code else []
+        record_policy_decision_binding(
+            tenant_id=tenant_id,
+            decision_id=decision.decision_id,
+            issue_key=issue_key,
+            transition_id=transition_id,
+            actor_id=decision.actor_id,
+            snapshot_id=str(persisted.get("snapshot_id") or ""),
+            policy_hash=str(persisted.get("policy_hash") or ""),
+            decision=decision.release_status.value if hasattr(decision.release_status, "value") else str(decision.release_status),
+            reason_codes=reason_codes,
+            signal_bundle_hash=decision.input_hash,
+        )
 
     @staticmethod
     def _extract_decision_refs(decision: Decision) -> List[tuple[str, str]]:
@@ -201,6 +274,12 @@ class AuditRecorder:
                 tenant_id=effective_tenant,
                 decision=decision,
                 created_at=created_at,
+            )
+            AuditRecorder._persist_resolved_policy_snapshot_record(
+                tenant_id=effective_tenant,
+                decision=decision,
+                repo=repo,
+                pr_number=pr_number,
             )
             try:
                 AuditRecorder._persist_decision_refs(
