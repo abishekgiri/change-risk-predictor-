@@ -224,6 +224,161 @@ It treats policy as versioned, deployable infrastructure.
 
 Together, ReleaseGate is a verifiable change authorization system.
 
+### Pillar 4: Audit and Evidence Integrity
+
+Pillar 4 guarantees that every governance decision is:
+
+- Deterministically reproducible
+- Formally reconstructable
+- Cross-system enforceable
+- Atomically recorded
+- Append-only and tamper-evident
+
+This layer transforms ReleaseGate from a validator into an auditable decision system.
+
+#### 1. Deterministic replay
+
+Every decision stores:
+
+- Canonicalized inputs
+- Canonicalized context
+- Compiled policy snapshot
+- `policy_hash`
+- `decision_hash`
+- `engine_version`
+
+Replay endpoint:
+
+```text
+POST /decisions/{id}/replay
+```
+
+Replay guarantees:
+
+- Uses stored policy snapshot (not current policy)
+- Returns structured response:
+  - `deterministic` block (stable across runs)
+  - `meta` block (run metadata)
+- Emits structured diff on mismatch
+- Persists immutable replay event
+
+If stored state is invalid:
+
+- Returns `match=false`
+- Emits `STORED_DECISION_INVALID`
+- Persists replay event with status `INVALID_STORED_STATE`
+
+Deterministic blocks are byte-identical across repeated replay runs.
+
+#### 2. Formal evidence graph
+
+Every decision produces a structured evidence graph.
+
+Node types:
+
+- `DECISION`
+- `POLICY` (snapshot-bound)
+- `SIGNAL`
+- `ARTIFACT` (proof-pack)
+- `OVERRIDE`
+- `DEPLOYMENT`
+- `INCIDENT`
+- `REPLAY`
+
+Edge types:
+
+- `USED_POLICY`
+- `USED_SIGNAL`
+- `PRODUCED_ARTIFACT`
+- `OVERRIDDEN_BY`
+- `AUTHORIZED_BY`
+- `RESOLVED_BY`
+
+Graph APIs:
+
+```text
+GET /decisions/{id}/evidence-graph
+GET /decisions/{id}/explain
+```
+
+`/explain` reconstructs decision reasoning in one call using graph traversal.
+
+Proof-pack artifacts and override nodes are auto-populated in the decision subgraph.
+
+#### 3. Cross-system correlation enforcement
+
+ReleaseGate enforces integrity across Jira, GitHub, CI, and deploy systems.
+
+Deploy gate:
+
+```text
+POST /gate/deploy/check
+```
+
+Default hard-deny conditions:
+
+- `CORRELATION_ID_MISSING`
+- No approved decision
+- Repo mismatch
+- Commit mismatch
+- Artifact digest mismatch
+- Environment policy violation
+
+Correlation derivation is disabled by default and must be explicitly enabled in policy.
+
+Incident close gate:
+
+```text
+POST /gate/incident/close-check
+```
+
+Default hard-deny conditions:
+
+- `DEPLOY_NOT_FOUND_FOR_CORRELATION`
+- Missing approved release chain
+
+Incident closure requires valid deploy linkage.
+
+#### 4. Atomic and append-only persistence
+
+Decision recording is fully atomic:
+
+- Decision
+- Policy snapshot
+- Evidence graph
+- Artifacts
+- References
+
+All are written in a single database transaction.
+
+If any write fails, the entire operation rolls back.
+
+Append-only enforcement:
+
+- `audit_decision_replays`
+- `evidence_nodes`
+- `evidence_edges`
+
+`UPDATE` and `DELETE` are rejected via database triggers.
+
+Postgres integration tests verify:
+
+- Append-only enforcement
+- Transaction rollback correctness
+- Idempotent retry behavior
+
+#### Pillar 4 acceptance status
+
+Verified via live proof script and full test suite.
+
+- Deterministic replay validated
+- Corrupt stored-state mismatch handling validated
+- Evidence graph completeness validated
+- Strict correlation enforcement validated
+- Atomicity and immutability validated
+
+Full suite: `281 passed, 4 skipped`.
+
 ## Core Capabilities
 
 ### 1. Transition-Level Hard Enforcement
