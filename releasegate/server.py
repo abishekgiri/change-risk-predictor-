@@ -29,6 +29,7 @@ from releasegate.security.audit import log_security_event
 from releasegate.security.api_keys import create_api_key, list_api_keys, revoke_api_key, rotate_api_key
 from releasegate.security.checkpoint_keys import list_checkpoint_signing_keys, rotate_checkpoint_signing_key
 from releasegate.security.webhook_keys import create_webhook_key, list_webhook_keys
+from releasegate.integrations.jira.routes import router as jira_router
 from releasegate.security.types import AuthContext
 from releasegate.audit.idempotency import (
     claim_idempotency,
@@ -96,10 +97,11 @@ configure_logging()
 # Initialize App
 app = FastAPI(
     title="ReleaseGate Webhook Listener",
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
+app.include_router(jira_router, prefix="/integrations/jira", tags=["jira"])
 logger = logging.getLogger(__name__)
 
 
