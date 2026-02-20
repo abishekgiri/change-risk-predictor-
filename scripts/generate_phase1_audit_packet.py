@@ -257,13 +257,6 @@ def _run_idempotency_conflict(
     headers["Idempotency-Key"] = idem_key
     full_url = f"{base_url.rstrip('/')}{endpoint}"
 
-    first_capture = _build_request_capture(
-        name="05-idempotency-conflict.first",
-        method=method,
-        endpoint=endpoint,
-        headers=headers,
-        body=request_a,
-    )
     first_result = _http_request(
         url=full_url,
         method=method,
@@ -273,13 +266,16 @@ def _run_idempotency_conflict(
     )
     _ensure_status(first_result.status_code, int(scenario.get("first_expected_status", 200)), scenario="idempotency.first")
 
-    second_capture = _build_request_capture(
-        name="05-idempotency-conflict",
-        method=method,
-        endpoint=endpoint,
-        headers=headers,
-        body=request_b,
-    )
+    second_capture = {
+        "scenario": "05-idempotency-conflict",
+        "captured_at": _utc_now_iso(),
+        "method": method.upper(),
+        "endpoint": endpoint,
+        "headers": _redact_headers(headers),
+        "idempotency_key": idem_key,
+        "first_request_body": request_a,
+        "conflict_request_body": request_b,
+    }
     second_result = _http_request(
         url=full_url,
         method=method,
@@ -289,11 +285,18 @@ def _run_idempotency_conflict(
     )
     _ensure_status(second_result.status_code, int(scenario.get("expected_status", 409)), scenario="idempotency.second")
 
-    first_response_capture = _build_response_capture(name="05-idempotency-conflict.first", result=first_result)
-    second_response_capture = _build_response_capture(name="05-idempotency-conflict", result=second_result)
+    second_response_capture = {
+        "scenario": "05-idempotency-conflict",
+        "captured_at": _utc_now_iso(),
+        "status_code": second_result.status_code,
+        "headers": second_result.headers,
+        "body": second_result.body_json,
+        "first_call": {
+            "status_code": first_result.status_code,
+            "body": first_result.body_json,
+        },
+    }
 
-    _json_dump(output_dir / "05-idempotency-conflict.first.request.json", first_capture)
-    _json_dump(output_dir / "05-idempotency-conflict.first.response.json", first_response_capture)
     _json_dump(output_dir / "05-idempotency-conflict.request.json", second_capture)
     _json_dump(output_dir / "05-idempotency-conflict.response.json", second_response_capture)
 
