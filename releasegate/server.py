@@ -1516,20 +1516,6 @@ def simulate_decision_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    log_security_event(
-        tenant_id=effective_tenant,
-        principal_id=auth.principal_id,
-        auth_method=auth.auth_method,
-        action="policy_simulate_decision",
-        target_type="policy_registry",
-        target_id=str(payload.policy_id or payload.transition_id),
-        metadata={
-            "transition_id": payload.transition_id,
-            "project_id": payload.project_id,
-            "workflow_id": payload.workflow_id,
-            "policy_id": payload.policy_id,
-        },
-    )
     return result
 
 

@@ -1,4 +1,5 @@
 import os
+import sqlite3
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +16,15 @@ def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+
+
+def _table_count(table_name: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
 
 
 def test_policy_registry_api_create_activate_and_list():
@@ -156,3 +166,47 @@ def test_policy_registry_api_blocks_activation_when_lint_errors_exist():
     )
     assert activate_resp.status_code == 400
     assert "lint errors" in activate_resp.text.lower()
+
+
+def test_simulate_decision_endpoint_has_no_persistence_side_effects():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api")
+
+    create_resp = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "31",
+            "status": "ACTIVE",
+            "policy_json": {
+                "strict_fail_closed": True,
+                "transition_rules": [{"transition_id": "31", "result": "ALLOW"}],
+            },
+        },
+    )
+    assert create_resp.status_code == 200, create_resp.text
+
+    before_decisions = _table_count("audit_decisions")
+    before_idempotency = _table_count("idempotency_keys")
+    before_security = _table_count("security_audit_events")
+
+    simulate_resp = client.post(
+        "/simulate-decision",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "issue_key": "RG-31",
+            "transition_id": "31",
+            "project_id": "PROJ",
+            "workflow_id": "wf-release",
+            "environment": "prod",
+            "context": {"org_id": "tenant-registry-api"},
+        },
+    )
+    assert simulate_resp.status_code == 200, simulate_resp.text
+
+    assert _table_count("audit_decisions") == before_decisions
+    assert _table_count("idempotency_keys") == before_idempotency
+    assert _table_count("security_audit_events") == before_security

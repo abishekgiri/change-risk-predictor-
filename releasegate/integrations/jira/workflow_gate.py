@@ -899,6 +899,22 @@ class WorkflowGate:
                 for policy_id in (registry_resolution.get("component_policy_ids") or [])
                 if str(policy_id).strip()
             ]
+            registry_component_policies: List[Dict[str, Any]] = []
+            for component in (registry_resolution.get("components") or []):
+                if not isinstance(component, dict):
+                    continue
+                component_id = str(component.get("policy_id") or "").strip()
+                if not component_id:
+                    continue
+                registry_component_policies.append(
+                    {
+                        "policy_id": component_id,
+                        "version": component.get("version"),
+                        "scope_type": component.get("scope_type"),
+                        "scope_id": component.get("scope_id"),
+                        "policy_hash": component.get("policy_hash"),
+                    }
+                )
             if registry_effective_hash and registry_component_ids:
                 policy_bindings.append(
                     PolicyBinding(
@@ -909,6 +925,7 @@ class WorkflowGate:
                         policy={
                             "effective_policy_hash": registry_effective_hash,
                             "component_policy_ids": registry_component_ids,
+                            "component_policies": registry_component_policies,
                             "effective_policy": registry_effective_policy,
                         },
                     )
@@ -1011,6 +1028,7 @@ class WorkflowGate:
                     "registry_policy": {
                         "effective_policy_hash": registry_effective_hash,
                         "component_policy_ids": registry_component_ids,
+                        "component_policies": registry_component_policies,
                         "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
                     },
                     "strict_mode": strict_mode,

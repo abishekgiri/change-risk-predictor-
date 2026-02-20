@@ -476,6 +476,8 @@ def activate_registry_policy(
 
     if policy.get("lint_errors"):
         raise ValueError("policy has lint errors and cannot be activated")
+    if str(policy.get("status") or "").upper() == "ACTIVE":
+        return policy
 
     now_iso = _utc_now()
     supersedes_policy_id: Optional[str] = None
