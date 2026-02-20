@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from releasegate.audit.overrides import get_active_override, record_override, verify_override_chain
 from releasegate.audit.reader import AuditReader
@@ -87,6 +87,7 @@ def test_get_active_override_by_target_is_tenant_scoped():
     repo = f"tenant-active-{uuid.uuid4().hex[:8]}"
     pr_number = 33
     target_id = f"{repo}#{pr_number}"
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     record_override(
         repo=repo,
         pr_number=pr_number,
@@ -97,6 +98,7 @@ def test_get_active_override_by_target_is_tenant_scoped():
         tenant_id="tenant-alpha",
         target_type="pr",
         target_id=target_id,
+        expires_at=expires_at,
     )
     record_override(
         repo=repo,
@@ -108,6 +110,7 @@ def test_get_active_override_by_target_is_tenant_scoped():
         tenant_id="tenant-beta",
         target_type="pr",
         target_id=target_id,
+        expires_at=expires_at,
     )
     active_alpha = get_active_override(tenant_id="tenant-alpha", target_type="pr", target_id=target_id)
     active_beta = get_active_override(tenant_id="tenant-beta", target_type="pr", target_id=target_id)

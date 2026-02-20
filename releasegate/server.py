@@ -1814,6 +1814,10 @@ def create_manual_override(
         tenant_id=effective_tenant,
         target_type=effective_target_type,
         target_id=effective_target_id,
+        ttl_seconds=validation.ttl_seconds,
+        expires_at=validation.expires_at,
+        requested_by=auth.principal_id,
+        approved_by=auth.principal_id,
     )
     from releasegate.evidence.graph import record_override_evidence
 
@@ -2638,6 +2642,7 @@ def explain_decision_endpoint(
 @app.post("/gate/deploy/check")
 def deploy_gate_check_endpoint(
     payload: DeployGateCheckRequest,
+    x_idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
         scopes=["enforcement:write"],
@@ -2647,6 +2652,50 @@ def deploy_gate_check_endpoint(
     from releasegate.correlation.enforcement import evaluate_deploy_gate
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    operation = "deploy_gate_check"
+    idem_key = (
+        str(x_idempotency_key or "").strip()
+        or derive_system_idempotency_key(
+            tenant_id=effective_tenant,
+            operation=operation,
+            identity={
+                "decision_id": payload.decision_id,
+                "issue_key": payload.issue_key,
+                "correlation_id": payload.correlation_id,
+                "deploy_id": payload.deploy_id,
+                "repo": payload.repo,
+                "env": payload.env,
+                "commit_sha": payload.commit_sha,
+                "artifact_digest": payload.artifact_digest,
+                "principal_id": auth.principal_id,
+            },
+        )
+    )
+    try:
+        claim = claim_idempotency(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+            request_payload={
+                **payload.model_dump(mode="json"),
+                "tenant_id": effective_tenant,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if claim.state == "replay" and claim.response is not None:
+        return claim.response
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        if replayed is not None:
+            return replayed
+        raise HTTPException(status_code=409, detail="Deploy gate check is already in progress")
+
     result = evaluate_deploy_gate(
         tenant_id=effective_tenant,
         decision_id=payload.decision_id,
@@ -2659,6 +2708,10 @@ def deploy_gate_check_endpoint(
         artifact_digest=payload.artifact_digest,
         policy_overrides=payload.policy_overrides,
     )
+    result = {
+        **result,
+        "idempotency_key": idem_key,
+    }
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -2673,7 +2726,16 @@ def deploy_gate_check_endpoint(
             "env": payload.env,
             "decision_id": result.get("decision_id"),
             "correlation_id": result.get("correlation_id"),
+            "idempotency_key": idem_key,
         },
+    )
+    complete_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idem_key,
+        response_payload=result,
+        resource_type="deployment",
+        resource_id=str(payload.deploy_id or result.get("correlation_id") or payload.repo),
     )
     return result
 
@@ -2681,6 +2743,7 @@ def deploy_gate_check_endpoint(
 @app.post("/gate/incident/close-check")
 def incident_close_check_endpoint(
     payload: IncidentCloseCheckRequest,
+    x_idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
         scopes=["enforcement:write"],
@@ -2690,6 +2753,49 @@ def incident_close_check_endpoint(
     from releasegate.correlation.enforcement import evaluate_incident_close_gate
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    operation = "incident_close_gate_check"
+    idem_key = (
+        str(x_idempotency_key or "").strip()
+        or derive_system_idempotency_key(
+            tenant_id=effective_tenant,
+            operation=operation,
+            identity={
+                "incident_id": payload.incident_id,
+                "decision_id": payload.decision_id,
+                "issue_key": payload.issue_key,
+                "correlation_id": payload.correlation_id,
+                "deploy_id": payload.deploy_id,
+                "repo": payload.repo,
+                "env": payload.env,
+                "principal_id": auth.principal_id,
+            },
+        )
+    )
+    try:
+        claim = claim_idempotency(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+            request_payload={
+                **payload.model_dump(mode="json"),
+                "tenant_id": effective_tenant,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if claim.state == "replay" and claim.response is not None:
+        return claim.response
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        if replayed is not None:
+            return replayed
+        raise HTTPException(status_code=409, detail="Incident close gate check is already in progress")
+
     result = evaluate_incident_close_gate(
         tenant_id=effective_tenant,
         incident_id=payload.incident_id,
@@ -2701,6 +2807,10 @@ def incident_close_check_endpoint(
         env=payload.env,
         policy_overrides=payload.policy_overrides,
     )
+    result = {
+        **result,
+        "idempotency_key": idem_key,
+    }
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -2714,7 +2824,16 @@ def incident_close_check_endpoint(
             "decision_id": result.get("decision_id"),
             "correlation_id": result.get("correlation_id"),
             "deploy_id": payload.deploy_id,
+            "idempotency_key": idem_key,
         },
+    )
+    complete_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idem_key,
+        response_payload=result,
+        resource_type="incident",
+        resource_id=str(payload.incident_id),
     )
     return result
 

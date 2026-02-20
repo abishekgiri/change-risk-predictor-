@@ -1498,6 +1498,24 @@ def _migration_20260220_020_replay_status_column(cursor) -> None:
     )
 
 
+def _migration_20260220_021_override_expiry_metadata(cursor) -> None:
+    if not _column_exists(cursor, "audit_overrides", "ttl_seconds"):
+        cursor.execute("ALTER TABLE audit_overrides ADD COLUMN ttl_seconds INTEGER")
+    if not _column_exists(cursor, "audit_overrides", "expires_at"):
+        cursor.execute("ALTER TABLE audit_overrides ADD COLUMN expires_at TEXT")
+    if not _column_exists(cursor, "audit_overrides", "requested_by"):
+        cursor.execute("ALTER TABLE audit_overrides ADD COLUMN requested_by TEXT")
+    if not _column_exists(cursor, "audit_overrides", "approved_by"):
+        cursor.execute("ALTER TABLE audit_overrides ADD COLUMN approved_by TEXT")
+
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
+        ON audit_overrides(tenant_id, expires_at)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1598,6 +1616,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260220_020_replay_status_column",
         description="Add replay status classification for invalid stored state and replay outcomes.",
         apply=_migration_20260220_020_replay_status_column,
+    ),
+    Migration(
+        migration_id="20260220_021_override_expiry_metadata",
+        description="Add override TTL/expiry metadata columns and tenant expiry index.",
+        apply=_migration_20260220_021_override_expiry_metadata,
     ),
 ]
 

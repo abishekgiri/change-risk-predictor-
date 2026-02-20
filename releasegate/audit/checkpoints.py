@@ -135,7 +135,9 @@ def _load_rows(repo: str, pr: Optional[int] = None, tenant_id: Optional[str] = N
     effective_tenant = resolve_tenant_id(tenant_id)
     storage = get_storage_backend()
     query = """
-        SELECT override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
+        SELECT override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason,
+               target_type, target_id, idempotency_key, previous_hash, event_hash, created_at,
+               ttl_seconds, expires_at, requested_by, approved_by
         FROM audit_overrides
         WHERE tenant_id = ? AND repo = ?
     """
@@ -165,6 +167,14 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         payload["target_id"] = row["target_id"]
     if row.get("idempotency_key") is not None:
         payload["idempotency_key"] = row["idempotency_key"]
+    if row.get("ttl_seconds") is not None:
+        payload["ttl_seconds"] = row["ttl_seconds"]
+    if row.get("expires_at") is not None:
+        payload["expires_at"] = row["expires_at"]
+    if row.get("requested_by") is not None:
+        payload["requested_by"] = row["requested_by"]
+    if row.get("approved_by") is not None:
+        payload["approved_by"] = row["approved_by"]
     return payload
 
 

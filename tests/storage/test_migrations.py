@@ -37,6 +37,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260219_018_lock_chain_governance" in migration_ids
         assert "20260220_019_replay_and_evidence_graph" in migration_ids
         assert "20260220_020_replay_status_column" in migration_ids
+        assert "20260220_021_override_expiry_metadata" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -52,7 +53,13 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         override_info = cur.fetchall()
         override_cols = {row[1] for row in override_info}
         override_pk = [row[1] for row in sorted((r for r in override_info if r[5] > 0), key=lambda r: r[5])]
-        assert "tenant_id" in override_cols
+        assert {
+            "tenant_id",
+            "ttl_seconds",
+            "expires_at",
+            "requested_by",
+            "approved_by",
+        } <= override_cols
         assert override_pk == ["tenant_id", "override_id"]
 
         cur.execute("PRAGMA table_info(audit_checkpoints)")
@@ -236,8 +243,8 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260220_020_replay_status_column"
-        assert state[1] == "20260220_020_replay_status_column"
+        assert state[0] == "20260220_021_override_expiry_metadata"
+        assert state[1] == "20260220_021_override_expiry_metadata"
     finally:
         conn.close()
 

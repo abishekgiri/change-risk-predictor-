@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.correlation.enforcement import compute_release_correlation_id
+from releasegate.config import DB_PATH
 from releasegate.decision.types import Decision, EnforcementTargets, PolicyBinding
 from releasegate.server import app
 from tests.auth_helpers import jwt_headers
@@ -333,3 +335,99 @@ def test_incident_close_gate_blocks_on_correlation_mismatch():
     body = resp.json()
     assert body["allow"] is False
     assert body["reason_code"] == "CORRELATION_ID_MISMATCH"
+
+
+def test_deploy_gate_idempotency_replays_same_response(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-508"
+    commit_sha = "8888888888888888888888888888888888888888"
+    decision = _seed_allowed_decision(repo, 35, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    idem = f"idem-{uuid.uuid4().hex}"
+    body = {
+        "tenant_id": "tenant-test",
+        "decision_id": decision.decision_id,
+        "issue_key": issue_key,
+        "correlation_id": correlation_id,
+        "deploy_id": "deploy-idem-1",
+        "repo": repo,
+        "env": "prod",
+        "commit_sha": commit_sha,
+    }
+    headers = {
+        **jwt_headers(scopes=["enforcement:write"]),
+        "Idempotency-Key": idem,
+    }
+    first = client.post("/gate/deploy/check", json=body, headers=headers)
+    second = client.post("/gate/deploy/check", json=body, headers=headers)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT status
+            FROM idempotency_keys
+            WHERE tenant_id = ? AND operation = ? AND idem_key = ?
+            """,
+            ("tenant-test", "deploy_gate_check", idem),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "completed"
+    finally:
+        conn.close()
+
+
+def test_incident_close_gate_idempotency_key_conflict_returns_409():
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-509"
+    decision = _seed_allowed_decision(repo, 36, issue_key, "9999999999999999999999999999999999999999")
+    idem = f"idem-{uuid.uuid4().hex}"
+
+    headers = {
+        **jwt_headers(scopes=["enforcement:write"]),
+        "Idempotency-Key": idem,
+    }
+    first = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-IDEM-1",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": "corr-a",
+            "deploy_id": "deploy-a",
+            "repo": repo,
+            "env": "prod",
+        },
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    conflict = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-IDEM-2",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": "corr-b",
+            "deploy_id": "deploy-b",
+            "repo": repo,
+            "env": "prod",
+        },
+        headers=headers,
+    )
+    assert conflict.status_code == 409

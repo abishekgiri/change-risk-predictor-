@@ -85,6 +85,14 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if row.get("idempotency_key") is not None:
         payload["idempotency_key"] = row.get("idempotency_key")
+    if row.get("ttl_seconds") is not None:
+        payload["ttl_seconds"] = row.get("ttl_seconds")
+    if row.get("expires_at") is not None:
+        payload["expires_at"] = row.get("expires_at")
+    if row.get("requested_by") is not None:
+        payload["requested_by"] = row.get("requested_by")
+    if row.get("approved_by") is not None:
+        payload["approved_by"] = row.get("approved_by")
     return payload
 
 

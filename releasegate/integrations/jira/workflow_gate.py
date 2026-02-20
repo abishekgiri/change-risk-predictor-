@@ -407,6 +407,13 @@ class WorkflowGate:
             )
             try:
                 from releasegate.audit.overrides import record_override
+                ttl_seconds_value = None
+                raw_ttl_seconds = request.context_overrides.get("override_ttl_seconds")
+                if raw_ttl_seconds is not None:
+                    try:
+                        ttl_seconds_value = int(raw_ttl_seconds)
+                    except Exception:
+                        ttl_seconds_value = None
                 override_idempotency_key = hashlib.sha256(
                     f"{evaluation_key}:override-ledger:{request.issue_key}:{request.actor_account_id}".encode("utf-8")
                 ).hexdigest()
@@ -419,6 +426,18 @@ class WorkflowGate:
                     reason=normalized_override_reason,
                     idempotency_key=override_idempotency_key,
                     tenant_id=tenant_id,
+                    ttl_seconds=ttl_seconds_value,
+                    expires_at=(
+                        override_expires_at.isoformat() if override_expires_at is not None else None
+                    ),
+                    requested_by=(
+                        request.context_overrides.get("override_requested_by")
+                        or request.context_overrides.get("override_requested_by_email")
+                        or request.context_overrides.get("override_requested_by_account_id")
+                        or request.actor_email
+                        or request.actor_account_id
+                    ),
+                    approved_by=request.actor_email or request.actor_account_id,
                 )
                 log_security_event(
                     tenant_id=tenant_id,

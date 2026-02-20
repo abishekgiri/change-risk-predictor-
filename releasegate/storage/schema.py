@@ -108,6 +108,10 @@ def _init_postgres_schema() -> str:
             idempotency_key TEXT,
             previous_hash TEXT,
             event_hash TEXT NOT NULL,
+            ttl_seconds INTEGER,
+            expires_at TIMESTAMPTZ,
+            requested_by TEXT,
+            approved_by TEXT,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, override_id)
         )
@@ -141,6 +145,12 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_overrides_tenant_repo_pr
         ON audit_overrides(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
+        ON audit_overrides(tenant_id, expires_at)
         """
     )
     cur.execute(
@@ -1281,6 +1291,10 @@ def _init_postgres_schema() -> str:
     # Ensure existing Postgres deployments are hardened to tenant-scoped PKs.
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS tenant_id TEXT")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS requested_by TEXT")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS approved_by TEXT")
     cur.execute("ALTER TABLE audit_checkpoints ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_proof_packs ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("UPDATE audit_decisions SET tenant_id = 'default' WHERE tenant_id IS NULL OR btrim(tenant_id) = ''")
@@ -1360,6 +1374,12 @@ def _init_postgres_schema() -> str:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
         ON audit_overrides(tenant_id, repo, previous_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
+        ON audit_overrides(tenant_id, expires_at)
         """
     )
     cur.execute(
@@ -1668,6 +1688,10 @@ def init_db() -> str:
             idempotency_key TEXT,
             previous_hash TEXT,
             event_hash TEXT NOT NULL,
+            ttl_seconds INTEGER,
+            expires_at TEXT,
+            requested_by TEXT,
+            approved_by TEXT,
             created_at TIMESTAMP NOT NULL,
             PRIMARY KEY (tenant_id, override_id)
         )
