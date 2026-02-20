@@ -874,6 +874,45 @@ class WorkflowGate:
             compiled_policy_map = self._compiled_policy_map()
             unresolved_policy_ids = sorted(set(policies) - set(compiled_policy_map.keys()))
             policy_bindings = self._build_policy_bindings(policies, compiled_policy_map, tenant_id=tenant_id)
+            registry_resolution: Dict[str, Any] = {}
+            try:
+                from releasegate.policy.registry import resolve_registry_policy
+
+                registry_resolution = resolve_registry_policy(
+                    tenant_id=tenant_id,
+                    org_id=request.context_overrides.get("org_id") or tenant_id,
+                    project_id=request.project_key,
+                    workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
+                    transition_id=request.transition_id,
+                    rollout_key=request.issue_key,
+                )
+            except Exception:
+                registry_resolution = {}
+            registry_effective_policy = (
+                registry_resolution.get("effective_policy")
+                if isinstance(registry_resolution.get("effective_policy"), dict)
+                else {}
+            )
+            registry_effective_hash = str(registry_resolution.get("effective_policy_hash") or "").strip()
+            registry_component_ids = [
+                str(policy_id)
+                for policy_id in (registry_resolution.get("component_policy_ids") or [])
+                if str(policy_id).strip()
+            ]
+            if registry_effective_hash and registry_component_ids:
+                policy_bindings.append(
+                    PolicyBinding(
+                        policy_id="registry.effective",
+                        policy_version="1",
+                        policy_hash=registry_effective_hash,
+                        tenant_id=tenant_id,
+                        policy={
+                            "effective_policy_hash": registry_effective_hash,
+                            "component_policy_ids": registry_component_ids,
+                            "effective_policy": registry_effective_policy,
+                        },
+                    )
+                )
             bindings_hash = self._policy_bindings_hash(policy_bindings)
             
             # Run ALL policies (Engine doesn't support filtering input yet)
@@ -906,8 +945,8 @@ class WorkflowGate:
                         error_code="INVALID_POLICY_REFERENCE",
                         policy_hash=policy_hash,
                         policy_bindings=policy_bindings,
-                        input_snapshot=invalid_detail,
-                    )
+                input_snapshot=invalid_detail,
+            )
 
                 invalid = self._build_decision(
                     request,
@@ -969,6 +1008,11 @@ class WorkflowGate:
                     "request": request.model_dump(mode="json"),
                     "signal_map": signal_map,
                     "policies_requested": policies,
+                    "registry_policy": {
+                        "effective_policy_hash": registry_effective_hash,
+                        "component_policy_ids": registry_component_ids,
+                        "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                    },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
                 },
