@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -303,3 +304,61 @@ def test_registry_rollout_selection_is_deterministic_for_same_key(clean_db):
     assert first["component_policy_ids"] == second["component_policy_ids"]
     assert first["effective_policy_hash"] == second["effective_policy_hash"]
     assert first["components"] == second["components"]
+
+
+def test_registry_concurrent_activation_keeps_single_active(clean_db):
+    tenant = "tenant-registry"
+    first = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="transition",
+        scope_id="77",
+        policy_json={"marker": "first"},
+        created_by="alice",
+        status="DRAFT",
+    )
+    second = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="transition",
+        scope_id="77",
+        policy_json={"marker": "second"},
+        created_by="alice",
+        status="DRAFT",
+    )
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _activate(policy_id: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            activate_registry_policy(
+                tenant_id=tenant,
+                policy_id=policy_id,
+                actor_id="alice",
+            )
+        except Exception as exc:  # pragma: no cover - defensive for race diagnostics
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_activate, args=(first["policy_id"],))
+    t2 = threading.Thread(target=_activate, args=(second["policy_id"],))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        active_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM policy_registry_entries
+            WHERE tenant_id = ? AND scope_type = 'transition' AND scope_id = '77' AND status = 'ACTIVE'
+            """,
+            (tenant,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert active_count == 1
