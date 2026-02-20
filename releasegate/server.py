@@ -1782,6 +1782,10 @@ def create_manual_override(
             detail={
                 "error_code": reason_code,
                 "message": f"Override blocked by separation-of-duties policy: {message}",
+                "rule": sod_violation.get("rule"),
+                "left": sod_violation.get("left"),
+                "right": sod_violation.get("right"),
+                "conflicting_principals": list(sod_violation.get("conflicting_principals") or []),
             },
         )
 

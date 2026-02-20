@@ -110,6 +110,34 @@ Policies evaluate these signals declaratively.
 
 A workflow transition cannot move forward unless ReleaseGate explicitly authorizes it under a versioned, bound policy snapshot.
 
+#### Phase 1 operational controls
+
+- Override TTL boundary rule: override is active while `evaluation_time <= expires_at`; it is expired when `evaluation_time > expires_at`.
+- Separation of duties checks:
+  - Override requester cannot approve the same override.
+  - PR author cannot approve override.
+  - Actor identities are normalized (case-insensitive) and can be mapped through alias sets.
+- Identity alias mapping format (context/policy override):
+
+```yaml
+separation_of_duties:
+  enabled: true
+  deny_self_approval: true
+  identity_aliases:
+    actor-alice:
+      - ACC-1234
+      - alice@example.com
+      - alice-gh
+```
+
+- Strict fail-closed behavior:
+  - Controlled by `RELEASEGATE_STRICT_FAIL_CLOSED` (global) and `policy_overrides.strict_fail_closed` (request-level).
+  - In strict mode, missing policy/risk/signals or dependency timeout/error resolves to `BLOCKED`.
+- Idempotency contract for deploy and incident gates:
+  - Header: `Idempotency-Key` (recommended; server derives one if omitted).
+  - Same key + same payload: returns the same stored response.
+  - Same key + different payload: returns `409 Conflict`.
+
 ### Pillar 2: Declarative Policy Engine and Immutable Rollout
 
 Pillar 2 transforms ReleaseGate from a rule checker into a governance platform.

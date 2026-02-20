@@ -263,7 +263,15 @@ class WorkflowGate:
                     reason_code=response_reason_code,
                     inputs_present={"override_requested": True},
                     policy_hash=self._current_policy_hash(),
-                    input_snapshot={"request": request.model_dump(mode="json")},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "sod_conflict": {
+                            "rule": sod_violation.get("rule"),
+                            "left": sod_violation.get("left"),
+                            "right": sod_violation.get("right"),
+                            "conflicting_principals": list(sod_violation.get("conflicting_principals") or []),
+                        },
+                    },
                 )
                 final_blocked = self._record_with_timeout(
                     blocked,

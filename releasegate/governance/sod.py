@@ -60,10 +60,14 @@ def evaluate_separation_of_duties(
         left = actor_map.get(left_key, set())
         right = actor_map.get(right_key, set())
         if left and right and left.intersection(right):
+            overlap = sorted(left.intersection(right))
             return {
                 "rule": str(rule.get("name") or f"{left_key}!={right_key}"),
                 "reason_code": str(rule.get("reason_code") or "SOD_CONFLICT"),
                 "message": str(rule.get("message") or "separation-of-duties conflict"),
+                "left": left_key,
+                "right": right_key,
+                "conflicting_principals": overlap,
             }
 
     deny_self = bool(cfg.get("deny_self_approval", True))
@@ -71,10 +75,14 @@ def evaluate_separation_of_duties(
         requester = actor_map.get("override_requested_by", set())
         approver = actor_map.get("override_approved_by", set())
         if requester and approver and requester.intersection(approver):
+            overlap = sorted(requester.intersection(approver))
             return {
                 "rule": "deny-self-approval",
                 "reason_code": "SOD_REQUESTER_APPROVER_CONFLICT",
                 "message": "override requestor cannot self-approve",
+                "left": "override_requested_by",
+                "right": "override_approved_by",
+                "conflicting_principals": overlap,
             }
 
     return None

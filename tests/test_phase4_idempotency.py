@@ -251,6 +251,9 @@ def test_manual_override_endpoint_blocks_sod_requester_equals_approver():
     response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
     assert response.status_code == 403
     assert response.json()["detail"]["error_code"] == "SOD_REQUESTER_APPROVER_CONFLICT"
+    assert response.json()["detail"]["left"] == "override_requested_by"
+    assert response.json()["detail"]["right"] == "override_approved_by"
+    assert requester in response.json()["detail"]["conflicting_principals"]
 
 
 def test_manual_override_endpoint_blocks_sod_pr_author_equals_approver():
@@ -275,6 +278,9 @@ def test_manual_override_endpoint_blocks_sod_pr_author_equals_approver():
     response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
     assert response.status_code == 403
     assert response.json()["detail"]["error_code"] == "SOD_PR_AUTHOR_APPROVER_CONFLICT"
+    assert response.json()["detail"]["left"] == "pr_author"
+    assert response.json()["detail"]["right"] == "override_approved_by"
+    assert approver in response.json()["detail"]["conflicting_principals"]
 
 
 def test_parallel_override_recording_with_same_key_produces_single_row():
