@@ -871,6 +871,21 @@ python -m releasegate.cli lint-policies
 
 ---
 
+## Phase 1 Audit Packet
+
+Generate a 5-scenario Phase 1 smoke evidence packet (request/response pairs, manifest, zip):
+
+```bash
+python scripts/generate_phase1_audit_packet.py \
+  --config scripts/phase1_audit_packet.example.json \
+  --output-dir /tmp/phase1-audit-packet \
+  --zip-path /tmp/Pillar1-AuditPacket.zip
+```
+
+Before running, copy `scripts/phase1_audit_packet.example.json` and replace placeholders with real tenant/auth/decision/correlation values.
+
+---
+
 ## Development
 
 ### Install dependencies
