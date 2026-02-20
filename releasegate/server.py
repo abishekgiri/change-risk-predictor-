@@ -169,6 +169,34 @@ class PolicyReleaseRollbackRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class PolicyRegistryCreateRequest(BaseModel):
+    scope_type: str
+    scope_id: str
+    policy_json: Dict[str, Any]
+    status: str = "DRAFT"
+    rollout_percentage: int = Field(default=100, ge=0, le=100)
+    rollout_scope: Optional[str] = None
+    created_by: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class PolicyRegistryActivateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+
+
+class SimulateDecisionRequest(BaseModel):
+    actor: Optional[str] = None
+    issue_key: Optional[str] = None
+    transition_id: str
+    project_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    environment: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+    policy_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
 class DeployGateCheckRequest(BaseModel):
     tenant_id: Optional[str] = None
     decision_id: Optional[str] = None
@@ -1462,6 +1490,35 @@ def simulate_policy_impact(
         raise HTTPException(status_code=400, detail=f"Policy simulation failed: {exc}") from exc
 
 
+@app.post("/simulate-decision")
+def simulate_decision_endpoint(
+    payload: SimulateDecisionRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.policy.registry import simulate_registry_decision
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = simulate_registry_decision(
+            tenant_id=effective_tenant,
+            actor=payload.actor or auth.principal_id,
+            issue_key=payload.issue_key,
+            transition_id=payload.transition_id,
+            project_id=payload.project_id,
+            workflow_id=payload.workflow_id,
+            environment=payload.environment,
+            context=payload.context,
+            policy_id=payload.policy_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
 @app.get("/audit/proof-pack/{decision_id}")
 def audit_proof_pack(
     decision_id: str,
@@ -1963,6 +2020,133 @@ def publish_policy_bundle(
         "active": payload.activate,
         "policy_count": len(snapshot),
     }
+
+
+@app.post("/policies")
+def create_registry_policy_endpoint(
+    payload: PolicyRegistryCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import create_registry_policy
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        created = create_registry_policy(
+            tenant_id=effective_tenant,
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            policy_json=payload.policy_json,
+            status=payload.status,
+            rollout_percentage=payload.rollout_percentage,
+            rollout_scope=payload.rollout_scope,
+            created_by=payload.created_by or auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_registry_create",
+        target_type="policy_registry",
+        target_id=created.get("policy_id"),
+        metadata={
+            "scope_type": payload.scope_type,
+            "scope_id": payload.scope_id,
+            "status": created.get("status"),
+        },
+    )
+    return created
+
+
+@app.get("/policies")
+def list_registry_policies_endpoint(
+    tenant_id: Optional[str] = None,
+    scope_type: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import list_registry_policies
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "policies": list_registry_policies(
+            tenant_id=effective_tenant,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            status=status,
+            limit=max(1, min(limit, 500)),
+        ),
+    }
+
+
+@app.get("/policies/{policy_id}")
+def get_registry_policy_endpoint(
+    policy_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import get_registry_policy
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    policy = get_registry_policy(
+        tenant_id=effective_tenant,
+        policy_id=policy_id,
+    )
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return policy
+
+
+@app.post("/policies/{policy_id}/activate")
+def activate_registry_policy_endpoint(
+    policy_id: str,
+    payload: Optional[PolicyRegistryActivateRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import activate_registry_policy
+
+    activate_payload = payload or PolicyRegistryActivateRequest()
+    effective_tenant = _effective_tenant(auth, activate_payload.tenant_id)
+    try:
+        activated = activate_registry_policy(
+            tenant_id=effective_tenant,
+            policy_id=policy_id,
+            actor_id=activate_payload.actor_id or auth.principal_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_registry_activate",
+        target_type="policy_registry",
+        target_id=policy_id,
+        metadata={"scope_type": activated.get("scope_type"), "scope_id": activated.get("scope_id")},
+    )
+    return activated
 
 
 @app.post("/policy/releases")

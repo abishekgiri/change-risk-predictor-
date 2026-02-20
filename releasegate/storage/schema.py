@@ -886,6 +886,97 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS policy_registry_entries (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            policy_json JSONB NOT NULL,
+            policy_hash TEXT NOT NULL,
+            lint_errors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            lint_warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            rollout_percentage INTEGER NOT NULL DEFAULT 100,
+            rollout_scope TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            created_by TEXT,
+            activated_at TIMESTAMPTZ,
+            activated_by TEXT,
+            supersedes_policy_id TEXT,
+            PRIMARY KEY (tenant_id, policy_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_scope_version
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, version)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_active_scope
+        ON policy_registry_entries(tenant_id, scope_type, scope_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_scope_status_created
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_hash
+        ON policy_registry_entries(tenant_id, policy_hash, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_registry_payload_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            IF
+                NEW.scope_type IS DISTINCT FROM OLD.scope_type OR
+                NEW.scope_id IS DISTINCT FROM OLD.scope_id OR
+                NEW.version IS DISTINCT FROM OLD.version OR
+                NEW.policy_json IS DISTINCT FROM OLD.policy_json OR
+                NEW.policy_hash IS DISTINCT FROM OLD.policy_hash OR
+                NEW.lint_errors_json IS DISTINCT FROM OLD.lint_errors_json OR
+                NEW.lint_warnings_json IS DISTINCT FROM OLD.lint_warnings_json OR
+                NEW.rollout_percentage IS DISTINCT FROM OLD.rollout_percentage OR
+                NEW.rollout_scope IS DISTINCT FROM OLD.rollout_scope OR
+                NEW.created_at IS DISTINCT FROM OLD.created_at OR
+                NEW.created_by IS DISTINCT FROM OLD.created_by
+            THEN
+                RAISE EXCEPTION 'Policy registry payload is immutable: create a new version instead';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_payload_mutation'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_payload_mutation
+                BEFORE UPDATE ON policy_registry_entries
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_payload_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS metrics_events (
             tenant_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
