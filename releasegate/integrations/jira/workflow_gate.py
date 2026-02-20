@@ -25,6 +25,8 @@ from releasegate.observability.internal_metrics import incr
 from releasegate.security.audit import log_security_event
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.ttl_cache import TTLCache, file_fingerprint, stable_tuple, yaml_tree_fingerprint
+from releasegate.governance.sod import evaluate_separation_of_duties
+from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -100,6 +102,10 @@ class WorkflowGate:
         repo, pr_number = self._repo_and_pr(request)
         is_prod = request.environment.upper() == "PRODUCTION"
         strict_mode = self.strict_mode or is_prod
+        strict_mode = resolve_strict_fail_closed(
+            policy_overrides=request.context_overrides,
+            fallback=strict_mode,
+        ) or is_prod
         self._resolved_mode_hint = None
         self._resolved_gate_hint = None
         self._unresolved_gate_hint = None
@@ -217,15 +223,44 @@ class WorkflowGate:
                 request.context_overrides.get("override_created_by_account_id"),
                 request.context_overrides.get("override_created_by_email"),
             )
+            sod_violation = evaluate_separation_of_duties(
+                actors={
+                    "actor": actor_principals,
+                    "pr_author": pr_author_principals,
+                    "override_requested_by": override_requestor_principals,
+                    "override_approved_by": actor_principals,
+                },
+                config=request.context_overrides.get("separation_of_duties"),
+            )
+            if sod_violation:
+                reason_code = str(sod_violation.get("reason_code") or "SOD_CONFLICT")
+                message = str(sod_violation.get("message") or "separation-of-duties conflict")
+                if reason_code == "SOD_PR_AUTHOR_APPROVER_CONFLICT":
+                    detail = "PR author cannot approve override"
+                    unlock = ["Use an approver different from the PR author."]
+                    event = "jira.transition.override.sod_pr_author"
+                    eval_suffix = "override-sod-pr-author"
+                    response_reason_code = "SOD_PR_AUTHOR_CANNOT_OVERRIDE"
+                elif reason_code == "SOD_REQUESTER_APPROVER_CONFLICT":
+                    detail = "override requestor cannot self-approve"
+                    unlock = ["Use an approver different from the override requestor."]
+                    event = "jira.transition.override.sod_requestor"
+                    eval_suffix = "override-sod-requestor"
+                    response_reason_code = "SOD_REQUESTOR_CANNOT_SELF_APPROVE"
+                else:
+                    detail = message
+                    unlock = ["Use an approver different from the override requestor and PR author."]
+                    event = "jira.transition.override.sod_conflict"
+                    eval_suffix = "override-sod-conflict"
+                    response_reason_code = reason_code
 
-            if actor_principals and pr_author_principals and actor_principals.intersection(pr_author_principals):
                 blocked = self._build_decision(
                     request,
                     release_status=DecisionType.BLOCKED,
-                    message="BLOCKED: separation-of-duties violation (PR author cannot approve override)",
-                    evaluation_key=f"{evaluation_key}:override-sod-pr-author",
-                    unlock_conditions=["Use an approver different from the PR author."],
-                    reason_code="SOD_PR_AUTHOR_CANNOT_OVERRIDE",
+                    message=f"BLOCKED: separation-of-duties violation ({detail})",
+                    evaluation_key=f"{evaluation_key}:{eval_suffix}",
+                    unlock_conditions=unlock,
+                    reason_code=response_reason_code,
                     inputs_present={"override_requested": True},
                     policy_hash=self._current_policy_hash(),
                     input_snapshot={"request": request.model_dump(mode="json")},
@@ -240,48 +275,7 @@ class WorkflowGate:
                 )
                 self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
                 self._log_decision(
-                    event="jira.transition.override.sod_pr_author",
-                    request=request,
-                    decision=final_blocked,
-                    repo=repo,
-                    pr_number=pr_number,
-                    mode=strict_mode,
-                    gate=self._resolved_gate_hint,
-                )
-                return TransitionCheckResponse(
-                    allow=final_blocked.release_status != DecisionType.BLOCKED,
-                    reason=final_blocked.message,
-                    decision_id=final_blocked.decision_id,
-                    status=final_blocked.release_status.value,
-                    reason_code=final_blocked.reason_code,
-                    unlock_conditions=final_blocked.unlock_conditions,
-                    policy_hash=final_blocked.policy_bundle_hash,
-                    tenant_id=tenant_id,
-                )
-
-            if actor_principals and override_requestor_principals and actor_principals.intersection(override_requestor_principals):
-                blocked = self._build_decision(
-                    request,
-                    release_status=DecisionType.BLOCKED,
-                    message="BLOCKED: separation-of-duties violation (override requestor cannot self-approve)",
-                    evaluation_key=f"{evaluation_key}:override-sod-requestor",
-                    unlock_conditions=["Use an approver different from the override requestor."],
-                    reason_code="SOD_REQUESTOR_CANNOT_SELF_APPROVE",
-                    inputs_present={"override_requested": True},
-                    policy_hash=self._current_policy_hash(),
-                    input_snapshot={"request": request.model_dump(mode="json")},
-                )
-                final_blocked = self._record_with_timeout(
-                    blocked,
-                    repo=repo,
-                    pr_number=pr_number,
-                    tenant_id=tenant_id,
-                    strict_mode=strict_mode,
-                    dependency_context="storage",
-                )
-                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
-                self._log_decision(
-                    event="jira.transition.override.sod_requestor",
+                    event=event,
                     request=request,
                     decision=final_blocked,
                     repo=repo,
@@ -569,7 +563,11 @@ class WorkflowGate:
                     pass
 
         if self._is_missing_risk_metadata(risk_meta):
-            if strict_mode:
+            strict_failure = apply_strict_fail_closed(
+                strict_enabled=strict_mode,
+                risk_present=False,
+            )
+            if strict_failure:
                 return self._deny(
                     request,
                     evaluation_key=f"{evaluation_key}:missing-risk",

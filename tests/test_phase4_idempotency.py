@@ -229,6 +229,54 @@ def test_manual_override_endpoint_requires_admin_role():
     assert response.status_code == 403
 
 
+def test_manual_override_endpoint_blocks_sod_requester_equals_approver():
+    repo = f"phase4-override-sod-requester-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 408)
+    requester = "approver@example.com"
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"], principal_id=requester),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 408,
+        "issue_key": "PHASE4-408",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#408",
+        "override_requested_by": requester,
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "SOD_REQUESTER_APPROVER_CONFLICT"
+
+
+def test_manual_override_endpoint_blocks_sod_pr_author_equals_approver():
+    repo = f"phase4-override-sod-author-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 409)
+    approver = "approver2@example.com"
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"], principal_id=approver),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 409,
+        "issue_key": "PHASE4-409",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#409",
+        "pr_author": approver,
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "SOD_PR_AUTHOR_APPROVER_CONFLICT"
+
+
 def test_parallel_override_recording_with_same_key_produces_single_row():
     repo = f"phase4-chain-{uuid.uuid4().hex[:8]}"
     idem = f"idem-chain-{uuid.uuid4().hex}"

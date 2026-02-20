@@ -9,6 +9,8 @@ from releasegate.evidence.graph import (
     record_deployment_evidence,
     record_incident_evidence,
 )
+from releasegate.governance.sod import evaluate_separation_of_duties
+from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 from releasegate.policy.releases import get_active_policy_release
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.canonical import sha256_json
@@ -212,7 +214,33 @@ def evaluate_deploy_gate(
     normalized_env = str(env or "").strip().lower()
     normalized_issue = str(issue_key or "").strip() or None
     overrides = policy_overrides or {}
+    strict_fail_closed = resolve_strict_fail_closed(
+        policy_overrides=overrides,
+        fallback=True,
+    )
     allow_derive_correlation_id = bool(overrides.get("allow_derive_correlation_id", False))
+    sod_violation = evaluate_separation_of_duties(
+        actors={
+            "actor": overrides.get("actor"),
+            "pr_author": overrides.get("pr_author"),
+            "override_requested_by": overrides.get("override_requested_by"),
+            "override_approved_by": overrides.get("override_approved_by"),
+        },
+        config=overrides.get("separation_of_duties") if isinstance(overrides.get("separation_of_duties"), dict) else None,
+    )
+    if bool(overrides.get("override_used")) and sod_violation:
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(sod_violation.get("reason_code") or "SOD_CONFLICT"),
+            reason=f"Separation-of-duties violation: {sod_violation.get('message')}",
+            decision_id=decision_id,
+            issue_key=normalized_issue,
+            correlation_id=correlation_id,
+            repo=normalized_repo or None,
+            pr_number=None,
+            commit_sha=commit_sha,
+            env=normalized_env or None,
+        ).to_dict()
 
     if not normalized_repo:
         return _deny(
@@ -369,16 +397,58 @@ def evaluate_deploy_gate(
         )
         return denied.to_dict()
 
-    active_release = get_active_policy_release(
-        tenant_id=effective_tenant,
-        policy_id="releasegate.default",
-        target_env=normalized_env,
-    )
+    try:
+        active_release = get_active_policy_release(
+            tenant_id=effective_tenant,
+            policy_id="releasegate.default",
+            target_env=normalized_env,
+        )
+    except TimeoutError:
+        strict_result = apply_strict_fail_closed(
+            strict_enabled=strict_fail_closed,
+            provider_timeout=True,
+        )
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=(strict_result or {}).get("reason_code", "PROVIDER_TIMEOUT"),
+            reason=(strict_result or {}).get("reason", "Policy release dependency timed out."),
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=bound_issue,
+            correlation_id=correlation_id,
+            repo=normalized_repo,
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=commit_sha or bound_commit,
+            env=normalized_env,
+        ).to_dict()
+    except Exception as exc:
+        strict_result = apply_strict_fail_closed(
+            strict_enabled=strict_fail_closed,
+            provider_error="policy_release_lookup",
+        )
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=(strict_result or {}).get("reason_code", "PROVIDER_ERROR"),
+            reason=(strict_result or {}).get("reason", f"Policy release lookup failed: {exc}"),
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=bound_issue,
+            correlation_id=correlation_id,
+            repo=normalized_repo,
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=commit_sha or bound_commit,
+            env=normalized_env,
+        ).to_dict()
     if not active_release:
+        strict_result = apply_strict_fail_closed(
+            strict_enabled=strict_fail_closed,
+            policy_loaded=False,
+        )
         denied = _deny(
             tenant_id=effective_tenant,
-            reason_code="POLICY_RELEASE_MISSING",
-            reason=f"No active policy release found for environment {normalized_env}.",
+            reason_code=(strict_result or {}).get("reason_code", "POLICY_RELEASE_MISSING"),
+            reason=(strict_result or {}).get(
+                "reason",
+                f"No active policy release found for environment {normalized_env}.",
+            ),
             decision_id=str(decision_row.get("decision_id") or ""),
             issue_key=bound_issue,
             correlation_id=correlation_id,
@@ -456,6 +526,32 @@ def evaluate_incident_close_gate(
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_incident = str(incident_id or "").strip()
     overrides = policy_overrides or {}
+    strict_fail_closed = resolve_strict_fail_closed(
+        policy_overrides=overrides,
+        fallback=True,
+    )
+    sod_violation = evaluate_separation_of_duties(
+        actors={
+            "actor": overrides.get("actor"),
+            "pr_author": overrides.get("pr_author"),
+            "override_requested_by": overrides.get("override_requested_by"),
+            "override_approved_by": overrides.get("override_approved_by"),
+        },
+        config=overrides.get("separation_of_duties") if isinstance(overrides.get("separation_of_duties"), dict) else None,
+    )
+    if bool(overrides.get("override_used")) and sod_violation:
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(sod_violation.get("reason_code") or "SOD_CONFLICT"),
+            reason=f"Separation-of-duties violation: {sod_violation.get('message')}",
+            decision_id=decision_id,
+            issue_key=issue_key,
+            correlation_id=correlation_id,
+            repo=repo,
+            pr_number=None,
+            commit_sha=None,
+            env=env,
+        ).to_dict()
     requires_deploy_link = bool(overrides.get("incident_close_requires_deploy_link", True))
     if not normalized_incident:
         return _deny(
@@ -560,11 +656,46 @@ def evaluate_incident_close_gate(
     if requires_deploy_link:
         from releasegate.evidence.graph import get_decision_evidence_graph
 
-        graph = get_decision_evidence_graph(
-            tenant_id=effective_tenant,
-            decision_id=str(decision_row.get("decision_id") or ""),
-            max_depth=2,
-        ) or {"nodes": []}
+        try:
+            graph = get_decision_evidence_graph(
+                tenant_id=effective_tenant,
+                decision_id=str(decision_row.get("decision_id") or ""),
+                max_depth=2,
+            ) or {"nodes": []}
+        except TimeoutError:
+            strict_result = apply_strict_fail_closed(
+                strict_enabled=strict_fail_closed,
+                provider_timeout=True,
+            )
+            return _deny(
+                tenant_id=effective_tenant,
+                reason_code=(strict_result or {}).get("reason_code", "PROVIDER_TIMEOUT"),
+                reason=(strict_result or {}).get("reason", "Evidence graph lookup timed out."),
+                decision_id=str(decision_row.get("decision_id") or ""),
+                issue_key=bound_issue,
+                correlation_id=correlation_id or computed_correlation,
+                repo=bound_repo or repo,
+                pr_number=decision_row.get("pr_number"),
+                commit_sha=bound_commit or None,
+                env=bound_env,
+            ).to_dict()
+        except Exception as exc:
+            strict_result = apply_strict_fail_closed(
+                strict_enabled=strict_fail_closed,
+                provider_error="evidence_graph_lookup",
+            )
+            return _deny(
+                tenant_id=effective_tenant,
+                reason_code=(strict_result or {}).get("reason_code", "PROVIDER_ERROR"),
+                reason=(strict_result or {}).get("reason", f"Evidence graph lookup failed: {exc}"),
+                decision_id=str(decision_row.get("decision_id") or ""),
+                issue_key=bound_issue,
+                correlation_id=correlation_id or computed_correlation,
+                repo=bound_repo or repo,
+                pr_number=decision_row.get("pr_number"),
+                commit_sha=bound_commit or None,
+                env=bound_env,
+            ).to_dict()
         deploy_nodes = [
             node
             for node in (graph.get("nodes") or [])

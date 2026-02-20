@@ -431,3 +431,134 @@ def test_incident_close_gate_idempotency_key_conflict_returns_409():
         headers=headers,
     )
     assert conflict.status_code == 409
+
+
+def test_deploy_gate_idempotency_key_conflict_returns_409(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-510"
+    commit_sha = "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+    decision = _seed_allowed_decision(repo, 37, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    idem = f"idem-{uuid.uuid4().hex}"
+    headers = {
+        **jwt_headers(scopes=["enforcement:write"]),
+        "Idempotency-Key": idem,
+    }
+    first = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-idem-a",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+        },
+        headers=headers,
+    )
+    assert first.status_code == 200
+    conflict = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-idem-b",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+        },
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+
+
+def test_deploy_gate_strict_fail_closed_on_policy_lookup_timeout(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-511"
+    commit_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    decision = _seed_allowed_decision(repo, 38, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    def _timeout(**kwargs):
+        raise TimeoutError("policy lookup timeout")
+
+    monkeypatch.setattr("releasegate.correlation.enforcement.get_active_policy_release", _timeout)
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-timeout",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+            "policy_overrides": {"strict_fail_closed": True},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "PROVIDER_TIMEOUT"
+
+
+def test_incident_gate_strict_fail_closed_on_evidence_lookup_timeout(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-512"
+    commit_sha = "cccccccccccccccccccccccccccccccccccccccc"
+    decision = _seed_allowed_decision(repo, 39, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    def _timeout(*args, **kwargs):
+        raise TimeoutError("graph timeout")
+
+    monkeypatch.setattr("releasegate.evidence.graph.get_decision_evidence_graph", _timeout)
+
+    resp = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-TIMEOUT",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-timeout",
+            "repo": repo,
+            "env": "prod",
+            "policy_overrides": {"strict_fail_closed": True},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "PROVIDER_TIMEOUT"

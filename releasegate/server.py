@@ -121,6 +121,13 @@ class ManualOverrideRequest(BaseModel):
     target_type: str = "pr"
     target_id: Optional[str] = None
     idempotency_key: Optional[str] = None
+    override_requested_by: Optional[str] = None
+    override_requested_by_email: Optional[str] = None
+    override_requested_by_account_id: Optional[str] = None
+    pr_author: Optional[str] = None
+    pr_author_email: Optional[str] = None
+    pr_author_account_id: Optional[str] = None
+    separation_of_duties: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PublishPolicyRequest(BaseModel):
@@ -1722,6 +1729,8 @@ def create_manual_override(
 ):
     from releasegate.audit.overrides import get_active_override, record_override
     from releasegate.integrations.jira.override_validation import ACTION_OVERRIDE, validate_override_request
+    from releasegate.governance.actors import normalize_actor_values
+    from releasegate.governance.sod import evaluate_separation_of_duties
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     validation = validate_override_request(
@@ -1738,6 +1747,41 @@ def create_manual_override(
             detail={
                 "error_code": validation.reason_code,
                 "message": validation.message,
+            },
+        )
+
+    approver_principals = normalize_actor_values([auth.principal_id])
+    requester_principals = normalize_actor_values(
+        [
+            payload.override_requested_by,
+            payload.override_requested_by_email,
+            payload.override_requested_by_account_id,
+        ]
+    )
+    pr_author_principals = normalize_actor_values(
+        [
+            payload.pr_author,
+            payload.pr_author_email,
+            payload.pr_author_account_id,
+        ]
+    )
+    sod_violation = evaluate_separation_of_duties(
+        actors={
+            "actor": approver_principals,
+            "pr_author": pr_author_principals,
+            "override_requested_by": requester_principals,
+            "override_approved_by": approver_principals,
+        },
+        config=payload.separation_of_duties,
+    )
+    if sod_violation:
+        reason_code = str(sod_violation.get("reason_code") or "SOD_CONFLICT")
+        message = str(sod_violation.get("message") or "separation-of-duties violation")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error_code": reason_code,
+                "message": f"Override blocked by separation-of-duties policy: {message}",
             },
         )
 
