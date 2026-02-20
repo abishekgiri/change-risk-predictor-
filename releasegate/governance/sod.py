@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional, Set
 
-from releasegate.governance.actors import normalize_actor_values
+from releasegate.governance.actors import build_identity_alias_map, normalize_actor_values
 
 
 _DEFAULT_RULES = (
@@ -23,12 +23,12 @@ _DEFAULT_RULES = (
 )
 
 
-def _as_principal_set(raw: Any) -> Set[str]:
+def _as_principal_set(raw: Any, *, alias_map: Dict[str, str]) -> Set[str]:
     if raw is None:
         return set()
     if isinstance(raw, (set, frozenset, list, tuple)):
-        return normalize_actor_values(raw)
-    return normalize_actor_values([raw])
+        return normalize_actor_values(raw, alias_map=alias_map)
+    return normalize_actor_values([raw], alias_map=alias_map)
 
 
 def evaluate_separation_of_duties(
@@ -41,8 +41,9 @@ def evaluate_separation_of_duties(
     if not enabled:
         return None
 
+    alias_map = build_identity_alias_map(cfg.get("identity_aliases"))
     actor_map: Dict[str, Set[str]] = {
-        str(key): _as_principal_set(value)
+        str(key): _as_principal_set(value, alias_map=alias_map)
         for key, value in (actors or {}).items()
     }
     rules = cfg.get("rules")
