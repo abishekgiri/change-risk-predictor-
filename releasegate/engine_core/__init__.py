@@ -8,6 +8,8 @@ from releasegate.engine_core.evaluate import (
 from releasegate.engine_core.evaluator import evaluate_policy
 from releasegate.engine_core.policy_parser import check_condition, compute_policy_hash, flatten_signals
 from releasegate.engine_core.types import (
+    ApprovalRecord,
+    ConditionRule,
     Decision,
     DecisionReason,
     EvaluationInput,
@@ -18,6 +20,8 @@ from releasegate.engine_core.types import (
 
 __all__ = [
     "ComplianceRunResult",
+    "ApprovalRecord",
+    "ConditionRule",
     "Decision",
     "DecisionReason",
     "EvaluationInput",

@@ -9,6 +9,8 @@ import requests
 from releasegate.attestation.canonicalize import canonicalize_json_bytes
 from releasegate.engine_core.evaluate import evaluate as evaluate_engine_core
 from releasegate.engine_core.types import (
+    ApprovalRecord as CoreApprovalRecord,
+    ConditionRule as CoreConditionRule,
     EvaluationInput as CoreEvaluationInput,
     NormalizedContext as CoreNormalizedContext,
     PolicyOutcome as CorePolicyOutcome,
@@ -85,7 +87,7 @@ class WorkflowGate:
         self.client = JiraClient()
         self.policy_map_path = "releasegate/integrations/jira/jira_transition_map.yaml"
         self.role_map_path = "releasegate/integrations/jira/jira_role_map.yaml"
-        self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.dependency_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_DEP_TIMEOUT_SECONDS", "5"))
         self.ci_score_timeout_seconds = float(os.getenv("RELEASEGATE_CI_SCORE_TIMEOUT_SECONDS", "5"))
         self.storage_timeout_seconds = float(os.getenv("RELEASEGATE_STORAGE_TIMEOUT_SECONDS", "3"))
@@ -1073,6 +1075,102 @@ class WorkflowGate:
                 )
                 for result in relevant_results
             )
+            raw_approvals = request.context_overrides.get("approvals")
+            core_approvals: List[CoreApprovalRecord] = []
+            seen_approvals: set[tuple[str, str]] = set()
+            if isinstance(raw_approvals, list):
+                for approval in raw_approvals:
+                    if not isinstance(approval, dict):
+                        continue
+                    actor_id = str(
+                        approval.get("actor_id")
+                        or approval.get("actor")
+                        or approval.get("account_id")
+                        or ""
+                    ).strip()
+                    if not actor_id:
+                        continue
+                    role = str(approval.get("role") or "").strip()
+                    fingerprint = (actor_id.lower(), role.lower())
+                    if fingerprint in seen_approvals:
+                        continue
+                    seen_approvals.add(fingerprint)
+                    core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
+
+            raw_override_approvers = request.context_overrides.get("override_approvers")
+            override_approvers: List[str] = []
+            if isinstance(raw_override_approvers, (list, tuple, set)):
+                override_approvers.extend(str(value).strip() for value in raw_override_approvers if str(value).strip())
+            elif isinstance(raw_override_approvers, str) and raw_override_approvers.strip():
+                override_approvers.append(raw_override_approvers.strip())
+
+            policy_sod_config = (
+                registry_effective_policy.get("separation_of_duties")
+                if isinstance(registry_effective_policy.get("separation_of_duties"), dict)
+                else None
+            )
+            override_sod_config = (
+                request.context_overrides.get("separation_of_duties")
+                if isinstance(request.context_overrides.get("separation_of_duties"), dict)
+                else None
+            )
+            sod_config: Dict[str, Any] = {}
+            if isinstance(policy_sod_config, dict):
+                sod_config.update(policy_sod_config)
+            if isinstance(override_sod_config, dict):
+                sod_config.update(override_sod_config)
+            pr_author_id = str(
+                request.context_overrides.get("pr_author_account_id")
+                or request.context_overrides.get("pr_author_email")
+                or request.context_overrides.get("pr_author")
+                or ""
+            ).strip()
+            override_requester_id = str(
+                request.context_overrides.get("override_requested_by_account_id")
+                or request.context_overrides.get("override_requested_by_email")
+                or request.context_overrides.get("override_requested_by")
+                or ""
+            ).strip()
+            sod_inputs_present = bool(pr_author_id or override_requester_id or override_approvers or core_approvals)
+            enforce_sod = bool(sod_inputs_present and sod_config.get("enabled", True))
+
+            core_condition_rules: List[CoreConditionRule] = []
+            if isinstance(registry_effective_policy.get("rules"), list):
+                for index, rule in enumerate(registry_effective_policy.get("rules", [])):
+                    if not isinstance(rule, dict):
+                        continue
+                    when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
+                    if not when:
+                        continue
+                    require = rule.get("require") if isinstance(rule.get("require"), dict) else {}
+                    required_roles = require.get("roles") if isinstance(require.get("roles"), list) else rule.get("required_roles")
+                    if not isinstance(required_roles, list):
+                        required_roles = []
+                    required_approvals_raw = require.get("approvals")
+                    if required_approvals_raw is None:
+                        required_approvals_raw = rule.get("required_approvals")
+                    try:
+                        required_approvals = int(required_approvals_raw or 0)
+                    except Exception:
+                        required_approvals = 0
+                    try:
+                        priority = int(rule.get("priority") or 1000)
+                    except Exception:
+                        priority = 1000
+                    core_condition_rules.append(
+                        CoreConditionRule(
+                            rule_id=str(rule.get("rule_id") or rule.get("id") or f"rule-{index + 1}"),
+                            when=when,
+                            result=str(
+                                rule.get("result")
+                                or (rule.get("enforcement") or {}).get("result")
+                                or "ALLOW"
+                            ),
+                            priority=priority,
+                            required_approvals=max(0, required_approvals),
+                            required_roles=tuple(str(role).strip() for role in required_roles if str(role).strip()),
+                        )
+                    )
             core_decision = evaluate_engine_core(
                 CoreEvaluationInput(
                     context=CoreNormalizedContext(
@@ -1084,9 +1182,21 @@ class WorkflowGate:
                         pr_number=pr_number,
                         actor_id=str(request.actor_account_id or ""),
                         evaluation_time=datetime.now(timezone.utc).isoformat(),
+                        risk_level=str(risk_level or ""),
+                        changed_files=(
+                            int(risk_metrics.get("changed_files_count"))
+                            if risk_metrics.get("changed_files_count") is not None
+                            else None
+                        ),
+                        pr_author_id=pr_author_id,
+                        override_requester_id=override_requester_id,
+                        override_approvers=tuple(override_approvers),
+                        approvals=tuple(core_approvals),
                     ),
                     policy_refs=core_policy_refs,
                     policy_outcomes=core_policy_outcomes,
+                    condition_rules=tuple(core_condition_rules),
+                    enforce_sod=enforce_sod,
                 )
             )
             status = DecisionType(core_decision.status)
