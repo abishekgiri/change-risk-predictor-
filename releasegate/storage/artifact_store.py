@@ -273,8 +273,9 @@ class ArtifactStore:
             """
             INSERT INTO audit_overrides (
                 override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason,
-                target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                target_type, target_id, idempotency_key, previous_hash, event_hash, created_at,
+                ttl_seconds, expires_at, requested_by, approved_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 override_id,
@@ -291,6 +292,10 @@ class ArtifactStore:
                 payload.get("previous_hash"),
                 payload.get("event_hash"),
                 payload.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                payload.get("ttl_seconds"),
+                payload.get("expires_at"),
+                payload.get("requested_by"),
+                payload.get("approved_by"),
             ),
         )
 

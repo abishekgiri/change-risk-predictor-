@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from releasegate.audit.attestations import get_release_attestation_by_decision
+from releasegate.policy.snapshots import (
+    get_decision_with_snapshot as fetch_decision_with_policy_snapshot,
+    verify_decision_snapshot_binding,
+)
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -139,4 +143,26 @@ class AuditReader:
         return get_release_attestation_by_decision(
             decision_id=decision_id,
             tenant_id=resolve_tenant_id(tenant_id),
+        )
+
+    @staticmethod
+    def get_decision_with_policy_snapshot(
+        decision_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        effective_tenant = resolve_tenant_id(tenant_id)
+        return fetch_decision_with_policy_snapshot(
+            tenant_id=effective_tenant,
+            decision_id=decision_id,
+        )
+
+    @staticmethod
+    def verify_decision_policy_snapshot(
+        decision_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        effective_tenant = resolve_tenant_id(tenant_id)
+        return verify_decision_snapshot_binding(
+            tenant_id=effective_tenant,
+            decision_id=decision_id,
         )

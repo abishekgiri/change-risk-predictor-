@@ -102,6 +102,29 @@ def get_active_checkpoint_signing_key_record(tenant_id: str) -> Optional[Dict[st
     }
 
 
+def get_checkpoint_signing_key_record(tenant_id: str, key_id: str) -> Optional[Dict[str, str]]:
+    init_db()
+    storage = get_storage_backend()
+    row = storage.fetchone(
+        """
+        SELECT key_id, encrypted_key
+        FROM checkpoint_signing_keys
+        WHERE tenant_id = ? AND key_id = ?
+        LIMIT 1
+        """,
+        (resolve_tenant_id(tenant_id), str(key_id)),
+    )
+    if not row:
+        return None
+    encrypted = row.get("encrypted_key")
+    if not encrypted:
+        return None
+    return {
+        "key_id": str(row.get("key_id") or ""),
+        "key": _fernet().decrypt(encrypted.encode("utf-8")).decode("utf-8"),
+    }
+
+
 def list_checkpoint_signing_keys(tenant_id: str) -> List[Dict[str, str]]:
     init_db()
     storage = get_storage_backend()

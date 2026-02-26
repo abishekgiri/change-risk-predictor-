@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260218_")
+    assert current.startswith("20260220_")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -33,6 +33,12 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260214_014_attestation_immutability" in migration_ids
         assert "20260218_015_jira_lock_ledger" in migration_ids
         assert "20260218_016_decision_external_refs" in migration_ids
+        assert "20260219_017_policy_snapshot_rollout" in migration_ids
+        assert "20260219_018_lock_chain_governance" in migration_ids
+        assert "20260220_019_replay_and_evidence_graph" in migration_ids
+        assert "20260220_020_replay_status_column" in migration_ids
+        assert "20260220_021_override_expiry_metadata" in migration_ids
+        assert "20260220_022_policy_registry_control_plane" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -48,7 +54,13 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         override_info = cur.fetchall()
         override_cols = {row[1] for row in override_info}
         override_pk = [row[1] for row in sorted((r for r in override_info if r[5] > 0), key=lambda r: r[5])]
-        assert "tenant_id" in override_cols
+        assert {
+            "tenant_id",
+            "ttl_seconds",
+            "expires_at",
+            "requested_by",
+            "approved_by",
+        } <= override_cols
         assert override_pk == ["tenant_id", "override_id"]
 
         cur.execute("PRAGMA table_info(audit_checkpoints)")
@@ -119,7 +131,20 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         lock_event_info = cur.fetchall()
         lock_event_cols = {row[1] for row in lock_event_info}
         lock_event_pk = [row[1] for row in sorted((r for r in lock_event_info if r[5] > 0), key=lambda r: r[5])]
-        assert {"tenant_id", "event_id", "issue_key", "event_type"} <= lock_event_cols
+        assert {
+            "tenant_id",
+            "event_id",
+            "issue_key",
+            "event_type",
+            "chain_id",
+            "seq",
+            "prev_hash",
+            "event_hash",
+            "ttl_seconds",
+            "expires_at",
+            "justification",
+            "context_json",
+        } <= lock_event_cols
         assert lock_event_pk == ["tenant_id", "event_id"]
 
         cur.execute("PRAGMA table_info(jira_issue_locks_current)")
@@ -136,11 +161,116 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "decision_id", "repo", "ref_type", "ref_value"} <= ref_cols
         assert ref_pk == ["tenant_id", "decision_id", "ref_type", "ref_value"]
 
+        cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
+        snap_info = cur.fetchall()
+        snap_cols = {row[1] for row in snap_info}
+        snap_pk = [row[1] for row in sorted((r for r in snap_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "snapshot_id", "policy_hash", "snapshot_json"} <= snap_cols
+        assert snap_pk == ["tenant_id", "snapshot_id"]
+
+        cur.execute("PRAGMA table_info(policy_decision_records)")
+        pdr_info = cur.fetchall()
+        pdr_cols = {row[1] for row in pdr_info}
+        pdr_pk = [row[1] for row in sorted((r for r in pdr_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "decision_id", "snapshot_id", "policy_hash", "decision"} <= pdr_cols
+        assert pdr_pk == ["tenant_id", "decision_id"]
+
+        cur.execute("PRAGMA table_info(policy_releases)")
+        releases_info = cur.fetchall()
+        releases_cols = {row[1] for row in releases_info}
+        releases_pk = [row[1] for row in sorted((r for r in releases_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "release_id", "policy_id", "snapshot_id", "target_env", "state"} <= releases_cols
+        assert releases_pk == ["tenant_id", "release_id"]
+
+        cur.execute("PRAGMA table_info(active_policy_pointers)")
+        pointers_info = cur.fetchall()
+        pointers_cols = {row[1] for row in pointers_info}
+        pointers_pk = [row[1] for row in sorted((r for r in pointers_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "policy_id", "target_env", "active_release_id"} <= pointers_cols
+        assert pointers_pk == ["tenant_id", "policy_id", "target_env"]
+
+        cur.execute("PRAGMA table_info(audit_lock_checkpoints)")
+        lock_cp_info = cur.fetchall()
+        lock_cp_cols = {row[1] for row in lock_cp_info}
+        lock_cp_pk = [row[1] for row in sorted((r for r in lock_cp_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "checkpoint_id", "chain_id", "head_seq", "head_hash"} <= lock_cp_cols
+        assert lock_cp_pk == ["tenant_id", "checkpoint_id"]
+
+        cur.execute("PRAGMA table_info(governance_override_metrics_daily)")
+        metrics_info = cur.fetchall()
+        metrics_cols = {row[1] for row in metrics_info}
+        metrics_pk = [row[1] for row in sorted((r for r in metrics_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "date_utc",
+            "chain_id",
+            "actor",
+            "overrides_total",
+            "high_risk_overrides_total",
+        } <= metrics_cols
+        assert metrics_pk == ["tenant_id", "date_utc", "chain_id", "actor"]
+
+        cur.execute("PRAGMA table_info(audit_decision_replays)")
+        replay_info = cur.fetchall()
+        replay_cols = {row[1] for row in replay_info}
+        replay_pk = [row[1] for row in sorted((r for r in replay_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "replay_id",
+            "decision_id",
+            "match",
+            "status",
+            "diff_json",
+            "old_output_hash",
+            "new_output_hash",
+            "ran_engine_version",
+        } <= replay_cols
+        assert replay_pk == ["tenant_id", "replay_id"]
+
+        cur.execute("PRAGMA table_info(evidence_nodes)")
+        en_info = cur.fetchall()
+        en_cols = {row[1] for row in en_info}
+        en_pk = [row[1] for row in sorted((r for r in en_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "node_id", "type", "ref", "hash", "payload_json"} <= en_cols
+        assert en_pk == ["tenant_id", "node_id"]
+
+        cur.execute("PRAGMA table_info(evidence_edges)")
+        ee_info = cur.fetchall()
+        ee_cols = {row[1] for row in ee_info}
+        ee_pk = [row[1] for row in sorted((r for r in ee_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "edge_id", "from_node_id", "to_node_id", "type", "metadata_json"} <= ee_cols
+        assert ee_pk == ["tenant_id", "edge_id"]
+
+        cur.execute("PRAGMA table_info(policy_registry_entries)")
+        pr_info = cur.fetchall()
+        pr_cols = {row[1] for row in pr_info}
+        pr_pk = [row[1] for row in sorted((r for r in pr_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "policy_id",
+            "scope_type",
+            "scope_id",
+            "version",
+            "status",
+            "policy_json",
+            "policy_hash",
+            "lint_errors_json",
+            "lint_warnings_json",
+            "rollout_percentage",
+            "rollout_scope",
+            "created_at",
+            "created_by",
+            "activated_at",
+            "activated_by",
+            "supersedes_policy_id",
+        } <= pr_cols
+        assert pr_pk == ["tenant_id", "policy_id"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260218_016_decision_external_refs"
-        assert state[1] == "20260218_016_decision_external_refs"
+        assert state[0] == "20260220_022_policy_registry_control_plane"
+        assert state[1] == "20260220_022_policy_registry_control_plane"
     finally:
         conn.close()
 

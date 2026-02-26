@@ -67,6 +67,21 @@ def test_ci_score_allows_internal_service_key(monkeypatch):
     assert isinstance(body["score"], int)
 
 
+def test_ci_score_internal_service_requires_tenant_context(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "phase3-internal-service")
+    monkeypatch.setenv("RELEASEGATE_REQUIRE_TENANT_ID", "true")
+    monkeypatch.delenv("RELEASEGATE_TENANT_ID", raising=False)
+    monkeypatch.delenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID", raising=False)
+    response = client.post(
+        "/ci/score",
+        json={"repo": "org/repo", "pr": 27},
+        headers={"X-Internal-Service-Key": "phase3-internal-service"},
+    )
+    assert response.status_code == 401
+    detail = response.json().get("detail") or {}
+    assert detail.get("error_code") == "AUTH_TENANT_REQUIRED"
+
+
 def test_audit_export_requires_auth():
     resp = client.get("/audit/export", params={"repo": "any", "tenant_id": "tenant-test"})
     assert resp.status_code == 401
@@ -217,6 +232,64 @@ def test_webhook_signature_auth_and_replay_protection():
 
     second = client.post("/webhooks/github", content=payload_bytes, headers=headers)
     assert second.status_code == 401
+
+
+def test_webhook_signature_auth_accepts_rg_headers():
+    secret = "phase3-rg-header-secret"
+    key = create_webhook_key(
+        tenant_id="tenant-test",
+        integration_id="github",
+        created_by="test-suite",
+        raw_secret=secret,
+        deactivate_existing=True,
+    )
+    payload = {"ping": True}
+    payload_text = json.dumps(payload)
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+    nonce = f"nonce-{uuid.uuid4().hex[:8]}"
+    canonical = "\n".join([timestamp, nonce, "POST", "/webhooks/github", payload_text])
+    signature = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    headers = {
+        "X-RG-Signature": signature,
+        "X-RG-Key-Id": key["key_id"],
+        "X-RG-Timestamp": timestamp,
+        "X-RG-Nonce": nonce,
+        "X-GitHub-Event": "ping",
+        "Content-Type": "application/json",
+    }
+
+    response = client.post("/webhooks/github", content=payload_text.encode("utf-8"), headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"msg": "pong"}
+
+
+def test_webhook_signature_rejects_stale_timestamp():
+    secret = "phase3-stale-secret"
+    key = create_webhook_key(
+        tenant_id="tenant-test",
+        integration_id="github",
+        created_by="test-suite",
+        raw_secret=secret,
+        deactivate_existing=True,
+    )
+    payload = {"ping": True}
+    payload_text = json.dumps(payload)
+    timestamp = str(int(datetime.now(timezone.utc).timestamp()) - 7200)
+    nonce = f"nonce-{uuid.uuid4().hex[:8]}"
+    canonical = "\n".join([timestamp, nonce, "POST", "/webhooks/github", payload_text])
+    signature = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    headers = {
+        "X-Signature": signature,
+        "X-Key-Id": key["key_id"],
+        "X-Timestamp": timestamp,
+        "X-Nonce": nonce,
+        "X-GitHub-Event": "ping",
+        "Content-Type": "application/json",
+    }
+
+    response = client.post("/webhooks/github", content=payload_text.encode("utf-8"), headers=headers)
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "AUTH_SIGNATURE_STALE"
 
 
 def test_webhook_rejects_jwt_even_if_valid():

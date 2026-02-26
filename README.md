@@ -45,6 +45,368 @@ Decision output fields, `reason_code` meanings, and strict/permissive behavior a
 Other docs (including this README) are descriptive and defer to that spec.
 Forge runtime hardening and failure handling is documented in `docs/forge-hardening.md`.
 
+## Core Architecture
+
+ReleaseGate is built on two foundational enforcement pillars.
+
+### Pillar 1: Transition-Level Enforcement (Hard ALLOW / DENY)
+
+#### What it guarantees
+
+No Jira transition, PR merge, or release decision proceeds unless ReleaseGate explicitly returns `ALLOW` or `DENY`.
+There is no advisory mode in production enforcement.
+
+#### Authoritative gate
+
+All enforcement flows through a single deterministic gate:
+
+```text
+check_transition(issue_key, transition_id, actor, context) -> ALLOW | DENY
+```
+
+This function:
+
+- Evaluates the resolved policy bundle
+- Binds the decision to an immutable snapshot
+- Produces `decision_hash`, `input_hash`, `policy_hash`, and `replay_hash`
+- Emits an auditable decision record
+
+#### Deterministic and idempotent
+
+Same input yields the same decision. ReleaseGate stores:
+
+- `decision_id`
+- `evaluation_key`
+- `input_snapshot`
+- `policy_bundle_hash`
+
+This guarantees replayability, forensic traceability, and no nondeterministic drift.
+
+#### Audit search API
+
+Decisions are queryable through:
+
+```text
+GET /audit/search
+```
+
+Each decision includes `release_status`, `policy_bindings`, `engine_version`, `full_decision_json`, and timestamp fields.
+
+#### Risk-aware enforcement
+
+Signals include:
+
+- GitHub PR risk score
+- Churn metrics
+- Severity level
+- Dependency provenance
+- Privileged path detection
+- Transition metadata
+- Actor role
+
+Policies evaluate these signals declaratively.
+
+#### Pillar 1 outcome
+
+A workflow transition cannot move forward unless ReleaseGate explicitly authorizes it under a versioned, bound policy snapshot.
+
+#### Phase 1 operational controls
+
+- Override TTL boundary rule: override is active while `evaluation_time <= expires_at`; it is expired when `evaluation_time > expires_at`.
+- Separation of duties checks:
+  - Override requester cannot approve the same override.
+  - PR author cannot approve override.
+  - Actor identities are normalized (case-insensitive) and can be mapped through alias sets.
+- Identity alias mapping format (context/policy override):
+
+```yaml
+separation_of_duties:
+  enabled: true
+  deny_self_approval: true
+  identity_aliases:
+    actor-alice:
+      - ACC-1234
+      - alice@example.com
+      - alice-gh
+```
+
+- Strict fail-closed behavior:
+  - Controlled by `RELEASEGATE_STRICT_FAIL_CLOSED` (global) and `policy_overrides.strict_fail_closed` (request-level).
+  - In strict mode, missing policy/risk/signals or dependency timeout/error resolves to `BLOCKED`.
+- Idempotency contract for deploy and incident gates:
+  - Header: `Idempotency-Key` (recommended; server derives one if omitted).
+  - Same key + same payload: returns the same stored response.
+  - Same key + different payload: returns `409 Conflict`.
+
+### Pillar 2: Declarative Policy Engine and Immutable Rollout
+
+Pillar 2 transforms ReleaseGate from a rule checker into a governance platform.
+
+#### Declarative policy DSL
+
+Policies are defined in YAML:
+
+```yaml
+policy_id: SEC-PR-001
+controls:
+  - signal: core_risk.severity_level
+    operator: in
+    value: ["HIGH", "CRITICAL"]
+enforcement:
+  result: BLOCK
+```
+
+Policies are versioned, schema validated, compiled, and hashed.
+
+#### Snapshot binding (immutable)
+
+Every decision stores:
+
+- `snapshot_id`
+- Full resolved policy snapshot
+- `policy_hash`
+- `compiler_version`
+- `resolution_inputs`
+
+Snapshots are immutable, hash-verifiable, and bound to each decision.
+
+Verification endpoint:
+
+```text
+GET /decisions/{decision_id}/policy-snapshot/verify
+```
+
+Expected response includes:
+
+```json
+{ "verified": true }
+```
+
+#### Staged policy rollout (Dev -> Staging -> Prod)
+
+Policies are deployed like software:
+
+- Active in dev
+- Promoted to staging
+- Scheduled for prod
+- Activated via scheduler
+- Rolled back via pointer switch
+
+Endpoints:
+
+- `POST /policy/releases`
+- `POST /policy/releases/promote`
+- `POST /policy/releases/scheduler/run`
+- `POST /policy/releases/rollback`
+- `GET /policy/releases/active`
+
+Each environment maintains an atomic active pointer.
+
+#### Advanced lint gate
+
+ReleaseGate includes a pre-rollout linter that detects:
+
+- `CONTRADICTORY_RULES`
+- `AMBIGUOUS_OVERLAP`
+- `COVERAGE_GAP`
+- `RULE_UNREACHABLE_SHADOWED` (warning)
+
+Lint runs before activation, and blocking issues prevent rollout.
+
+#### Hash-linked integrity
+
+Every snapshot includes:
+
+- `policy_hash`
+- `policy_bundle_hash`
+- `compiler_version`
+- `schema_version`
+
+This supports deterministic rebuilds, external verification, audit defense, and compliance reporting.
+
+#### Pillar 2 outcome
+
+You can answer auditors with precision:
+
+`This release was authorized under policy bundle hash X, compiled with version Y, activated in prod at timestamp Z.`
+
+### Why this matters
+
+Most governance systems are procedural, manual, non-verifiable, and environment-inconsistent.
+
+ReleaseGate provides:
+
+- Deterministic enforcement
+- Immutable policy binding
+- Staged governance rollout
+- Cryptographic integrity
+
+It treats policy as versioned, deployable infrastructure.
+
+### Combined effect
+
+| Pillar | Capability |
+| --- | --- |
+| Pillar 1 | Hard real-time enforcement gate |
+| Pillar 2 | Immutable, versioned, staged policy governance |
+
+Together, ReleaseGate is a verifiable change authorization system.
+
+### Pillar 4: Audit and Evidence Integrity
+
+Pillar 4 guarantees that every governance decision is:
+
+- Deterministically reproducible
+- Formally reconstructable
+- Cross-system enforceable
+- Atomically recorded
+- Append-only and tamper-evident
+
+This layer transforms ReleaseGate from a validator into an auditable decision system.
+
+#### 1. Deterministic replay
+
+Every decision stores:
+
+- Canonicalized inputs
+- Canonicalized context
+- Compiled policy snapshot
+- `policy_hash`
+- `decision_hash`
+- `engine_version`
+
+Replay endpoint:
+
+```text
+POST /decisions/{id}/replay
+```
+
+Replay guarantees:
+
+- Uses stored policy snapshot (not current policy)
+- Returns structured response:
+  - `deterministic` block (stable across runs)
+  - `meta` block (run metadata)
+- Emits structured diff on mismatch
+- Persists immutable replay event
+
+If stored state is invalid:
+
+- Returns `match=false`
+- Emits `STORED_DECISION_INVALID`
+- Persists replay event with status `INVALID_STORED_STATE`
+
+Deterministic blocks are byte-identical across repeated replay runs.
+
+#### 2. Formal evidence graph
+
+Every decision produces a structured evidence graph.
+
+Node types:
+
+- `DECISION`
+- `POLICY` (snapshot-bound)
+- `SIGNAL`
+- `ARTIFACT` (proof-pack)
+- `OVERRIDE`
+- `DEPLOYMENT`
+- `INCIDENT`
+- `REPLAY`
+
+Edge types:
+
+- `USED_POLICY`
+- `USED_SIGNAL`
+- `PRODUCED_ARTIFACT`
+- `OVERRIDDEN_BY`
+- `AUTHORIZED_BY`
+- `RESOLVED_BY`
+
+Graph APIs:
+
+```text
+GET /decisions/{id}/evidence-graph
+GET /decisions/{id}/explain
+```
+
+`/explain` reconstructs decision reasoning in one call using graph traversal.
+
+Proof-pack artifacts and override nodes are auto-populated in the decision subgraph.
+
+#### 3. Cross-system correlation enforcement
+
+ReleaseGate enforces integrity across Jira, GitHub, CI, and deploy systems.
+
+Deploy gate:
+
+```text
+POST /gate/deploy/check
+```
+
+Default hard-deny conditions:
+
+- `CORRELATION_ID_MISSING`
+- No approved decision
+- Repo mismatch
+- Commit mismatch
+- Artifact digest mismatch
+- Environment policy violation
+
+Correlation derivation is disabled by default and must be explicitly enabled in policy.
+
+Incident close gate:
+
+```text
+POST /gate/incident/close-check
+```
+
+Default hard-deny conditions:
+
+- `DEPLOY_NOT_FOUND_FOR_CORRELATION`
+- Missing approved release chain
+
+Incident closure requires valid deploy linkage.
+
+#### 4. Atomic and append-only persistence
+
+Decision recording is fully atomic:
+
+- Decision
+- Policy snapshot
+- Evidence graph
+- Artifacts
+- References
+
+All are written in a single database transaction.
+
+If any write fails, the entire operation rolls back.
+
+Append-only enforcement:
+
+- `audit_decision_replays`
+- `evidence_nodes`
+- `evidence_edges`
+
+`UPDATE` and `DELETE` are rejected via database triggers.
+
+Postgres integration tests verify:
+
+- Append-only enforcement
+- Transaction rollback correctness
+- Idempotent retry behavior
+
+#### Pillar 4 acceptance status
+
+Verified via live proof script and full test suite.
+
+- Deterministic replay validated
+- Corrupt stored-state mismatch handling validated
+- Evidence graph completeness validated
+- Strict correlation enforcement validated
+- Atomicity and immutability validated
+
+Full suite: `281 passed, 4 skipped`.
+
 ## Core Capabilities
 
 ### 1. Transition-Level Hard Enforcement
@@ -506,6 +868,21 @@ python -m releasegate.cli simulate-policies --repo org/service --tenant demo --l
 ```bash
 python -m releasegate.cli lint-policies
 ```
+
+---
+
+## Phase 1 Audit Packet
+
+Generate a 5-scenario Phase 1 smoke evidence packet (request/response pairs, manifest, zip):
+
+```bash
+python scripts/generate_phase1_audit_packet.py \
+  --config scripts/phase1_audit_packet.example.json \
+  --output-dir /tmp/phase1-audit-packet \
+  --zip-path /tmp/Pillar1-AuditPacket.zip
+```
+
+Before running, copy `scripts/phase1_audit_packet.example.json` and replace placeholders with real tenant/auth/decision/correlation values.
 
 ---
 

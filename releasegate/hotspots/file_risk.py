@@ -1,9 +1,35 @@
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 from releasegate.config import DB_PATH
 from releasegate.signals import normalize
 import math
+import json
+
+
+def _parse_timestamp(raw_value) -> Optional[datetime]:
+    if raw_value is None:
+        return None
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        # SQLite often stores naive timestamps like "YYYY-MM-DD HH:MM:SS[.ffffff]".
+        parsed = None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
     """
@@ -40,21 +66,10 @@ def aggregate_file_risks(repo: str, window_days: int = 90) -> Dict[str, Dict]:
     
     for row in rows:
         try:
-            import json
             files_data = json.loads(row['files_json']) if row['files_json'] else []
             churn = row['churn'] or 0
             label = row['label_value'] # 1 = incident, 0 = safe, NULL = unknown
-            timestamp = row['created_at']
-            ts_dt = None
-            if timestamp:
-                try:
-                    ts_dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-                    if ts_dt.tzinfo is None:
-                        ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-                    else:
-                        ts_dt = ts_dt.astimezone(timezone.utc)
-                except Exception:
-                    ts_dt = None
+            ts_dt = _parse_timestamp(row['created_at'])
             
             # Parse files (format may vary, handle gracefully)
             if isinstance(files_data, list):

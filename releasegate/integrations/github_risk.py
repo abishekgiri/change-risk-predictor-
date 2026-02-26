@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, Any, Set
 
+from releasegate.governance.signal_freshness import compute_risk_signal_hash
+
 
 RISK_SCORE_MAP = {
     "LOW": 25,
@@ -60,7 +62,7 @@ def build_issue_risk_property(
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     risk_level = (risk_level or "LOW").upper()
     risk_score = score_for_risk_level(risk_level)
-    return {
+    payload = {
         "releasegate_risk": risk_level,
         "risk_level": risk_level,
         "risk_score": risk_score,
@@ -75,6 +77,8 @@ def build_issue_risk_property(
             "total_churn": int(metrics.total_churn),
         },
     }
+    payload["signal_hash"] = compute_risk_signal_hash(payload)
+    return payload
 
 
 _JIRA_KEY_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")

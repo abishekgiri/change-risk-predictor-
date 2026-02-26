@@ -22,6 +22,33 @@ class EvidenceConfig(BaseModel):
 
     include: List[str] = []
 
+
+class OverridePolicyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_ttl_seconds: int = 86400
+    default_ttl_seconds: int = 3600
+    require_expires_at: bool = True
+
+
+class SeparationOfDutiesRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    left: str
+    right: str
+    reason_code: Optional[str] = None
+    message: Optional[str] = None
+
+
+class SeparationOfDutiesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    deny_self_approval: bool = True
+    rules: List[SeparationOfDutiesRule] = Field(default_factory=list)
+
 class Policy(BaseModel):
     """
     Schema for a Compliance Policy.
@@ -39,6 +66,9 @@ class Policy(BaseModel):
     controls: List[ControlSignal]
     enforcement: EnforcementConfig
     evidence: Optional[EvidenceConfig] = None
+    strict_fail_closed: bool = True
+    overrides: Optional[OverridePolicyConfig] = None
+    separation_of_duties: Optional[SeparationOfDutiesConfig] = None
     metadata: Optional[Dict[str, Any]] = None # Traceability: parent_policy, version, compliance, etc.
 
 class ComplianceMetadata(BaseModel):
@@ -48,4 +78,3 @@ class ComplianceMetadata(BaseModel):
     version: str
     effective_date: Optional[str] = None
     compliance_standards: Dict[str, str] = {}
-

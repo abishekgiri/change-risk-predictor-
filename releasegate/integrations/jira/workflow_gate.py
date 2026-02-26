@@ -7,6 +7,15 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable, TypeVar
 import requests
 from releasegate.attestation.canonicalize import canonicalize_json_bytes
+from releasegate.engine_core.evaluate import evaluate as evaluate_engine_core
+from releasegate.engine_core.types import (
+    ApprovalRecord as CoreApprovalRecord,
+    ConditionRule as CoreConditionRule,
+    EvaluationInput as CoreEvaluationInput,
+    NormalizedContext as CoreNormalizedContext,
+    PolicyOutcome as CorePolicyOutcome,
+    PolicyRef as CorePolicyRef,
+)
 from releasegate.integrations.github_risk import PRRiskInput, build_issue_risk_property, classify_pr_risk
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient, JiraDependencyTimeout
@@ -25,6 +34,12 @@ from releasegate.observability.internal_metrics import incr
 from releasegate.security.audit import log_security_event
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.ttl_cache import TTLCache, file_fingerprint, stable_tuple, yaml_tree_fingerprint
+from releasegate.governance.signal_freshness import (
+    evaluate_risk_signal_freshness,
+    resolve_signal_freshness_policy,
+)
+from releasegate.governance.sod import evaluate_separation_of_duties
+from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -72,7 +87,7 @@ class WorkflowGate:
         self.client = JiraClient()
         self.policy_map_path = "releasegate/integrations/jira/jira_transition_map.yaml"
         self.role_map_path = "releasegate/integrations/jira/jira_role_map.yaml"
-        self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.strict_mode = os.getenv("RELEASEGATE_STRICT_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
         self.dependency_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_DEP_TIMEOUT_SECONDS", "5"))
         self.ci_score_timeout_seconds = float(os.getenv("RELEASEGATE_CI_SCORE_TIMEOUT_SECONDS", "5"))
         self.storage_timeout_seconds = float(os.getenv("RELEASEGATE_STORAGE_TIMEOUT_SECONDS", "3"))
@@ -86,6 +101,7 @@ class WorkflowGate:
         self._resolved_mode_hint: Optional[str] = None
         self._resolved_gate_hint: Optional[str] = None
         self._unresolved_gate_hint: Optional[str] = None
+        self._policy_resolution_issue: Optional[Dict[str, Any]] = None
 
     def check_transition(self, request: TransitionCheckRequest) -> TransitionCheckResponse:
         """
@@ -99,9 +115,14 @@ class WorkflowGate:
         repo, pr_number = self._repo_and_pr(request)
         is_prod = request.environment.upper() == "PRODUCTION"
         strict_mode = self.strict_mode or is_prod
+        strict_mode = resolve_strict_fail_closed(
+            policy_overrides=request.context_overrides,
+            fallback=strict_mode,
+        ) or is_prod
         self._resolved_mode_hint = None
         self._resolved_gate_hint = None
         self._unresolved_gate_hint = None
+        self._policy_resolution_issue = None
         try:
             policies = self._resolve_policies(request)
         except TimeoutError as exc:
@@ -116,6 +137,27 @@ class WorkflowGate:
                 detail=str(exc),
             )
         strict_mode = self._effective_strict_mode(self._resolved_mode_hint, default=strict_mode) or is_prod
+        if strict_mode and self._policy_resolution_issue:
+            issue = dict(self._policy_resolution_issue)
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:policy-resolution",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=str(issue.get("reason_code") or "POLICY_INVALID"),
+                message=str(issue.get("message") or "BLOCKED: policy resolution failed in strict mode"),
+                unlock_conditions=list(issue.get("unlock_conditions") or ["Fix policy configuration and retry transition."]),
+                event="jira.transition.policy_resolution_failed",
+                dependency="policy_registry",
+                error_code=str(issue.get("error_code") or "POLICY_RESOLUTION_FAILED"),
+                inputs_present={"releasegate_risk": False},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "policy_resolution_issue": issue,
+                },
+            )
         request_id = (
             request.context_overrides.get("delivery_id")
             or request.context_overrides.get("idempotency_key")
@@ -145,55 +187,31 @@ class WorkflowGate:
         # trusting persisted Jira issue properties. This prevents stale metadata replay.
         strict_dependency_failure = self._strict_dependency_failure(
             tenant_id=tenant_id,
+            project_key=request.project_key,
             repo=repo,
             pr_number=pr_number,
         )
         if strict_mode and strict_dependency_failure is not None:
             reason_code, message, unlock_conditions = strict_dependency_failure
-            blocked = self._build_decision(
+            return self._deny(
                 request,
-                release_status=DecisionType.BLOCKED,
-                message=message,
                 evaluation_key=f"{evaluation_key}:strict-dependency",
-                unlock_conditions=unlock_conditions,
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
                 reason_code=reason_code,
+                message=message,
+                unlock_conditions=unlock_conditions,
+                event="jira.transition.strict_dependency_failed",
+                dependency="github",
+                error_code=reason_code,
                 inputs_present={"releasegate_risk": False},
-                policy_hash=self._current_policy_hash(),
                 input_snapshot={
                     "request": request.model_dump(mode="json"),
                     "repo": repo,
                     "pr_number": pr_number,
                 },
-            )
-            final_blocked = self._record_with_timeout(
-                blocked,
-                repo=repo,
-                pr_number=pr_number,
-                tenant_id=tenant_id,
-                strict_mode=strict_mode,
-                dependency_context="storage",
-            )
-            self._log_decision(
-                event="jira.transition.strict_dependency_failed",
-                request=request,
-                decision=final_blocked,
-                repo=repo,
-                pr_number=pr_number,
-                mode=strict_mode,
-                gate=self._resolved_gate_hint,
-                error_code=reason_code,
-                dependency="github",
-            )
-            self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
-            return TransitionCheckResponse(
-                allow=False,
-                reason=final_blocked.message,
-                decision_id=final_blocked.decision_id,
-                status=final_blocked.release_status.value,
-                reason_code=final_blocked.reason_code,
-                unlock_conditions=final_blocked.unlock_conditions,
-                policy_hash=final_blocked.policy_bundle_hash,
-                tenant_id=tenant_id,
             )
 
         # Override path with explicit ledger recording
@@ -218,18 +236,55 @@ class WorkflowGate:
                 request.context_overrides.get("override_created_by_account_id"),
                 request.context_overrides.get("override_created_by_email"),
             )
+            sod_violation = evaluate_separation_of_duties(
+                actors={
+                    "actor": actor_principals,
+                    "pr_author": pr_author_principals,
+                    "override_requested_by": override_requestor_principals,
+                    "override_approved_by": actor_principals,
+                },
+                config=request.context_overrides.get("separation_of_duties"),
+            )
+            if sod_violation:
+                reason_code = str(sod_violation.get("reason_code") or "SOD_CONFLICT")
+                message = str(sod_violation.get("message") or "separation-of-duties conflict")
+                if reason_code == "SOD_PR_AUTHOR_APPROVER_CONFLICT":
+                    detail = "PR author cannot approve override"
+                    unlock = ["Use an approver different from the PR author."]
+                    event = "jira.transition.override.sod_pr_author"
+                    eval_suffix = "override-sod-pr-author"
+                    response_reason_code = "SOD_PR_AUTHOR_CANNOT_OVERRIDE"
+                elif reason_code == "SOD_REQUESTER_APPROVER_CONFLICT":
+                    detail = "override requestor cannot self-approve"
+                    unlock = ["Use an approver different from the override requestor."]
+                    event = "jira.transition.override.sod_requestor"
+                    eval_suffix = "override-sod-requestor"
+                    response_reason_code = "SOD_REQUESTOR_CANNOT_SELF_APPROVE"
+                else:
+                    detail = message
+                    unlock = ["Use an approver different from the override requestor and PR author."]
+                    event = "jira.transition.override.sod_conflict"
+                    eval_suffix = "override-sod-conflict"
+                    response_reason_code = reason_code
 
-            if actor_principals and pr_author_principals and actor_principals.intersection(pr_author_principals):
                 blocked = self._build_decision(
                     request,
                     release_status=DecisionType.BLOCKED,
-                    message="BLOCKED: separation-of-duties violation (PR author cannot approve override)",
-                    evaluation_key=f"{evaluation_key}:override-sod-pr-author",
-                    unlock_conditions=["Use an approver different from the PR author."],
-                    reason_code="SOD_PR_AUTHOR_CANNOT_OVERRIDE",
+                    message=f"BLOCKED: separation-of-duties violation ({detail})",
+                    evaluation_key=f"{evaluation_key}:{eval_suffix}",
+                    unlock_conditions=unlock,
+                    reason_code=response_reason_code,
                     inputs_present={"override_requested": True},
                     policy_hash=self._current_policy_hash(),
-                    input_snapshot={"request": request.model_dump(mode="json")},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "sod_conflict": {
+                            "rule": sod_violation.get("rule"),
+                            "left": sod_violation.get("left"),
+                            "right": sod_violation.get("right"),
+                            "conflicting_principals": list(sod_violation.get("conflicting_principals") or []),
+                        },
+                    },
                 )
                 final_blocked = self._record_with_timeout(
                     blocked,
@@ -241,48 +296,7 @@ class WorkflowGate:
                 )
                 self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
                 self._log_decision(
-                    event="jira.transition.override.sod_pr_author",
-                    request=request,
-                    decision=final_blocked,
-                    repo=repo,
-                    pr_number=pr_number,
-                    mode=strict_mode,
-                    gate=self._resolved_gate_hint,
-                )
-                return TransitionCheckResponse(
-                    allow=final_blocked.release_status != DecisionType.BLOCKED,
-                    reason=final_blocked.message,
-                    decision_id=final_blocked.decision_id,
-                    status=final_blocked.release_status.value,
-                    reason_code=final_blocked.reason_code,
-                    unlock_conditions=final_blocked.unlock_conditions,
-                    policy_hash=final_blocked.policy_bundle_hash,
-                    tenant_id=tenant_id,
-                )
-
-            if actor_principals and override_requestor_principals and actor_principals.intersection(override_requestor_principals):
-                blocked = self._build_decision(
-                    request,
-                    release_status=DecisionType.BLOCKED,
-                    message="BLOCKED: separation-of-duties violation (override requestor cannot self-approve)",
-                    evaluation_key=f"{evaluation_key}:override-sod-requestor",
-                    unlock_conditions=["Use an approver different from the override requestor."],
-                    reason_code="SOD_REQUESTOR_CANNOT_SELF_APPROVE",
-                    inputs_present={"override_requested": True},
-                    policy_hash=self._current_policy_hash(),
-                    input_snapshot={"request": request.model_dump(mode="json")},
-                )
-                final_blocked = self._record_with_timeout(
-                    blocked,
-                    repo=repo,
-                    pr_number=pr_number,
-                    tenant_id=tenant_id,
-                    strict_mode=strict_mode,
-                    dependency_context="storage",
-                )
-                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
-                self._log_decision(
-                    event="jira.transition.override.sod_requestor",
+                    event=event,
                     request=request,
                     decision=final_blocked,
                     repo=repo,
@@ -408,6 +422,13 @@ class WorkflowGate:
             )
             try:
                 from releasegate.audit.overrides import record_override
+                ttl_seconds_value = None
+                raw_ttl_seconds = request.context_overrides.get("override_ttl_seconds")
+                if raw_ttl_seconds is not None:
+                    try:
+                        ttl_seconds_value = int(raw_ttl_seconds)
+                    except Exception:
+                        ttl_seconds_value = None
                 override_idempotency_key = hashlib.sha256(
                     f"{evaluation_key}:override-ledger:{request.issue_key}:{request.actor_account_id}".encode("utf-8")
                 ).hexdigest()
@@ -420,6 +441,18 @@ class WorkflowGate:
                     reason=normalized_override_reason,
                     idempotency_key=override_idempotency_key,
                     tenant_id=tenant_id,
+                    ttl_seconds=ttl_seconds_value,
+                    expires_at=(
+                        override_expires_at.isoformat() if override_expires_at is not None else None
+                    ),
+                    requested_by=(
+                        request.context_overrides.get("override_requested_by")
+                        or request.context_overrides.get("override_requested_by_email")
+                        or request.context_overrides.get("override_requested_by_account_id")
+                        or request.actor_email
+                        or request.actor_account_id
+                    ),
+                    approved_by=request.actor_email or request.actor_account_id,
                 )
                 log_security_event(
                     tenant_id=tenant_id,
@@ -521,7 +554,20 @@ class WorkflowGate:
             )
 
         if self._is_missing_risk_metadata(risk_meta):
-            ci_risk_meta = self._fetch_risk_metadata_from_ci(repo=repo, pr_number=pr_number)
+            try:
+                ci_risk_meta = self._fetch_risk_metadata_from_ci(repo=repo, pr_number=pr_number)
+            except Exception as e:
+                return self._error_response(
+                    request,
+                    evaluation_key=evaluation_key,
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    message=f"System Error: failed to compute risk metadata ({e})",
+                    reason_code="RISK_SCORING_FAILED",
+                    strict_mode=strict_mode,
+                    error_code="RISK_SCORING_FAILED",
+                )
             if ci_risk_meta:
                 risk_meta = ci_risk_meta
                 try:
@@ -538,21 +584,41 @@ class WorkflowGate:
                     pass
 
         if self._is_missing_risk_metadata(risk_meta):
-            missing_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-            missing_reason = (
-                "BLOCKED: missing issue property `releasegate_risk` (strict mode)"
-                if strict_mode
-                else "SKIPPED: missing issue property `releasegate_risk`"
+            strict_failure = apply_strict_fail_closed(
+                strict_enabled=strict_mode,
+                risk_present=False,
             )
+            if strict_failure:
+                return self._deny(
+                    request,
+                    evaluation_key=f"{evaluation_key}:missing-risk",
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    reason_code="SIGNAL_MISSING:releasegate_risk",
+                    message="BLOCKED: missing issue property `releasegate_risk` (strict mode)",
+                    unlock_conditions=["Run GitHub PR classification to attach `releasegate_risk` on this issue."],
+                    event="jira.transition.missing_risk",
+                    dependency="signals",
+                    error_code="SIGNAL_MISSING",
+                    requirements=["Missing `releasegate_risk` metadata"],
+                    inputs_present={"releasegate_risk": False},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                    },
+                )
+
             skipped = self._build_decision(
                 request,
-                release_status=missing_status,
-                message=missing_reason,
+                release_status=DecisionType.SKIPPED,
+                message="SKIPPED: missing issue property `releasegate_risk`",
                 evaluation_key=f"{evaluation_key}:missing-risk",
                 unlock_conditions=[
                     "Run GitHub PR classification to attach `releasegate_risk` on this issue."
                 ],
-                reason_code="MISSING_RISK_METADATA_STRICT" if strict_mode else "MISSING_RISK_METADATA",
+                reason_code="MISSING_RISK_METADATA",
                 inputs_present={"releasegate_risk": False},
                 policy_hash=self._current_policy_hash(),
                 input_snapshot={
@@ -579,7 +645,7 @@ class WorkflowGate:
             )
             self._track_status_metrics(final_skipped.release_status, tenant_id=tenant_id)
             return TransitionCheckResponse(
-                allow=final_skipped.release_status != DecisionType.BLOCKED,
+                allow=True,
                 reason=final_skipped.message,
                 decision_id=final_skipped.decision_id,
                 status=final_skipped.release_status.value,
@@ -588,6 +654,69 @@ class WorkflowGate:
                 unlock_conditions=final_skipped.unlock_conditions,
                 policy_hash=final_skipped.policy_bundle_hash,
                 tenant_id=tenant_id,
+            )
+
+        if strict_mode:
+            missing_signals = self._missing_required_signals(risk_meta)
+            if missing_signals:
+                missing_name = missing_signals[0]
+                return self._deny(
+                    request,
+                    evaluation_key=f"{evaluation_key}:missing-signal:{missing_name}",
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    reason_code=f"SIGNAL_MISSING:{missing_name}",
+                    message=f"BLOCKED: required signal missing in strict mode (`{missing_name}`)",
+                    unlock_conditions=[f"Populate required signal `{missing_name}` before retrying transition."],
+                    event="jira.transition.missing_required_signal",
+                    dependency="signals",
+                    error_code=f"SIGNAL_MISSING:{missing_name}",
+                    inputs_present={"releasegate_risk": True},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                        "missing_signals": missing_signals,
+                    },
+                )
+
+        freshness_policy = resolve_signal_freshness_policy(
+            policy_overrides=request.context_overrides.get("signals")
+            if isinstance(request.context_overrides.get("signals"), dict)
+            else None,
+            strict_enabled=strict_mode,
+        )
+        freshness = evaluate_risk_signal_freshness(
+            risk_meta=risk_meta,
+            policy=freshness_policy,
+            evaluation_time=datetime.now(timezone.utc),
+        )
+        if freshness.get("stale") and freshness.get("should_block"):
+            strict_failure = apply_strict_fail_closed(
+                strict_enabled=strict_mode,
+                signals_stale=True,
+            )
+            reason_code = str(freshness.get("reason_code") or "SIGNAL_STALE")
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:stale-signal",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=(strict_failure or {}).get("reason_code", reason_code),
+                message=f"BLOCKED: stale risk signal (`{reason_code}`) in strict mode",
+                unlock_conditions=["Refresh risk signal metadata before retrying transition."],
+                event="jira.transition.signal_stale",
+                dependency="signals",
+                error_code=reason_code,
+                inputs_present={"releasegate_risk": True},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "risk_meta": risk_meta,
+                    "signal_freshness": freshness,
+                },
             )
         
         try:
@@ -598,47 +727,22 @@ class WorkflowGate:
 
             role_map = self._load_role_map(tenant_id=tenant_id)
             if strict_mode and role_map is None:
-                blocked = self._build_decision(
+                return self._deny(
                     request,
-                    release_status=DecisionType.BLOCKED,
-                    message="BLOCKED: Jira role mapping unavailable (strict mode)",
                     evaluation_key=f"{evaluation_key}:missing-role-map",
-                    unlock_conditions=["Restore valid jira_role_map.yaml and retry transition."],
-                    reason_code="ROLE_MAPPING_MISSING",
-                    inputs_present={"releasegate_risk": True},
-                    policy_hash=self._current_policy_hash(),
-                    input_snapshot={
-                        "request": request.model_dump(mode="json"),
-                        "risk_meta": risk_meta,
-                    },
-                )
-                final_blocked = self._record_with_timeout(
-                    blocked,
                     repo=repo,
                     pr_number=pr_number,
                     tenant_id=tenant_id,
                     strict_mode=strict_mode,
-                    dependency_context="storage",
-                )
-                self._log_decision(
+                    reason_code="JIRA_ROLE_MAPPING_MISSING",
+                    message="BLOCKED: Jira role mapping unavailable (strict mode)",
+                    unlock_conditions=["Restore valid jira_role_map.yaml and retry transition."],
                     event="jira.transition.role_map_missing",
-                    request=request,
-                    decision=final_blocked,
-                    repo=repo,
-                    pr_number=pr_number,
-                    mode=strict_mode,
-                    gate=self._resolved_gate_hint,
-                )
-                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
-                return TransitionCheckResponse(
-                    allow=False,
-                    reason=final_blocked.message,
-                    decision_id=final_blocked.decision_id,
-                    status=final_blocked.release_status.value,
-                    reason_code=final_blocked.reason_code,
-                    unlock_conditions=final_blocked.unlock_conditions,
-                    policy_hash=final_blocked.policy_bundle_hash,
-                    tenant_id=tenant_id,
+                    inputs_present={"releasegate_risk": True},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                    },
                 )
             
             # 2. Context Construction
@@ -646,19 +750,34 @@ class WorkflowGate:
             
             # 3. Policy Resolution
             if self._unresolved_gate_hint:
-                invalid_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-                invalid_reason = (
-                    f"BLOCKED: invalid gate reference: {self._unresolved_gate_hint} (strict mode)"
-                    if strict_mode
-                    else f"SKIPPED: invalid gate reference: {self._unresolved_gate_hint}"
-                )
+                if strict_mode:
+                    return self._deny(
+                        request,
+                        evaluation_key=f"{evaluation_key}:invalid-gate",
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        reason_code="POLICY_INVALID",
+                        message=f"BLOCKED: invalid gate reference: {self._unresolved_gate_hint} (strict mode)",
+                        unlock_conditions=["Fix Jira transition gate mapping in jira_transition_map.yaml."],
+                        event="jira.transition.invalid_gate",
+                        error_code="INVALID_POLICY_REFERENCE",
+                        inputs_present={"releasegate_risk": True},
+                        input_snapshot={
+                            "request": request.model_dump(mode="json"),
+                            "risk_meta": risk_meta,
+                            "gate": self._unresolved_gate_hint,
+                        },
+                    )
+
                 invalid = self._build_decision(
                     request,
-                    release_status=invalid_status,
-                    message=invalid_reason,
+                    release_status=DecisionType.SKIPPED,
+                    message=f"SKIPPED: invalid gate reference: {self._unresolved_gate_hint}",
                     evaluation_key=f"{evaluation_key}:invalid-gate",
                     unlock_conditions=["Fix Jira transition gate mapping in jira_transition_map.yaml."],
-                    reason_code="INVALID_POLICY_REFERENCE_STRICT" if strict_mode else "INVALID_POLICY_REFERENCE",
+                    reason_code="INVALID_POLICY_REFERENCE",
                     inputs_present={"releasegate_risk": True},
                     policy_hash=self._current_policy_hash(),
                     input_snapshot={
@@ -686,7 +805,7 @@ class WorkflowGate:
                 )
                 self._track_status_metrics(final_invalid.release_status, tenant_id=tenant_id)
                 return TransitionCheckResponse(
-                    allow=final_invalid.release_status != DecisionType.BLOCKED,
+                    allow=True,
                     reason=final_invalid.message,
                     decision_id=final_invalid.decision_id,
                     status=final_invalid.release_status.value,
@@ -698,19 +817,34 @@ class WorkflowGate:
 
             if not policies:
                 # No policies mapped -> strict mode blocks, otherwise explicit audited skip.
-                no_policy_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-                no_policy_reason = (
-                    "BLOCKED: no policies configured for this transition (strict mode)"
-                    if strict_mode
-                    else "SKIPPED: no policies configured for this transition"
-                )
+                if strict_mode:
+                    return self._deny(
+                        request,
+                        evaluation_key=f"{evaluation_key}:no-policy",
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        reason_code="POLICY_MISSING",
+                        message="BLOCKED: no policies configured for this transition (strict mode)",
+                        unlock_conditions=["Map this transition to one or more policy IDs."],
+                        event="jira.transition.no_policy",
+                        error_code="POLICY_MISSING",
+                        inputs_present={"releasegate_risk": True},
+                        input_snapshot={
+                            "request": request.model_dump(mode="json"),
+                            "policies_requested": [],
+                            "risk_meta": risk_meta,
+                        },
+                    )
+
                 skipped = self._build_decision(
                     request,
-                    release_status=no_policy_status,
-                    message=no_policy_reason,
+                    release_status=DecisionType.SKIPPED,
+                    message="SKIPPED: no policies configured for this transition",
                     evaluation_key=f"{evaluation_key}:no-policy",
                     unlock_conditions=["Map this transition to one or more policy IDs."],
-                    reason_code="NO_POLICIES_MAPPED_STRICT" if strict_mode else "NO_POLICIES_MAPPED",
+                    reason_code="NO_POLICIES_MAPPED",
                     inputs_present={"releasegate_risk": True},
                     policy_hash=self._current_policy_hash(),
                     input_snapshot={
@@ -738,7 +872,7 @@ class WorkflowGate:
                 )
                 self._track_status_metrics(final_skipped.release_status, tenant_id=tenant_id)
                 return TransitionCheckResponse(
-                    allow=final_skipped.release_status != DecisionType.BLOCKED,
+                    allow=True,
                     reason=final_skipped.message,
                     decision_id=final_skipped.decision_id,
                     status=final_skipped.release_status.value,
@@ -791,39 +925,151 @@ class WorkflowGate:
             compiled_policy_map = self._compiled_policy_map()
             unresolved_policy_ids = sorted(set(policies) - set(compiled_policy_map.keys()))
             policy_bindings = self._build_policy_bindings(policies, compiled_policy_map, tenant_id=tenant_id)
+            registry_resolution: Dict[str, Any] = {}
+            try:
+                from releasegate.policy.registry import resolve_registry_policy
+
+                registry_resolution = resolve_registry_policy(
+                    tenant_id=tenant_id,
+                    org_id=request.context_overrides.get("org_id") or tenant_id,
+                    project_id=request.project_key,
+                    workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
+                    transition_id=request.transition_id,
+                    rollout_key=request.issue_key,
+                )
+            except Exception:
+                registry_resolution = {}
+            registry_effective_policy = (
+                registry_resolution.get("effective_policy")
+                if isinstance(registry_resolution.get("effective_policy"), dict)
+                else {}
+            )
+            registry_effective_hash = str(registry_resolution.get("effective_policy_hash") or "").strip()
+            registry_component_ids = [
+                str(policy_id)
+                for policy_id in (registry_resolution.get("component_policy_ids") or [])
+                if str(policy_id).strip()
+            ]
+            registry_component_lineage = (
+                registry_resolution.get("component_lineage")
+                if isinstance(registry_resolution.get("component_lineage"), dict)
+                else {}
+            )
+            registry_resolution_conflicts = (
+                registry_resolution.get("resolution_conflicts")
+                if isinstance(registry_resolution.get("resolution_conflicts"), list)
+                else []
+            )
+            registry_component_policies: List[Dict[str, Any]] = []
+            for component in (registry_resolution.get("components") or []):
+                if not isinstance(component, dict):
+                    continue
+                component_id = str(component.get("policy_id") or "").strip()
+                if not component_id:
+                    continue
+                registry_component_policies.append(
+                    {
+                        "policy_id": component_id,
+                        "version": component.get("version"),
+                        "scope_type": component.get("scope_type"),
+                        "scope_id": component.get("scope_id"),
+                        "policy_hash": component.get("policy_hash"),
+                    }
+                )
+            if registry_effective_hash and registry_component_ids:
+                policy_bindings.append(
+                    PolicyBinding(
+                        policy_id="registry.effective",
+                        policy_version="1",
+                        policy_hash=registry_effective_hash,
+                        tenant_id=tenant_id,
+                        policy={
+                            "effective_policy_hash": registry_effective_hash,
+                            "component_policy_ids": registry_component_ids,
+                            "component_lineage": registry_component_lineage,
+                            "resolution_conflicts": registry_resolution_conflicts,
+                            "component_policies": registry_component_policies,
+                            "effective_policy": registry_effective_policy,
+                        },
+                    )
+                )
             bindings_hash = self._policy_bindings_hash(policy_bindings)
+            policy_hash = bindings_hash or self._current_policy_hash()
+
+            if registry_resolution_conflicts:
+                return self._deny(
+                    request,
+                    evaluation_key=f"{evaluation_key}:policy-resolution-conflict",
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    reason_code="POLICY_RESOLUTION_CONFLICT",
+                    message="BLOCKED: policy resolution conflict detected",
+                    unlock_conditions=["Resolve policy hierarchy conflicts before retrying transition."],
+                    event="jira.transition.policy_resolution_conflict",
+                    dependency="policy_registry",
+                    error_code="POLICY_RESOLUTION_CONFLICT",
+                    policy_hash=policy_hash,
+                    policy_bindings=policy_bindings,
+                    inputs_present={"releasegate_risk": True},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                        "registry_policy": {
+                            "effective_policy_hash": registry_effective_hash,
+                            "component_policy_ids": registry_component_ids,
+                            "component_lineage": registry_component_lineage,
+                            "resolution_conflicts": registry_resolution_conflicts,
+                            "component_policies": registry_component_policies,
+                            "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                        },
+                    },
+                )
             
             # Run ALL policies (Engine doesn't support filtering input yet)
             run_result = engine.evaluate(signal_map)
             
             # Filter results to ONLY the policies required by this Jira transition
             relevant_results = [r for r in run_result.results if r.policy_id in policies]
-            policy_hash = bindings_hash or self._current_policy_hash()
 
             if unresolved_policy_ids:
-                invalid_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-                invalid_message = (
-                    f"BLOCKED: invalid policy references: {', '.join(unresolved_policy_ids)} (strict mode)"
-                    if strict_mode
-                    else f"SKIPPED: invalid policy references: {', '.join(unresolved_policy_ids)}"
-                )
+                invalid_detail = {
+                    "request": request.model_dump(mode="json"),
+                    "signal_map": signal_map,
+                    "policies_requested": policies,
+                    "strict_mode": strict_mode,
+                    "risk_meta": risk_meta,
+                }
+                if strict_mode:
+                    return self._deny(
+                        request,
+                        evaluation_key=f"{evaluation_key}:invalid-policy",
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        reason_code="POLICY_INVALID",
+                        message=f"BLOCKED: invalid policy references: {', '.join(unresolved_policy_ids)} (strict mode)",
+                        unlock_conditions=["Fix Jira transition policy mapping to compiled policy IDs."],
+                        event="jira.transition.invalid_policy_reference",
+                        error_code="INVALID_POLICY_REFERENCE",
+                        policy_hash=policy_hash,
+                        policy_bindings=policy_bindings,
+                input_snapshot=invalid_detail,
+            )
+
                 invalid = self._build_decision(
                     request,
-                    release_status=invalid_status,
-                    message=invalid_message,
+                    release_status=DecisionType.SKIPPED,
+                    message=f"SKIPPED: invalid policy references: {', '.join(unresolved_policy_ids)}",
                     evaluation_key=f"{evaluation_key}:invalid-policy",
                     unlock_conditions=["Fix Jira transition policy mapping to compiled policy IDs."],
-                    reason_code="INVALID_POLICY_REFERENCE_STRICT" if strict_mode else "INVALID_POLICY_REFERENCE",
+                    reason_code="INVALID_POLICY_REFERENCE",
                     inputs_present={"releasegate_risk": True},
                     policy_hash=policy_hash,
                     policy_bindings=policy_bindings,
-                    input_snapshot={
-                        "request": request.model_dump(mode="json"),
-                        "signal_map": signal_map,
-                        "policies_requested": policies,
-                        "strict_mode": strict_mode,
-                        "risk_meta": risk_meta,
-                    },
+                    input_snapshot=invalid_detail,
                 )
                 final_invalid = self._record_with_timeout(
                     invalid,
@@ -845,7 +1091,7 @@ class WorkflowGate:
                 )
                 self._track_status_metrics(final_invalid.release_status, tenant_id=tenant_id)
                 return TransitionCheckResponse(
-                    allow=final_invalid.release_status != DecisionType.BLOCKED,
+                    allow=True,
                     reason=final_invalid.message,
                     decision_id=final_invalid.decision_id,
                     status=final_invalid.release_status.value,
@@ -855,7 +1101,150 @@ class WorkflowGate:
                     tenant_id=tenant_id,
                 )
             
-            status, blocking_policies, requirements = self._evaluate_policy_results(relevant_results)
+            core_policy_refs = tuple(
+                CorePolicyRef(
+                    policy_id=str(binding.policy_id),
+                    policy_version=str(binding.policy_version or ""),
+                    policy_hash=str(binding.policy_hash or ""),
+                    source="jira_transition",
+                )
+                for binding in policy_bindings
+            )
+            core_policy_outcomes = tuple(
+                CorePolicyOutcome.from_untyped(
+                    policy_id=str(getattr(result, "policy_id", "")),
+                    status=str(getattr(result, "status", "")),
+                    violations=list(getattr(result, "violations", []) or []),
+                )
+                for result in relevant_results
+            )
+            raw_approvals = request.context_overrides.get("approvals")
+            core_approvals: List[CoreApprovalRecord] = []
+            seen_approvals: set[tuple[str, str]] = set()
+            if isinstance(raw_approvals, list):
+                for approval in raw_approvals:
+                    if not isinstance(approval, dict):
+                        continue
+                    actor_id = str(
+                        approval.get("actor_id")
+                        or approval.get("actor")
+                        or approval.get("account_id")
+                        or ""
+                    ).strip()
+                    if not actor_id:
+                        continue
+                    role = str(approval.get("role") or "").strip()
+                    fingerprint = (actor_id.lower(), role.lower())
+                    if fingerprint in seen_approvals:
+                        continue
+                    seen_approvals.add(fingerprint)
+                    core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
+
+            raw_override_approvers = request.context_overrides.get("override_approvers")
+            override_approvers: List[str] = []
+            if isinstance(raw_override_approvers, (list, tuple, set)):
+                override_approvers.extend(str(value).strip() for value in raw_override_approvers if str(value).strip())
+            elif isinstance(raw_override_approvers, str) and raw_override_approvers.strip():
+                override_approvers.append(raw_override_approvers.strip())
+
+            policy_sod_config = (
+                registry_effective_policy.get("separation_of_duties")
+                if isinstance(registry_effective_policy.get("separation_of_duties"), dict)
+                else None
+            )
+            override_sod_config = (
+                request.context_overrides.get("separation_of_duties")
+                if isinstance(request.context_overrides.get("separation_of_duties"), dict)
+                else None
+            )
+            sod_config: Dict[str, Any] = {}
+            if isinstance(policy_sod_config, dict):
+                sod_config.update(policy_sod_config)
+            if isinstance(override_sod_config, dict):
+                sod_config.update(override_sod_config)
+            pr_author_id = str(
+                request.context_overrides.get("pr_author_account_id")
+                or request.context_overrides.get("pr_author_email")
+                or request.context_overrides.get("pr_author")
+                or ""
+            ).strip()
+            override_requester_id = str(
+                request.context_overrides.get("override_requested_by_account_id")
+                or request.context_overrides.get("override_requested_by_email")
+                or request.context_overrides.get("override_requested_by")
+                or ""
+            ).strip()
+            sod_inputs_present = bool(pr_author_id or override_requester_id or override_approvers or core_approvals)
+            enforce_sod = bool(sod_inputs_present and sod_config.get("enabled", True))
+
+            core_condition_rules: List[CoreConditionRule] = []
+            if isinstance(registry_effective_policy.get("rules"), list):
+                for index, rule in enumerate(registry_effective_policy.get("rules", [])):
+                    if not isinstance(rule, dict):
+                        continue
+                    when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
+                    if not when:
+                        continue
+                    require = rule.get("require") if isinstance(rule.get("require"), dict) else {}
+                    required_roles = require.get("roles") if isinstance(require.get("roles"), list) else rule.get("required_roles")
+                    if not isinstance(required_roles, list):
+                        required_roles = []
+                    required_approvals_raw = require.get("approvals")
+                    if required_approvals_raw is None:
+                        required_approvals_raw = rule.get("required_approvals")
+                    try:
+                        required_approvals = int(required_approvals_raw or 0)
+                    except Exception:
+                        required_approvals = 0
+                    try:
+                        priority = int(rule.get("priority") or 1000)
+                    except Exception:
+                        priority = 1000
+                    core_condition_rules.append(
+                        CoreConditionRule(
+                            rule_id=str(rule.get("rule_id") or rule.get("id") or f"rule-{index + 1}"),
+                            when=when,
+                            result=str(
+                                rule.get("result")
+                                or (rule.get("enforcement") or {}).get("result")
+                                or "ALLOW"
+                            ),
+                            priority=priority,
+                            required_approvals=max(0, required_approvals),
+                            required_roles=tuple(str(role).strip() for role in required_roles if str(role).strip()),
+                        )
+                    )
+            core_decision = evaluate_engine_core(
+                CoreEvaluationInput(
+                    context=CoreNormalizedContext(
+                        evaluation_kind="jira_transition",
+                        environment=str(request.environment),
+                        issue_key=str(request.issue_key),
+                        transition_id=str(request.transition_id),
+                        repo=str(repo or ""),
+                        pr_number=pr_number,
+                        actor_id=str(request.actor_account_id or ""),
+                        evaluation_time=datetime.now(timezone.utc).isoformat(),
+                        risk_level=str(risk_level or ""),
+                        changed_files=(
+                            int(risk_metrics.get("changed_files_count"))
+                            if risk_metrics.get("changed_files_count") is not None
+                            else None
+                        ),
+                        pr_author_id=pr_author_id,
+                        override_requester_id=override_requester_id,
+                        override_approvers=tuple(override_approvers),
+                        approvals=tuple(core_approvals),
+                    ),
+                    policy_refs=core_policy_refs,
+                    policy_outcomes=core_policy_outcomes,
+                    condition_rules=tuple(core_condition_rules),
+                    enforce_sod=enforce_sod,
+                )
+            )
+            status = DecisionType(core_decision.status)
+            blocking_policies = list(core_decision.blocking_policy_ids)
+            requirements = list(core_decision.requirements)
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
@@ -865,7 +1254,7 @@ class WorkflowGate:
                 evaluation_key=f"{evaluation_key}:evaluated",
                 unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                reason_code=self._reason_code_for_status(status.value),
+                reason_code=core_decision.reason_code,
                 inputs_present={"releasegate_risk": True},
                 policy_hash=policy_hash,
                 policy_bindings=policy_bindings,
@@ -873,8 +1262,22 @@ class WorkflowGate:
                     "request": request.model_dump(mode="json"),
                     "signal_map": signal_map,
                     "policies_requested": policies,
+                    "registry_policy": {
+                        "effective_policy_hash": registry_effective_hash,
+                        "component_policy_ids": registry_component_ids,
+                        "component_lineage": registry_component_lineage,
+                        "resolution_conflicts": registry_resolution_conflicts,
+                        "component_policies": registry_component_policies,
+                        "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                    },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
+                    "engine_core": {
+                        "status": core_decision.status,
+                        "reason_code": core_decision.reason_code,
+                        "blocking_policy_ids": list(core_decision.blocking_policy_ids),
+                        "requirements": list(core_decision.requirements),
+                    },
                 },
             )
             
@@ -1001,6 +1404,23 @@ class WorkflowGate:
     def _cache_tenant(self, tenant_id: Optional[str] = None) -> str:
         return resolve_tenant_id(tenant_id or self._active_tenant_id, allow_none=True) or "system"
 
+    def _set_policy_resolution_issue(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        unlock_conditions: Optional[List[str]] = None,
+        error_code: Optional[str] = None,
+    ) -> None:
+        if self._policy_resolution_issue:
+            return
+        self._policy_resolution_issue = {
+            "reason_code": reason_code,
+            "message": message,
+            "unlock_conditions": unlock_conditions or [],
+            "error_code": error_code or reason_code,
+        }
+
     def _role_map_hash(self, role_map: JiraRoleMap) -> str:
         payload = json.dumps(role_map.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -1066,6 +1486,12 @@ class WorkflowGate:
         effective_tenant = self._tenant_id(req)
         transition_map = self._load_transition_map(tenant_id=effective_tenant)
         if not transition_map:
+            self._set_policy_resolution_issue(
+                reason_code="POLICY_MISSING",
+                message="BLOCKED: transition policy map is unavailable",
+                unlock_conditions=["Restore jira_transition_map.yaml before retrying transition."],
+                error_code="TRANSITION_MAP_UNAVAILABLE",
+            )
             return []
 
         self._resolved_mode_hint = None
@@ -1106,6 +1532,8 @@ class WorkflowGate:
         self._resolved_gate_hint = matched_rule.gate
 
         known_policy_ids = list(self._compiled_policy_map(tenant_id=effective_tenant).keys())
+        if self._policy_resolution_issue:
+            return []
         resolved_policy_ids, gate_error = resolve_gate_policy_ids(
             transition_map=transition_map,
             gate_name=matched_rule.gate,
@@ -1147,6 +1575,12 @@ class WorkflowGate:
         except TimeoutError:
             raise
         except FileNotFoundError:
+            self._set_policy_resolution_issue(
+                reason_code="POLICY_MISSING",
+                message="BLOCKED: transition policy map is missing",
+                unlock_conditions=["Restore jira_transition_map.yaml for this tenant before retrying transition."],
+                error_code="TRANSITION_MAP_NOT_FOUND",
+            )
             self._log_event(
                 "warning",
                 event="jira.transition.config.transition_map_missing",
@@ -1165,6 +1599,12 @@ class WorkflowGate:
             )
             return None
         except Exception as exc:
+            self._set_policy_resolution_issue(
+                reason_code="POLICY_INVALID",
+                message="BLOCKED: transition policy map is invalid",
+                unlock_conditions=["Fix jira_transition_map.yaml validation errors before retrying transition."],
+                error_code="TRANSITION_MAP_LOAD_FAILED",
+            )
             self._log_event(
                 "warning",
                 event="jira.transition.config.transition_map_invalid",
@@ -1334,12 +1774,48 @@ class WorkflowGate:
             return dict(cached)
         incr("cache_policy_registry_miss", tenant_id=effective_tenant)
 
-        loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=False)
-        policies = self._call_with_timeout(
-            "policy_registry",
-            loader.load_all,
-            self.policy_timeout_seconds,
-        )
+        loader = PolicyLoader(policy_dir=policy_dir, schema="compiled", strict=True)
+        try:
+            policies = self._call_with_timeout(
+                "policy_registry",
+                loader.load_all,
+                self.policy_timeout_seconds,
+            )
+        except FileNotFoundError:
+            self._set_policy_resolution_issue(
+                reason_code="POLICY_MISSING",
+                message="BLOCKED: compiled policy bundle directory is missing",
+                unlock_conditions=["Restore releasegate/policy/compiled policy artifacts before retrying transition."],
+                error_code="COMPILED_POLICY_DIR_NOT_FOUND",
+            )
+            return {}
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            self._set_policy_resolution_issue(
+                reason_code="POLICY_INVALID",
+                message="BLOCKED: compiled policy bundle is invalid",
+                unlock_conditions=["Fix compiled policy schema/validation errors before retrying transition."],
+                error_code="COMPILED_POLICY_INVALID",
+            )
+            self._log_event(
+                "warning",
+                event="jira.transition.config.compiled_policy_invalid",
+                tenant_id=effective_tenant,
+                decision_id="pending",
+                request_id="n/a",
+                issue_key="n/a",
+                transition_id="n/a",
+                repo="n/a",
+                pr_number=None,
+                mode="strict" if self.strict_mode else "permissive",
+                result="ERROR",
+                reason_code="CONFIG_INVALID",
+                error_code="COMPILED_POLICY_INVALID",
+                config_path=policy_dir,
+                error=str(exc),
+            )
+            return {}
 
         compiled: Dict[str, Policy] = {}
         for policy in policies:
@@ -1481,21 +1957,16 @@ class WorkflowGate:
             )
         except TimeoutError:
             fallback_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-            fallback_reason_code = "TIMEOUT_DEPENDENCY" if strict_mode else "SKIPPED_TIMEOUT"
+            fallback_reason_code = "DEPENDENCY_TIMEOUT" if strict_mode else "SKIPPED_TIMEOUT"
             fallback_message = (
                 f"BLOCKED: dependency timeout while persisting decision ({dependency_context})"
                 if strict_mode
                 else f"SKIPPED: dependency timeout while persisting decision ({dependency_context})"
             )
-            fallback_id_seed = {
-                "version": 1,
-                "prior_decision_id": decision.decision_id,
-                "dependency_context": dependency_context,
-                "fallback": "persist_timeout",
-            }
             return decision.model_copy(
                 update={
-                    "decision_id": hashlib.sha256(canonicalize_json_bytes(fallback_id_seed)).hexdigest(),
+                    # Keep deterministic decision_id stable across retries/replays.
+                    "decision_id": decision.decision_id,
                     "timestamp": datetime.now(timezone.utc),
                     "release_status": fallback_status,
                     "message": fallback_message,
@@ -1517,17 +1988,32 @@ class WorkflowGate:
         strict_mode: bool,
         detail: str,
     ) -> TransitionCheckResponse:
-        timeout_status = DecisionType.BLOCKED if strict_mode else DecisionType.SKIPPED
-        reason_code = "TIMEOUT_DEPENDENCY" if strict_mode else "SKIPPED_TIMEOUT"
-        message = (
-            f"BLOCKED: dependency timeout ({dependency})"
-            if strict_mode
-            else f"SKIPPED: dependency timeout ({dependency})"
-        )
+        reason_code = "DEPENDENCY_TIMEOUT" if strict_mode else "SKIPPED_TIMEOUT"
+        if strict_mode:
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:timeout:{dependency}",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=reason_code,
+                message=f"BLOCKED: dependency timeout ({dependency})",
+                unlock_conditions=[f"Retry transition after {dependency} dependency recovers."],
+                event="jira.transition.dependency_timeout",
+                dependency=dependency,
+                error_code=reason_code,
+                inputs_present={"releasegate_risk": False},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "timeout": {"dependency": dependency, "detail": detail},
+                },
+            )
+
         decision = self._build_decision(
             request,
-            release_status=timeout_status,
-            message=message,
+            release_status=DecisionType.SKIPPED,
+            message=f"SKIPPED: dependency timeout ({dependency})",
             evaluation_key=f"{evaluation_key}:timeout:{dependency}",
             unlock_conditions=[f"Retry transition after {dependency} dependency recovers."],
             reason_code=reason_code,
@@ -1556,7 +2042,7 @@ class WorkflowGate:
         )
         self._track_status_metrics(final_decision.release_status, tenant_id=tenant_id)
         return TransitionCheckResponse(
-            allow=final_decision.release_status != DecisionType.BLOCKED,
+            allow=True,
             reason=final_decision.message,
             decision_id=final_decision.decision_id,
             status=final_decision.release_status.value,
@@ -1617,6 +2103,71 @@ class WorkflowGate:
         if status == DecisionType.SKIPPED:
             incr("skipped_count", tenant_id=tenant_id)
 
+    def _deny(
+        self,
+        request: TransitionCheckRequest,
+        *,
+        evaluation_key: str,
+        repo: str,
+        pr_number: Optional[int],
+        tenant_id: str,
+        strict_mode: bool,
+        reason_code: str,
+        message: str,
+        unlock_conditions: List[str],
+        event: str,
+        inputs_present: Optional[Dict[str, bool]] = None,
+        input_snapshot: Optional[Dict[str, Any]] = None,
+        policy_hash: Optional[str] = None,
+        policy_bindings: Optional[List[PolicyBinding]] = None,
+        dependency: Optional[str] = None,
+        error_code: Optional[str] = None,
+        requirements: Optional[List[str]] = None,
+    ) -> TransitionCheckResponse:
+        blocked = self._build_decision(
+            request,
+            release_status=DecisionType.BLOCKED,
+            message=message,
+            evaluation_key=evaluation_key,
+            unlock_conditions=unlock_conditions,
+            reason_code=reason_code,
+            inputs_present=inputs_present or {"releasegate_risk": False},
+            policy_hash=policy_hash or self._current_policy_hash(),
+            policy_bindings=policy_bindings,
+            input_snapshot=input_snapshot or {"request": request.model_dump(mode="json")},
+        )
+        final_blocked = self._record_with_timeout(
+            blocked,
+            repo=repo,
+            pr_number=pr_number,
+            tenant_id=tenant_id,
+            strict_mode=strict_mode,
+            dependency_context="storage",
+        )
+        self._log_decision(
+            event=event,
+            request=request,
+            decision=final_blocked,
+            repo=repo,
+            pr_number=pr_number,
+            mode=strict_mode,
+            gate=self._resolved_gate_hint,
+            error_code=error_code,
+            dependency=dependency,
+        )
+        self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
+        return TransitionCheckResponse(
+            allow=False,
+            reason=final_blocked.message,
+            decision_id=final_blocked.decision_id,
+            status=final_blocked.release_status.value,
+            reason_code=final_blocked.reason_code,
+            requirements=requirements or [],
+            unlock_conditions=final_blocked.unlock_conditions,
+            policy_hash=final_blocked.policy_bundle_hash,
+            tenant_id=tenant_id,
+        )
+
     def _error_response(
         self,
         request: TransitionCheckRequest,
@@ -1630,6 +2181,23 @@ class WorkflowGate:
         strict_mode: bool,
         error_code: str,
     ) -> TransitionCheckResponse:
+        if strict_mode:
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:error",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=reason_code,
+                message=message,
+                unlock_conditions=["Retry transition after resolving ReleaseGate system errors."],
+                event="jira.transition.error_response",
+                error_code=error_code,
+                inputs_present={"releasegate_risk": False},
+                input_snapshot={"request": request.model_dump(mode="json")},
+            )
+
         fallback_status = DecisionType.ERROR
         fallback_decision = self._build_decision(
             request,
@@ -1661,11 +2229,8 @@ class WorkflowGate:
             error_code=error_code,
         )
         incr("transitions_error", tenant_id=tenant_id)
-        should_block = strict_mode or request.environment.upper() == "PRODUCTION"
-        if should_block:
-            incr("transitions_blocked", tenant_id=tenant_id)
         return TransitionCheckResponse(
-            allow=not should_block,
+            allow=True,
             reason=final_fallback.message,
             decision_id=final_fallback.decision_id,
             status=fallback_status.value,
@@ -1764,6 +2329,7 @@ class WorkflowGate:
         self,
         *,
         tenant_id: str,
+        project_key: str,
         repo: str,
         pr_number: Optional[int],
     ) -> Optional[tuple[str, str, List[str]]]:
@@ -1785,6 +2351,15 @@ class WorkflowGate:
                 "INVALID_PR_NUMBER",
                 "BLOCKED: invalid PR number for strict mode",
                 ["Provide a positive pull request number."],
+            )
+
+        allowed_projects = self._allowed_projects_for_tenant(tenant_id)
+        if allowed_projects and project_key not in allowed_projects:
+            allowed_text = ", ".join(sorted(allowed_projects))
+            return (
+                "PROJECT_NOT_ALLOWED",
+                f"BLOCKED: Jira project `{project_key}` is not allowed for tenant `{tenant_id}`",
+                [f"Use one of the allowed Jira projects: {allowed_text}"],
             )
 
         allowed_repos = self._allowed_repos_for_tenant(tenant_id)
@@ -1812,6 +2387,28 @@ class WorkflowGate:
         timeout = max(self.ci_score_timeout_seconds, 0.1)
         try:
             response = requests.get(url, headers=headers, timeout=timeout)
+        except requests.Timeout as exc:
+            self._log_event(
+                "warning",
+                event="jira.transition.strict_dependency.timeout",
+                tenant_id=self._active_tenant_id or "default",
+                decision_id="pending",
+                request_id="strict-dependency",
+                issue_key="unknown",
+                transition_id="unknown",
+                repo=repo,
+                pr_number=pr_number,
+                mode="strict",
+                result="PENDING",
+                reason_code="DEPENDENCY_TIMEOUT",
+                policy_bundle_hash=self._current_policy_hash(),
+                error=str(exc),
+            )
+            return (
+                "DEPENDENCY_TIMEOUT",
+                "BLOCKED: GitHub dependency timed out in strict mode",
+                ["Retry after GitHub API timeout clears."],
+            )
         except requests.RequestException as exc:
             self._log_event(
                 "warning",
@@ -1880,6 +2477,30 @@ class WorkflowGate:
             return set()
         return {item.strip() for item in raw.split(",") if item and item.strip()}
 
+    def _allowed_projects_for_tenant(self, tenant_id: str) -> set[str]:
+        """
+        Optional Jira project allowlist enforcement.
+        Supports tenant-specific and global env vars:
+        - RELEASEGATE_ALLOWED_PROJECTS_<TENANT>
+        - RELEASEGATE_ALLOWED_PROJECTS
+        """
+        tenant = (tenant_id or "").strip()
+        normalized_tenant = "".join(ch if ch.isalnum() else "_" for ch in tenant.upper())
+        env_keys = []
+        if normalized_tenant:
+            env_keys.append(f"RELEASEGATE_ALLOWED_PROJECTS_{normalized_tenant}")
+        env_keys.append("RELEASEGATE_ALLOWED_PROJECTS")
+
+        raw = ""
+        for key in env_keys:
+            raw = (os.getenv(key) or "").strip()
+            if raw:
+                break
+
+        if not raw:
+            return set()
+        return {item.strip() for item in raw.split(",") if item and item.strip()}
+
     def _build_decision(
         self,
         request: TransitionCheckRequest,
@@ -1901,7 +2522,15 @@ class WorkflowGate:
         for binding in effective_policy_bindings:
             if not binding.tenant_id:
                 binding.tenant_id = tenant_id
-        decision_id = str(evaluation_key)
+        resolved_policy_hash = policy_hash or self._current_policy_hash()
+        decision_id = self._canonical_decision_id(
+            request=request,
+            evaluation_key=evaluation_key,
+            policy_hash=resolved_policy_hash,
+            tenant_id=tenant_id,
+            repo=repo,
+            pr_number=pr_number,
+        )
         return Decision(
             decision_id=decision_id,
             tenant_id=tenant_id,
@@ -1912,7 +2541,7 @@ class WorkflowGate:
             requirements=None,
             unlock_conditions=unlock_conditions or [],
             matched_policies=matched_policies or [],
-            policy_bundle_hash=policy_hash or self._current_policy_hash(),
+            policy_bundle_hash=resolved_policy_hash,
             evaluation_key=evaluation_key,
             actor_id=request.actor_account_id,
             reason_code=reason_code,
@@ -1927,34 +2556,80 @@ class WorkflowGate:
             ),
         )
 
+    def _canonical_decision_id(
+        self,
+        *,
+        request: TransitionCheckRequest,
+        evaluation_key: str,
+        policy_hash: str,
+        tenant_id: str,
+        repo: str,
+        pr_number: Optional[int],
+    ) -> str:
+        """
+        Deterministic decision id from canonical decision inputs.
+        """
+        raw_eval = str(evaluation_key or "").strip()
+        base_eval = raw_eval.split(":", 1)[0] if raw_eval else ""
+        mode_hint = (self._resolved_mode_hint or "").strip().lower()
+        if mode_hint not in {"strict", "permissive"}:
+            mode_hint = "strict" if (self.strict_mode or request.environment.upper() == "PRODUCTION") else "permissive"
+        gate_name = (self._resolved_gate_hint or self._unresolved_gate_hint or "release_gate").strip().lower()
+        seed = {
+            "context_schema_version": 1,
+            "tenant_id": tenant_id,
+            "issue_key": request.issue_key,
+            "transition_id": request.transition_id,
+            "repo": repo,
+            "pr_number": pr_number,
+            "mode": mode_hint,
+            "gate_name": gate_name,
+            "policy_bundle_hash": policy_hash,
+            "actor_account_id": request.actor_account_id,
+            "project_key": request.project_key,
+            "evaluation_key": base_eval,
+        }
+        return hashlib.sha256(canonicalize_json_bytes(seed)).hexdigest()
+
+    def _required_signal_fields(self) -> List[str]:
+        raw = (os.getenv("RELEASEGATE_STRICT_REQUIRED_SIGNALS") or "releasegate_risk").strip()
+        if not raw:
+            return []
+        fields = [part.strip() for part in raw.split(",") if part and part.strip()]
+        deduped = []
+        seen = set()
+        for f in fields:
+            key = f.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(f)
+        return deduped
+
+    def _missing_required_signals(self, risk_meta: Dict[str, Any]) -> List[str]:
+        missing: List[str] = []
+        aliases = {
+            "releasegate_risk": ("releasegate_risk", "risk_level"),
+            "risk_level": ("risk_level", "releasegate_risk"),
+            "risk_score": ("risk_score", "severity"),
+        }
+        for field in self._required_signal_fields():
+            keys = aliases.get(field, (field,))
+            value = None
+            for key in keys:
+                candidate = risk_meta.get(key)
+                if candidate is None:
+                    continue
+                if isinstance(candidate, str) and not candidate.strip():
+                    continue
+                value = candidate
+                break
+            if value is None:
+                missing.append(field)
+        return missing
+
     def _is_missing_risk_metadata(self, risk_meta: Dict[str, Any]) -> bool:
         if not risk_meta:
             return True
         level = risk_meta.get("releasegate_risk") or risk_meta.get("risk_level")
         return not bool(level)
-
-    def _reason_code_for_status(self, status: str) -> str:
-        if status == "BLOCKED":
-            return "POLICY_BLOCKED"
-        if status == "CONDITIONAL":
-            return "POLICY_CONDITIONAL"
-        return "POLICY_ALLOWED"
-
-    def _evaluate_policy_results(self, relevant_results: List[Any]) -> tuple[DecisionType, List[str], List[str]]:
-        """
-        Pure decision reduction: policy results -> (status, blocking_policy_ids, requirements)
-        """
-        status = DecisionType.ALLOWED
-        blocking_policies: List[str] = []
-        requirements: List[str] = []
-
-        for res in relevant_results:
-            if res.status == "BLOCK":
-                status = DecisionType.BLOCKED
-                blocking_policies.append(res.policy_id)
-                requirements.extend(res.violations)
-            elif res.status == "WARN" and status != DecisionType.BLOCKED:
-                status = DecisionType.CONDITIONAL
-                requirements.extend(res.violations)
-
-        return status, blocking_policies, requirements
