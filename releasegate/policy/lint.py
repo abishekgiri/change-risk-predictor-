@@ -411,6 +411,156 @@ def lint_compiled_policies(
     }
 
 
+def _normalize_registry_transition_id(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Static checks for centralized policy-registry entries.
+    The registry schema intentionally stays flexible, so these checks are heuristic
+    and focus on hard governance hazards:
+    - transition coverage gaps
+    - impossible approval requirements
+    - contradictory/overlapping transition rules
+    """
+    issues: List[Dict[str, Any]] = []
+    payload = policy_json if isinstance(policy_json, dict) else {}
+
+    transition_rules = payload.get("transition_rules")
+    rules = transition_rules if isinstance(transition_rules, list) else []
+    strict_fail_closed = bool(payload.get("strict_fail_closed", False))
+
+    # Coverage checks
+    required_transitions_raw = payload.get("required_transitions")
+    required_transitions: List[str] = []
+    if isinstance(required_transitions_raw, list):
+        for item in required_transitions_raw:
+            if isinstance(item, dict):
+                transition_id = _normalize_registry_transition_id(
+                    item.get("transition_id") or item.get("transition")
+                )
+            else:
+                transition_id = _normalize_registry_transition_id(item)
+            if transition_id:
+                required_transitions.append(transition_id)
+
+    covered_transitions: set[str] = set()
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        transition_id = _normalize_registry_transition_id(rule.get("transition_id"))
+        if transition_id:
+            covered_transitions.add(transition_id)
+
+    for transition_id in sorted(set(required_transitions)):
+        if transition_id in covered_transitions:
+            continue
+        issues.append(
+            _issue(
+                "ERROR" if strict_fail_closed else "WARNING",
+                "TRANSITION_UNCOVERED",
+                f"Required transition `{transition_id}` has no matching transition rule.",
+            )
+        )
+
+    # Approval feasibility checks
+    approval_cfg = payload.get("approval_requirements")
+    if isinstance(approval_cfg, dict):
+        try:
+            min_approvals = int(approval_cfg.get("min_approvals", 0))
+        except Exception:
+            min_approvals = 0
+        required_roles = approval_cfg.get("required_roles")
+        required_roles = [str(role).strip() for role in required_roles] if isinstance(required_roles, list) else []
+        role_capacity = approval_cfg.get("role_capacity")
+        role_capacity = role_capacity if isinstance(role_capacity, dict) else {}
+
+        if required_roles:
+            missing_roles = [role for role in required_roles if int(role_capacity.get(role, 0) or 0) <= 0]
+            if missing_roles:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "APPROVAL_REQUIREMENT_IMPOSSIBLE",
+                        f"Required approver roles are unavailable: {', '.join(sorted(missing_roles))}.",
+                    )
+                )
+
+        if min_approvals > 0:
+            if required_roles:
+                available = sum(max(0, int(role_capacity.get(role, 0) or 0)) for role in required_roles)
+            else:
+                available = sum(max(0, int(value or 0)) for value in role_capacity.values())
+            if available < min_approvals:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "APPROVAL_REQUIREMENT_IMPOSSIBLE",
+                        f"min_approvals={min_approvals} exceeds available approvers ({available}).",
+                    )
+                )
+
+    # Overlap + contradiction checks
+    signatures: Dict[str, Dict[str, Any]] = {}
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        transition_id = _normalize_registry_transition_id(rule.get("transition_id"))
+        if not transition_id:
+            continue
+        result = str(rule.get("result") or rule.get("enforcement") or "ALLOW").strip().upper()
+        selector = {
+            "transition_id": transition_id,
+            "project_id": str(rule.get("project_id") or "").strip().lower(),
+            "workflow_id": str(rule.get("workflow_id") or "").strip().lower(),
+            "environment": str(rule.get("environment") or "").strip().lower(),
+            "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
+        }
+        signature = json.dumps(selector, sort_keys=True, separators=(",", ":"))
+
+        prior = signatures.get(signature)
+        if prior is None:
+            signatures[signature] = {
+                "result": result,
+                "index": index,
+                "transition_id": transition_id,
+            }
+            continue
+        if prior["result"] != result:
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "OVERLAPPING_RULES",
+                    (
+                        f"Transition rule overlap detected for `{transition_id}` "
+                        f"with conflicting outcomes `{prior['result']}` and `{result}`."
+                    ),
+                )
+            )
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "CONTRADICTORY_RULES",
+                    (
+                        f"Conflicting transition outcomes for `{transition_id}` at rule indexes "
+                        f"{prior['index']} and {index}."
+                    ),
+                )
+            )
+
+    error_count = sum(1 for issue in issues if issue.get("severity") == "ERROR")
+    warning_count = sum(1 for issue in issues if issue.get("severity") == "WARNING")
+    return {
+        "ok": error_count == 0,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "issues": issues,
+    }
+
+
 def format_lint_report(report: Dict[str, Any]) -> str:
     status = "PASS" if report.get("ok") else "FAIL"
     lines = [

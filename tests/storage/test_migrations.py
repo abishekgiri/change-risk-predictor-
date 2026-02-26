@@ -38,6 +38,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260220_019_replay_and_evidence_graph" in migration_ids
         assert "20260220_020_replay_status_column" in migration_ids
         assert "20260220_021_override_expiry_metadata" in migration_ids
+        assert "20260220_022_policy_registry_control_plane" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -240,11 +241,36 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "edge_id", "from_node_id", "to_node_id", "type", "metadata_json"} <= ee_cols
         assert ee_pk == ["tenant_id", "edge_id"]
 
+        cur.execute("PRAGMA table_info(policy_registry_entries)")
+        pr_info = cur.fetchall()
+        pr_cols = {row[1] for row in pr_info}
+        pr_pk = [row[1] for row in sorted((r for r in pr_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "policy_id",
+            "scope_type",
+            "scope_id",
+            "version",
+            "status",
+            "policy_json",
+            "policy_hash",
+            "lint_errors_json",
+            "lint_warnings_json",
+            "rollout_percentage",
+            "rollout_scope",
+            "created_at",
+            "created_by",
+            "activated_at",
+            "activated_by",
+            "supersedes_policy_id",
+        } <= pr_cols
+        assert pr_pk == ["tenant_id", "policy_id"]
+
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260220_021_override_expiry_metadata"
-        assert state[1] == "20260220_021_override_expiry_metadata"
+        assert state[0] == "20260220_022_policy_registry_control_plane"
+        assert state[1] == "20260220_022_policy_registry_control_plane"
     finally:
         conn.close()
 

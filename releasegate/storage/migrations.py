@@ -1516,6 +1516,79 @@ def _migration_20260220_021_override_expiry_metadata(cursor) -> None:
     )
 
 
+def _migration_20260220_022_policy_registry_control_plane(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_registry_entries (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            lint_errors_json TEXT NOT NULL DEFAULT '[]',
+            lint_warnings_json TEXT NOT NULL DEFAULT '[]',
+            rollout_percentage INTEGER NOT NULL DEFAULT 100,
+            rollout_scope TEXT,
+            created_at TEXT NOT NULL,
+            created_by TEXT,
+            activated_at TEXT,
+            activated_by TEXT,
+            supersedes_policy_id TEXT,
+            PRIMARY KEY (tenant_id, policy_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_scope_version
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, version)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_active_scope
+        ON policy_registry_entries(tenant_id, scope_type, scope_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_scope_status_created
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, status, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_hash
+        ON policy_registry_entries(tenant_id, policy_hash, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_registry_payload_mutation
+        BEFORE UPDATE ON policy_registry_entries
+        WHEN
+            COALESCE(NEW.scope_type, '') != COALESCE(OLD.scope_type, '')
+            OR COALESCE(NEW.scope_id, '') != COALESCE(OLD.scope_id, '')
+            OR COALESCE(NEW.version, 0) != COALESCE(OLD.version, 0)
+            OR COALESCE(NEW.policy_json, '') != COALESCE(OLD.policy_json, '')
+            OR COALESCE(NEW.policy_hash, '') != COALESCE(OLD.policy_hash, '')
+            OR COALESCE(NEW.lint_errors_json, '') != COALESCE(OLD.lint_errors_json, '')
+            OR COALESCE(NEW.lint_warnings_json, '') != COALESCE(OLD.lint_warnings_json, '')
+            OR COALESCE(NEW.rollout_percentage, 100) != COALESCE(OLD.rollout_percentage, 100)
+            OR COALESCE(NEW.rollout_scope, '') != COALESCE(OLD.rollout_scope, '')
+            OR COALESCE(NEW.created_at, '') != COALESCE(OLD.created_at, '')
+            OR COALESCE(NEW.created_by, '') != COALESCE(OLD.created_by, '')
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy registry payload is immutable: create a new version instead');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1621,6 +1694,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260220_021_override_expiry_metadata",
         description="Add override TTL/expiry metadata columns and tenant expiry index.",
         apply=_migration_20260220_021_override_expiry_metadata,
+    ),
+    Migration(
+        migration_id="20260220_022_policy_registry_control_plane",
+        description="Add centralized policy registry with immutable payload versions and active scope pointers.",
+        apply=_migration_20260220_022_policy_registry_control_plane,
     ),
 ]
 

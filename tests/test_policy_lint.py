@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from releasegate.policy.lint import lint_compiled_policies
+from releasegate.policy.lint import lint_compiled_policies, lint_registry_policy
 
 
 def _write_policy(root: Path, name: str, payload: dict) -> None:
@@ -199,3 +199,37 @@ def test_policy_lint_passes_valid_policies(tmp_path):
 
     assert report["ok"] is True
     assert report["error_count"] == 0
+
+
+def test_registry_lint_detects_conflicts_and_uncovered_transitions():
+    report = lint_registry_policy(
+        {
+            "strict_fail_closed": True,
+            "required_transitions": ["2", "3"],
+            "transition_rules": [
+                {"transition_id": "2", "result": "ALLOW"},
+                {"transition_id": "2", "result": "BLOCK"},
+            ],
+        }
+    )
+
+    assert report["ok"] is False
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "TRANSITION_UNCOVERED" in codes
+    assert "OVERLAPPING_RULES" in codes
+    assert "CONTRADICTORY_RULES" in codes
+
+
+def test_registry_lint_detects_impossible_approval_requirements():
+    report = lint_registry_policy(
+        {
+            "approval_requirements": {
+                "min_approvals": 3,
+                "required_roles": ["security", "platform"],
+                "role_capacity": {"security": 1, "platform": 1},
+            }
+        }
+    )
+
+    assert report["ok"] is False
+    assert any(issue["code"] == "APPROVAL_REQUIREMENT_IMPOSSIBLE" for issue in report["issues"])
