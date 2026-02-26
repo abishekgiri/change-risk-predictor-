@@ -25,6 +25,10 @@ from releasegate.observability.internal_metrics import incr
 from releasegate.security.audit import log_security_event
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.ttl_cache import TTLCache, file_fingerprint, stable_tuple, yaml_tree_fingerprint
+from releasegate.governance.signal_freshness import (
+    evaluate_risk_signal_freshness,
+    resolve_signal_freshness_policy,
+)
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 
@@ -667,6 +671,44 @@ class WorkflowGate:
                         "missing_signals": missing_signals,
                     },
                 )
+
+        freshness_policy = resolve_signal_freshness_policy(
+            policy_overrides=request.context_overrides.get("signals")
+            if isinstance(request.context_overrides.get("signals"), dict)
+            else None,
+            strict_enabled=strict_mode,
+        )
+        freshness = evaluate_risk_signal_freshness(
+            risk_meta=risk_meta,
+            policy=freshness_policy,
+            evaluation_time=datetime.now(timezone.utc),
+        )
+        if freshness.get("stale") and freshness.get("should_block"):
+            strict_failure = apply_strict_fail_closed(
+                strict_enabled=strict_mode,
+                signals_stale=True,
+            )
+            reason_code = str(freshness.get("reason_code") or "SIGNAL_STALE")
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:stale-signal",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=(strict_failure or {}).get("reason_code", reason_code),
+                message=f"BLOCKED: stale risk signal (`{reason_code}`) in strict mode",
+                unlock_conditions=["Refresh risk signal metadata before retrying transition."],
+                event="jira.transition.signal_stale",
+                dependency="signals",
+                error_code=reason_code,
+                inputs_present={"releasegate_risk": True},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "risk_meta": risk_meta,
+                    "signal_freshness": freshness,
+                },
+            )
         
         try:
             # 1. Idempotency Check
