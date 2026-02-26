@@ -1136,6 +1136,39 @@ def _deterministic_zip_payload(entries: Dict[str, Any]) -> bytes:
     return memory.getvalue()
 
 
+def _deterministic_json_bytes(payload: Any) -> bytes:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return serialized.encode("utf-8")
+
+
+def _proof_bundle_manifest(
+    *,
+    decision_id: str,
+    proof_pack_id: str,
+    export_checksum: str,
+    entries: Dict[str, Any],
+) -> Dict[str, Any]:
+    files: List[Dict[str, Any]] = []
+    for filename in sorted(entries.keys()):
+        content = _deterministic_json_bytes(entries[filename])
+        files.append(
+            {
+                "filename": filename,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        )
+    return {
+        "schema_name": "proof_bundle_manifest",
+        "schema_version": "v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "decision_id": decision_id,
+        "proof_pack_id": proof_pack_id,
+        "export_checksum": export_checksum,
+        "files": files,
+    }
+
+
 @app.get("/audit/export")
 def audit_export(
     repo: str,
@@ -1349,6 +1382,33 @@ def verify_override_checkpoint(
     return result
 
 
+@app.get("/audit/checkpoints/override/latest")
+def get_latest_override_checkpoint(
+    repo: str,
+    cadence: str = "daily",
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import latest_override_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = latest_override_checkpoint(
+            repo=repo,
+            cadence=cadence,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return result
+
+
 @app.post("/audit/checkpoints/jira-lock")
 def create_jira_lock_checkpoint(
     chain_id: str,
@@ -1411,6 +1471,33 @@ def verify_jira_lock_checkpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not result.get("exists", False):
         raise HTTPException(status_code=404, detail=result.get("reason", "Checkpoint not found"))
+    return result
+
+
+@app.get("/audit/checkpoints/jira-lock/latest")
+def get_latest_jira_lock_checkpoint(
+    chain_id: str,
+    cadence: str = "daily",
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.audit.checkpoints import latest_jira_lock_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = latest_jira_lock_checkpoint(
+            chain_id=chain_id,
+            cadence=cadence,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
     return result
 
 
@@ -1599,6 +1686,25 @@ def audit_proof_pack(
     ledger_tip_hash = ledger_segment[-1].get("event_hash") if ledger_segment else ""
     ledger_record_id = ledger_segment[-1].get("override_id") if ledger_segment else ""
 
+    from releasegate.evidence.graph import get_decision_evidence_graph, record_proof_pack_evidence
+
+    evidence_graph = get_decision_evidence_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        max_depth=3,
+    ) or {
+        "tenant_id": effective_tenant,
+        "decision_id": decision_id,
+        "nodes": [],
+        "edges": [],
+    }
+    replay_request = {
+        "method": "POST",
+        "endpoint": f"/decisions/{decision_id}/replay",
+        "query": {"tenant_id": effective_tenant},
+        "body": None,
+    }
+
     bundle = {
         "schema_name": "proof_pack",
         "schema_version": "proof_pack_v1",
@@ -1634,9 +1740,10 @@ def audit_proof_pack(
         "checkpoint_snapshot": checkpoint_snapshot,
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
+        "evidence_graph": evidence_graph,
+        "replay_request": replay_request,
     }
     export_checksum = sha256_json(bundle)
-    from releasegate.evidence.graph import record_proof_pack_evidence
 
     record_proof_pack_evidence(
         tenant_id=effective_tenant,
@@ -1674,20 +1781,27 @@ def audit_proof_pack(
     if format.lower() != "zip":
         raise HTTPException(status_code=400, detail="Unsupported format (expected json or zip)")
 
-    zip_bytes = _deterministic_zip_payload(
-        {
-            "bundle.json": bundle,
-            "integrity.json": bundle["integrity"],
-            "chain_proof.json": bundle["chain_proof"],
-            "checkpoint_proof.json": bundle["checkpoint_proof"],
-            "checkpoint_snapshot.json": bundle["checkpoint_snapshot"],
-            "decision_snapshot.json": bundle["decision_snapshot"],
-            "input_snapshot.json": bundle["input_snapshot"],
-            "ledger_segment.json": bundle["ledger_segment"],
-            "override_snapshot.json": bundle["override_snapshot"],
-            "policy_snapshot.json": bundle["policy_snapshot"],
-        }
+    zip_entries = {
+        "bundle.json": bundle,
+        "integrity.json": bundle["integrity"],
+        "chain_proof.json": bundle["chain_proof"],
+        "checkpoint_proof.json": bundle["checkpoint_proof"],
+        "checkpoint_snapshot.json": bundle["checkpoint_snapshot"],
+        "decision_snapshot.json": bundle["decision_snapshot"],
+        "input_snapshot.json": bundle["input_snapshot"],
+        "ledger_segment.json": bundle["ledger_segment"],
+        "override_snapshot.json": bundle["override_snapshot"],
+        "policy_snapshot.json": bundle["policy_snapshot"],
+        "evidence_graph.json": bundle["evidence_graph"],
+        "replay_request.json": bundle["replay_request"],
+    }
+    zip_entries["manifest.json"] = _proof_bundle_manifest(
+        decision_id=decision_id,
+        proof_pack_id=proof_pack_id,
+        export_checksum=export_checksum,
+        entries=zip_entries,
     )
+    zip_bytes = _deterministic_zip_payload(zip_entries)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -1713,6 +1827,27 @@ def audit_proof_pack(
             "X-Export-Checksum": export_checksum,
             "X-Export-Id": proof_pack_id,
         },
+    )
+
+
+@app.get("/decisions/{decision_id}/export-proof")
+def export_decision_proof_bundle(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    checkpoint_cadence: str = "daily",
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["proofpack:read", "checkpoint:read", "policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    # Reuse the hardened proof-pack exporter and return a deterministic zip bundle.
+    return audit_proof_pack(
+        decision_id=decision_id,
+        format="zip",
+        checkpoint_cadence=checkpoint_cadence,
+        tenant_id=tenant_id,
+        auth=auth,
     )
 
 
