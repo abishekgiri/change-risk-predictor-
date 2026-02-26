@@ -2,7 +2,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi.testclient import TestClient
 
@@ -36,7 +37,15 @@ def _bindings_hash(bindings: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _seed_allowed_decision(repo: str, pr_number: int, issue_key: str, commit_sha: str) -> Decision:
+def _seed_allowed_decision(
+    repo: str,
+    pr_number: int,
+    issue_key: str,
+    commit_sha: str,
+    *,
+    computed_at: Optional[str] = None,
+) -> Decision:
+    computed_at = computed_at or datetime.now(timezone.utc).isoformat()
     policy_dict = {
         "policy_id": "RG-CORR-1",
         "version": "1.0.0",
@@ -68,11 +77,17 @@ def _seed_allowed_decision(repo: str, pr_number: int, issue_key: str, commit_sha
         reason_code="POLICY_ALLOWED",
         inputs_present={"releasegate_risk": True},
         input_snapshot={
+            "risk_meta": {
+                "releasegate_risk": "LOW",
+                "risk_level": "LOW",
+                "risk_score": 25,
+                "computed_at": computed_at,
+            },
             "signal_map": {
                 "repo": repo,
                 "pr_number": pr_number,
                 "diff": {},
-                "risk": {"level": "LOW"},
+                "risk": {"level": "LOW", "score": 25, "computed_at": computed_at},
                 "labels": [],
             },
             "policies_requested": ["RG-CORR-1"],
@@ -225,6 +240,46 @@ def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
     assert body["reason_code"] == "DEPLOY_COMMIT_MISMATCH"
 
 
+def test_deploy_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-513"
+    commit_sha = "dddddddddddddddddddddddddddddddddddddddd"
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    decision = _seed_allowed_decision(repo, 40, issue_key, commit_sha, computed_at=stale_at)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-stale",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+            "policy_overrides": {"strict_fail_closed": True, "signals": {"max_age_seconds": 60}},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "SIGNAL_STALE"
+
+
 def test_incident_close_gate_blocks_when_deploy_history_missing():
     repo = f"corr-{uuid.uuid4().hex[:8]}"
     issue_key = "RG-506"
@@ -255,6 +310,46 @@ def test_incident_close_gate_blocks_when_deploy_history_missing():
     assert body["allow"] is False
     assert body["status"] == "BLOCKED"
     assert body["reason_code"] == "DEPLOY_NOT_FOUND_FOR_CORRELATION"
+
+
+def test_incident_close_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-514"
+    commit_sha = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    decision = _seed_allowed_decision(repo, 41, issue_key, commit_sha, computed_at=stale_at)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.get_active_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-STALE",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-stale-incident",
+            "repo": repo,
+            "env": "prod",
+            "policy_overrides": {"strict_fail_closed": True, "signals": {"max_age_seconds": 60}},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "SIGNAL_STALE"
 
 
 def test_incident_close_gate_allows_with_valid_deploy_history(monkeypatch):

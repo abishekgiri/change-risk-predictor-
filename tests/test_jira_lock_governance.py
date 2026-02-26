@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
+from releasegate.audit.overrides import record_override
 from releasegate.integrations.jira.lock_store import apply_transition_lock_update, verify_lock_chain
 from releasegate.server import app
 from releasegate.storage import get_storage_backend
@@ -100,7 +101,17 @@ def test_create_and_verify_jira_lock_checkpoint(monkeypatch):
     verified = verify_resp.json()
     assert verified["exists"] is True
     assert verified["valid"] is True
+    assert verified["checkpoint_hash_match"] is True
     assert verified["head_hash_match"] is True
+
+    latest_resp = client.get(
+        "/audit/checkpoints/jira-lock/latest",
+        params={"tenant_id": tenant, "chain_id": f"jira-lock:{issue}", "cadence": "daily"},
+        headers=jwt_headers(roles=["auditor"], scopes=["checkpoint:read"]),
+    )
+    assert latest_resp.status_code == 200
+    latest = latest_resp.json()
+    assert latest.get("ids", {}).get("checkpoint_id") == body.get("ids", {}).get("checkpoint_id")
 
     chain = verify_lock_chain(tenant_id=tenant, chain_id=f"jira-lock:{issue}")
     assert chain["valid"] is True
@@ -144,3 +155,36 @@ def test_governance_override_metrics_api_reports_core_fields():
     assert metrics["overrides_total_7d"] >= 1
     assert metrics["high_risk_overrides_total_30d"] >= 1
     assert "overrides_by_actor_30d" in body
+
+
+def test_latest_override_checkpoint_endpoint_returns_latest(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "override-checkpoint-test-key")
+    tenant = "tenant-test"
+    repo = f"checkpoint-api-{uuid.uuid4().hex[:8]}"
+    pr_number = 28
+    record_override(
+        repo=repo,
+        pr_number=pr_number,
+        issue_key="RG-CP-OVR-1",
+        decision_id="d-cp-ovr-1",
+        actor="admin@example.com",
+        reason="override checkpoint seed",
+        tenant_id=tenant,
+    )
+    create_resp = client.post(
+        "/audit/checkpoints/override",
+        params={"tenant_id": tenant, "repo": repo, "pr": pr_number, "cadence": "daily"},
+        headers=jwt_headers(roles=["admin"], scopes=["checkpoint:read"]),
+    )
+    assert create_resp.status_code == 200
+    created = create_resp.json()
+
+    latest_resp = client.get(
+        "/audit/checkpoints/override/latest",
+        params={"tenant_id": tenant, "repo": repo, "cadence": "daily"},
+        headers=jwt_headers(roles=["auditor"], scopes=["checkpoint:read"]),
+    )
+    assert latest_resp.status_code == 200
+    latest = latest_resp.json()
+    assert latest.get("ids", {}).get("checkpoint_id") == created.get("ids", {}).get("checkpoint_id")
+    assert str(((latest.get("payload") or {}).get("checkpoint_hash") or "")).startswith("sha256:")

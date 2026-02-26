@@ -9,6 +9,10 @@ from releasegate.evidence.graph import (
     record_deployment_evidence,
     record_incident_evidence,
 )
+from releasegate.governance.signal_freshness import (
+    evaluate_risk_signal_freshness,
+    resolve_signal_freshness_policy,
+)
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 from releasegate.policy.releases import get_active_policy_release
@@ -87,6 +91,30 @@ def _extract_artifact_digest(payload: Dict[str, Any]) -> Optional[str]:
         if value:
             return value
     return None
+
+
+def _extract_risk_meta(payload: Dict[str, Any]) -> Dict[str, Any]:
+    input_snapshot = payload.get("input_snapshot")
+    if not isinstance(input_snapshot, dict):
+        return {}
+    risk_meta = input_snapshot.get("risk_meta")
+    if isinstance(risk_meta, dict):
+        return risk_meta
+    signal_map = input_snapshot.get("signal_map")
+    if not isinstance(signal_map, dict):
+        return {}
+    risk = signal_map.get("risk")
+    if not isinstance(risk, dict):
+        return {}
+    normalized = {
+        "risk_level": risk.get("level"),
+        "releasegate_risk": risk.get("level"),
+        "risk_score": risk.get("score"),
+        "computed_at": risk.get("computed_at"),
+        "signal_hash": risk.get("signal_hash"),
+        "source": risk.get("source"),
+    }
+    return normalized
 
 
 def _find_decision_by_issue(
@@ -325,6 +353,28 @@ def evaluate_deploy_gate(
     bound_repo = _extract_repo(payload, decision_row.get("repo"))
     bound_commit = _extract_commit_sha(payload)
     decision_artifact = _extract_artifact_digest(payload)
+    risk_meta = _extract_risk_meta(payload)
+    freshness_policy = resolve_signal_freshness_policy(
+        policy_overrides=overrides.get("signals") if isinstance(overrides.get("signals"), dict) else None,
+        strict_enabled=strict_fail_closed,
+    )
+    freshness = evaluate_risk_signal_freshness(
+        risk_meta=risk_meta,
+        policy=freshness_policy,
+    )
+    if freshness.get("stale") and freshness.get("should_block"):
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(freshness.get("reason_code") or "SIGNAL_STALE"),
+            reason=f"Deployment blocked due to stale risk signal: {freshness.get('reason')}",
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=bound_issue,
+            correlation_id=correlation_id,
+            repo=bound_repo or normalized_repo,
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=bound_commit,
+            env=normalized_env,
+        ).to_dict()
 
     if str(decision_row.get("release_status") or "").upper() != "ALLOWED":
         denied = _deny(
@@ -628,6 +678,29 @@ def evaluate_incident_close_gate(
         return denied.to_dict()
 
     payload = _parse_decision_payload(decision_row)
+    risk_meta = _extract_risk_meta(payload)
+    freshness_policy = resolve_signal_freshness_policy(
+        policy_overrides=overrides.get("signals") if isinstance(overrides.get("signals"), dict) else None,
+        strict_enabled=strict_fail_closed,
+    )
+    freshness = evaluate_risk_signal_freshness(
+        risk_meta=risk_meta,
+        policy=freshness_policy,
+    )
+    if freshness.get("stale") and freshness.get("should_block"):
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(freshness.get("reason_code") or "SIGNAL_STALE"),
+            reason=f"Incident closure blocked due to stale risk signal: {freshness.get('reason')}",
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=issue_key,
+            correlation_id=correlation_id,
+            repo=repo or decision_row.get("repo"),
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=None,
+            env=env,
+        ).to_dict()
+
     bound_repo = _extract_repo(payload, decision_row.get("repo"))
     bound_issue = _extract_issue_key(payload) or str(issue_key or "").strip() or None
     bound_env = str(env or "prod").strip().lower()
