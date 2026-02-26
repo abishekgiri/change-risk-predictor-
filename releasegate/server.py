@@ -185,6 +185,16 @@ class PolicyRegistryActivateRequest(BaseModel):
     actor_id: Optional[str] = None
 
 
+class PolicyRegistryStageRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+
+
+class PolicyRegistryRollbackRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+
+
 class SimulateDecisionRequest(BaseModel):
     actor: Optional[str] = None
     issue_key: Optional[str] = None
@@ -194,6 +204,7 @@ class SimulateDecisionRequest(BaseModel):
     environment: Optional[str] = None
     context: Dict[str, Any] = Field(default_factory=dict)
     policy_id: Optional[str] = None
+    status_filter: str = "ACTIVE"
     tenant_id: Optional[str] = None
 
 
@@ -1581,7 +1592,7 @@ def simulate_policy_impact(
 def simulate_decision_endpoint(
     payload: SimulateDecisionRequest,
     auth: AuthContext = require_access(
-        roles=["admin", "operator", "auditor"],
+        roles=["admin"],
         scopes=["policy:read"],
         rate_profile="heavy",
     ),
@@ -1600,6 +1611,7 @@ def simulate_decision_endpoint(
             environment=payload.environment,
             context=payload.context,
             policy_id=payload.policy_id,
+            status_filter=payload.status_filter,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2259,6 +2271,31 @@ def get_registry_policy_endpoint(
     return policy
 
 
+@app.get("/policies/{policy_id}/events")
+def list_registry_policy_events_endpoint(
+    policy_id: str,
+    tenant_id: Optional[str] = None,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.store import list_registry_events
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "policy_id": policy_id,
+        "events": list_registry_events(
+            tenant_id=effective_tenant,
+            policy_id=policy_id,
+            limit=max(1, min(limit, 500)),
+        ),
+    }
+
+
 @app.post("/policies/{policy_id}/activate")
 def activate_registry_policy_endpoint(
     policy_id: str,
@@ -2304,6 +2341,89 @@ def activate_registry_policy_endpoint(
         metadata={"scope_type": activated.get("scope_type"), "scope_id": activated.get("scope_id")},
     )
     return activated
+
+
+@app.post("/policies/{policy_id}/stage")
+def stage_registry_policy_endpoint(
+    policy_id: str,
+    payload: Optional[PolicyRegistryStageRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import PolicyConflictError, stage_registry_policy
+
+    stage_payload = payload or PolicyRegistryStageRequest()
+    effective_tenant = _effective_tenant(auth, stage_payload.tenant_id)
+    try:
+        staged = stage_registry_policy(
+            tenant_id=effective_tenant,
+            policy_id=policy_id,
+            actor_id=stage_payload.actor_id or auth.principal_id,
+        )
+    except PolicyConflictError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": exc.code,
+                "scope_type": exc.scope_type,
+                "scope_id": exc.scope_id,
+                "stage": exc.stage,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_registry_stage",
+        target_type="policy_registry",
+        target_id=policy_id,
+        metadata={"scope_type": staged.get("scope_type"), "scope_id": staged.get("scope_id")},
+    )
+    return staged
+
+
+@app.post("/policies/{policy_id}/rollback")
+def rollback_registry_policy_endpoint(
+    policy_id: str,
+    payload: Optional[PolicyRegistryRollbackRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.registry import rollback_registry_policy
+
+    rollback_payload = payload or PolicyRegistryRollbackRequest()
+    effective_tenant = _effective_tenant(auth, rollback_payload.tenant_id)
+    try:
+        restored = rollback_registry_policy(
+            tenant_id=effective_tenant,
+            policy_id=policy_id,
+            actor_id=rollback_payload.actor_id or auth.principal_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_registry_rollback",
+        target_type="policy_registry",
+        target_id=policy_id,
+        metadata={"restored_policy_id": restored.get("policy_id")},
+    )
+    return restored
 
 
 @app.post("/policy/releases")

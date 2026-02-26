@@ -51,6 +51,15 @@ def test_policy_registry_api_create_activate_and_list():
     assert created["status"] == "DRAFT"
     assert created["lint_errors"] == []
 
+    stage_resp = client.post(
+        f"/policies/{created['policy_id']}/stage",
+        headers=headers,
+        json={"tenant_id": "tenant-registry-api"},
+    )
+    assert stage_resp.status_code == 200, stage_resp.text
+    staged = stage_resp.json()
+    assert staged["status"] == "STAGED"
+
     activate_resp = client.post(
         f"/policies/{created['policy_id']}/activate",
         headers=headers,
@@ -200,6 +209,13 @@ def test_policy_registry_api_blocks_activation_when_lint_errors_exist():
     created = create_resp.json()
     assert created["lint_errors"]
 
+    stage_resp = client.post(
+        f"/policies/{created['policy_id']}/stage",
+        headers=headers,
+        json={"tenant_id": "tenant-registry-api"},
+    )
+    assert stage_resp.status_code == 200, stage_resp.text
+
     activate_resp = client.post(
         f"/policies/{created['policy_id']}/activate",
         headers=headers,
@@ -275,6 +291,12 @@ def test_policy_registry_api_rejects_monotonic_weakening_on_activate():
     )
     assert weak_draft.status_code == 200, weak_draft.text
     weak_policy_id = weak_draft.json()["policy_id"]
+    stage = client.post(
+        f"/policies/{weak_policy_id}/stage",
+        headers=headers,
+        json={"tenant_id": "tenant-registry-api"},
+    )
+    assert stage.status_code == 200, stage.text
 
     org = client.post(
         "/policies",
@@ -308,6 +330,57 @@ def test_policy_registry_api_rejects_monotonic_weakening_on_activate():
     assert detail.get("stage") == "activate"
 
 
+def test_policy_registry_api_rollback_restores_previous_active():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api")
+
+    first = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "51",
+            "status": "ACTIVE",
+            "policy_json": {"required_approvals": 1, "transition_rules": [{"transition_id": "51", "result": "ALLOW"}]},
+        },
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "51",
+            "status": "ACTIVE",
+            "policy_json": {"required_approvals": 2, "transition_rules": [{"transition_id": "51", "result": "BLOCK"}]},
+        },
+    )
+    assert second.status_code == 200, second.text
+    second_policy_id = second.json()["policy_id"]
+
+    rollback = client.post(
+        f"/policies/{second_policy_id}/rollback",
+        headers=headers,
+        json={"tenant_id": "tenant-registry-api"},
+    )
+    assert rollback.status_code == 200, rollback.text
+    restored = rollback.json()
+    assert restored["policy_id"] == first.json()["policy_id"]
+    assert restored["status"] == "ACTIVE"
+
+    events = client.get(
+        f"/policies/{second_policy_id}/events",
+        headers=headers,
+        params={"tenant_id": "tenant-registry-api"},
+    )
+    assert events.status_code == 200, events.text
+    event_types = {event.get("event_type") for event in events.json().get("events", [])}
+    assert "POLICY_CREATED" in event_types
+    assert "POLICY_ACTIVATED" in event_types
+    assert "POLICY_ARCHIVED" in event_types
 def test_simulate_decision_endpoint_has_no_persistence_side_effects():
     _reset_db()
     headers = jwt_headers(tenant_id="tenant-registry-api")
@@ -350,3 +423,69 @@ def test_simulate_decision_endpoint_has_no_persistence_side_effects():
     assert _table_count("audit_decisions") == before_decisions
     assert _table_count("idempotency_keys") == before_idempotency
     assert _table_count("security_audit_events") == before_security
+
+
+def test_policy_registry_api_simulate_decision_status_filter_supports_staged_shadow():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api")
+
+    active = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "61",
+            "status": "ACTIVE",
+            "policy_json": {"transition_rules": [{"transition_id": "61", "result": "ALLOW"}]},
+        },
+    )
+    assert active.status_code == 200, active.text
+
+    staged = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "61",
+            "status": "STAGED",
+            "policy_json": {"transition_rules": [{"transition_id": "61", "result": "BLOCK"}]},
+        },
+    )
+    assert staged.status_code == 200, staged.text
+    assert staged.json()["status"] == "STAGED"
+
+    active_sim = client.post(
+        "/simulate-decision",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "issue_key": "RG-61",
+            "transition_id": "61",
+            "project_id": "PROJ",
+            "workflow_id": "wf-release",
+            "environment": "prod",
+            "status_filter": "ACTIVE",
+            "context": {"org_id": "tenant-registry-api"},
+        },
+    )
+    assert active_sim.status_code == 200, active_sim.text
+    assert active_sim.json()["status"] == "ALLOWED"
+
+    staged_sim = client.post(
+        "/simulate-decision",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "issue_key": "RG-61",
+            "transition_id": "61",
+            "project_id": "PROJ",
+            "workflow_id": "wf-release",
+            "environment": "prod",
+            "status_filter": "STAGED",
+            "context": {"org_id": "tenant-registry-api"},
+        },
+    )
+    assert staged_sim.status_code == 200, staged_sim.text
+    assert staged_sim.json()["status"] == "BLOCKED"

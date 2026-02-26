@@ -1589,6 +1589,65 @@ def _migration_20260220_022_policy_registry_control_plane(cursor) -> None:
     )
 
 
+def _migration_20260226_023_policy_lifecycle_state_machine(cursor) -> None:
+    if not _column_exists(cursor, "policy_registry_entries", "archived_at"):
+        cursor.execute("ALTER TABLE policy_registry_entries ADD COLUMN archived_at TEXT")
+
+    cursor.execute(
+        """
+        UPDATE policy_registry_entries
+        SET status = 'ARCHIVED'
+        WHERE status = 'DEPRECATED'
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE policy_registry_entries
+        SET archived_at = COALESCE(archived_at, activated_at, created_at)
+        WHERE status = 'ARCHIVED' AND (archived_at IS NULL OR TRIM(archived_at) = '')
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_registry_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_events_tenant_policy_created
+        ON policy_registry_events(tenant_id, policy_id, created_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_registry_events_update
+        BEFORE UPDATE ON policy_registry_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy registry events are immutable: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_registry_events_delete
+        BEFORE DELETE ON policy_registry_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy registry events are immutable: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1699,6 +1758,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260220_022_policy_registry_control_plane",
         description="Add centralized policy registry with immutable payload versions and active scope pointers.",
         apply=_migration_20260220_022_policy_registry_control_plane,
+    ),
+    Migration(
+        migration_id="20260226_023_policy_lifecycle_state_machine",
+        description="Add staged lifecycle controls, archived timestamps, and immutable policy registry events.",
+        apply=_migration_20260226_023_policy_lifecycle_state_machine,
     ),
 ]
 

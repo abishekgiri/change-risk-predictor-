@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import yaml
 
+from releasegate.policy.analyzer import detect_transition_coverage
 from releasegate.policy.loader import PolicyLoader
 from releasegate.policy.policy_types import Policy
 from releasegate.utils.paths import safe_join_under
@@ -840,6 +841,9 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
                     )
                 break
 
+    coverage_issues = detect_transition_coverage(payload)
+    if coverage_issues:
+        issues.extend(coverage_issues)
     error_count = sum(1 for issue in issues if issue.get("severity") == "ERROR")
     warning_count = sum(1 for issue in issues if issue.get("severity") == "WARNING")
     return {
