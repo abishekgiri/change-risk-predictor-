@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("20260220_")
+    assert current.startswith("202602")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -39,6 +39,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260220_020_replay_status_column" in migration_ids
         assert "20260220_021_override_expiry_metadata" in migration_ids
         assert "20260220_022_policy_registry_control_plane" in migration_ids
+        assert "20260226_023_policy_lifecycle_state_machine" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -102,6 +103,16 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         idem_info = cur.fetchall()
         idem_pk = [row[1] for row in sorted((r for r in idem_info if r[5] > 0), key=lambda r: r[5])]
         assert idem_pk == ["tenant_id", "operation", "idem_key"]
+
+        cur.execute("PRAGMA table_info(policy_registry_entries)")
+        policy_registry_info = cur.fetchall()
+        policy_registry_cols = {row[1] for row in policy_registry_info}
+        assert "archived_at" in policy_registry_cols
+
+        cur.execute("PRAGMA table_info(policy_registry_events)")
+        policy_event_info = cur.fetchall()
+        policy_event_pk = [row[1] for row in sorted((r for r in policy_event_info if r[5] > 0), key=lambda r: r[5])]
+        assert policy_event_pk == ["tenant_id", "event_id"]
 
         cur.execute("PRAGMA table_info(audit_attestations)")
         attestation_info = cur.fetchall()
@@ -262,6 +273,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_by",
             "activated_at",
             "activated_by",
+            "archived_at",
             "supersedes_policy_id",
         } <= pr_cols
         assert pr_pk == ["tenant_id", "policy_id"]
@@ -269,8 +281,9 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         cur.execute("SELECT current_version, migration_id FROM schema_state WHERE id = 1")
         state = cur.fetchone()
         assert state is not None
-        assert state[0] == "20260220_022_policy_registry_control_plane"
-        assert state[1] == "20260220_022_policy_registry_control_plane"
+        latest = storage_migrations.MIGRATIONS[-1].migration_id
+        assert state[0] == latest
+        assert state[1] == latest
     finally:
         conn.close()
 

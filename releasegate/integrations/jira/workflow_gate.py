@@ -926,6 +926,8 @@ class WorkflowGate:
             unresolved_policy_ids = sorted(set(policies) - set(compiled_policy_map.keys()))
             policy_bindings = self._build_policy_bindings(policies, compiled_policy_map, tenant_id=tenant_id)
             registry_resolution: Dict[str, Any] = {}
+            registry_staged_resolution: Dict[str, Any] = {}
+            shadow_evaluation: Dict[str, Any] = {}
             try:
                 from releasegate.policy.registry import resolve_registry_policy
 
@@ -936,9 +938,76 @@ class WorkflowGate:
                     workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
                     transition_id=request.transition_id,
                     rollout_key=request.issue_key,
+                    status_filter="ACTIVE",
                 )
             except Exception:
                 registry_resolution = {}
+
+            try:
+                from releasegate.policy.registry import resolve_registry_policy, simulate_registry_decision
+
+                registry_staged_resolution = resolve_registry_policy(
+                    tenant_id=tenant_id,
+                    org_id=request.context_overrides.get("org_id") or tenant_id,
+                    project_id=request.project_key,
+                    workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
+                    transition_id=request.transition_id,
+                    rollout_key=request.issue_key,
+                    status_filter="STAGED",
+                )
+                staged_components = [
+                    component
+                    for component in (registry_staged_resolution.get("components") or [])
+                    if isinstance(component, dict)
+                    and str(component.get("resolved_from_status") or component.get("status") or "").strip().upper()
+                    == "STAGED"
+                ]
+                if staged_components:
+                    active_sim = simulate_registry_decision(
+                        tenant_id=tenant_id,
+                        actor=request.actor_email or request.actor_account_id,
+                        issue_key=request.issue_key,
+                        transition_id=request.transition_id,
+                        project_id=request.project_key,
+                        workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
+                        environment=request.environment,
+                        context={
+                            "org_id": request.context_overrides.get("org_id") or tenant_id,
+                            "rollout_key": request.issue_key,
+                        },
+                        status_filter="ACTIVE",
+                    )
+                    staged_sim = simulate_registry_decision(
+                        tenant_id=tenant_id,
+                        actor=request.actor_email or request.actor_account_id,
+                        issue_key=request.issue_key,
+                        transition_id=request.transition_id,
+                        project_id=request.project_key,
+                        workflow_id=request.context_overrides.get("workflow_id") or request.transition_name or "default",
+                        environment=request.environment,
+                        context={
+                            "org_id": request.context_overrides.get("org_id") or tenant_id,
+                            "rollout_key": request.issue_key,
+                        },
+                        status_filter="STAGED",
+                    )
+                    shadow_evaluation = {
+                        "staged_policy_ids": [
+                            str(component.get("policy_id") or "")
+                            for component in staged_components
+                            if str(component.get("policy_id") or "").strip()
+                        ],
+                        "decision_diff": bool(active_sim.get("status") != staged_sim.get("status")),
+                        "active_decision": active_sim.get("status"),
+                        "staged_decision": staged_sim.get("status"),
+                        "active_reason_codes": list(active_sim.get("reason_codes") or []),
+                        "staged_reason_codes": list(staged_sim.get("reason_codes") or []),
+                        "active_policy_hash": active_sim.get("effective_policy_hash"),
+                        "staged_policy_hash": staged_sim.get("effective_policy_hash"),
+                    }
+            except Exception as exc:
+                registry_staged_resolution = {}
+                shadow_evaluation = {"shadow_error": str(exc)[:512]}
             registry_effective_policy = (
                 registry_resolution.get("effective_policy")
                 if isinstance(registry_resolution.get("effective_policy"), dict)
@@ -953,6 +1022,11 @@ class WorkflowGate:
             registry_component_lineage = (
                 registry_resolution.get("component_lineage")
                 if isinstance(registry_resolution.get("component_lineage"), dict)
+                else {}
+            )
+            registry_staged_lineage = (
+                registry_staged_resolution.get("component_lineage")
+                if isinstance(registry_staged_resolution.get("component_lineage"), dict)
                 else {}
             )
             registry_resolution_conflicts = (
@@ -987,9 +1061,11 @@ class WorkflowGate:
                             "effective_policy_hash": registry_effective_hash,
                             "component_policy_ids": registry_component_ids,
                             "component_lineage": registry_component_lineage,
+                            "staged_component_lineage": registry_staged_lineage,
                             "resolution_conflicts": registry_resolution_conflicts,
                             "component_policies": registry_component_policies,
                             "effective_policy": registry_effective_policy,
+                            "shadow_evaluation": shadow_evaluation,
                         },
                     )
                 )
@@ -1019,13 +1095,15 @@ class WorkflowGate:
                         "registry_policy": {
                             "effective_policy_hash": registry_effective_hash,
                             "component_policy_ids": registry_component_ids,
-                            "component_lineage": registry_component_lineage,
-                            "resolution_conflicts": registry_resolution_conflicts,
-                            "component_policies": registry_component_policies,
-                            "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
-                        },
+                        "component_lineage": registry_component_lineage,
+                        "staged_component_lineage": registry_staged_lineage,
+                        "resolution_conflicts": registry_resolution_conflicts,
+                        "component_policies": registry_component_policies,
+                        "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                        "shadow_evaluation": shadow_evaluation,
                     },
-                )
+                },
+            )
             
             # Run ALL policies (Engine doesn't support filtering input yet)
             run_result = engine.evaluate(signal_map)
@@ -1266,9 +1344,11 @@ class WorkflowGate:
                         "effective_policy_hash": registry_effective_hash,
                         "component_policy_ids": registry_component_ids,
                         "component_lineage": registry_component_lineage,
+                        "staged_component_lineage": registry_staged_lineage,
                         "resolution_conflicts": registry_resolution_conflicts,
                         "component_policies": registry_component_policies,
                         "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                        "shadow_evaluation": shadow_evaluation,
                     },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,

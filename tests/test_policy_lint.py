@@ -298,3 +298,18 @@ def test_registry_lint_detects_shadowed_narrower_rule():
 
     codes = {issue["code"] for issue in report["issues"]}
     assert "RULE_UNREACHABLE_SHADOWED" in codes
+
+
+def test_registry_lint_detects_transition_coverage_gaps():
+    report = lint_registry_policy(
+        {
+            "required_transitions": ["2"],
+            "transition_rules": [
+                {"transition_id": "2", "conditions": {"risk": "HIGH"}, "result": "ALLOW"},
+            ],
+        }
+    )
+
+    assert report["ok"] is False
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "RULE_NO_COVERAGE" in codes

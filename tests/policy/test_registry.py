@@ -7,10 +7,12 @@ import pytest
 from releasegate.config import DB_PATH
 from releasegate.policy.registry import (
     activate_registry_policy,
+    rollback_registry_policy,
     create_registry_policy,
     get_registry_policy,
     list_registry_policies,
     resolve_registry_policy,
+    stage_registry_policy,
 )
 from releasegate.storage.schema import init_db
 
@@ -41,6 +43,12 @@ def test_registry_policy_activation_blocked_when_lint_errors_exist(clean_db):
     )
     assert created["status"] == "DRAFT"
     assert any(issue["code"] == "TRANSITION_UNCOVERED" for issue in created["lint_errors"])
+
+    stage_registry_policy(
+        tenant_id=tenant,
+        policy_id=created["policy_id"],
+        actor_id="alice",
+    )
 
     with pytest.raises(ValueError, match="lint errors"):
         activate_registry_policy(
@@ -75,7 +83,7 @@ def test_registry_activation_supersedes_previous_active_scope(clean_db):
 
     first_after = get_registry_policy(tenant_id=tenant, policy_id=first["policy_id"])
     assert first_after is not None
-    assert first_after["status"] == "DEPRECATED"
+    assert first_after["status"] == "ARCHIVED"
 
     policies = list_registry_policies(tenant_id=tenant, scope_type="project", scope_id="PROJ")
     assert [p["policy_id"] for p in policies][:2] == [second["policy_id"], first["policy_id"]]
@@ -201,6 +209,11 @@ def test_registry_rejects_monotonic_weakening_on_activate(clean_db):
         created_by="alice",
         status="DRAFT",
     )
+    stage_registry_policy(
+        tenant_id=tenant,
+        policy_id=draft["policy_id"],
+        actor_id="alice",
+    )
     create_registry_policy(
         tenant_id=tenant,
         scope_type="org",
@@ -219,6 +232,25 @@ def test_registry_rejects_monotonic_weakening_on_activate(clean_db):
     )
 
     with pytest.raises(ValueError, match="POLICY_MONOTONICITY_VIOLATION"):
+        activate_registry_policy(
+            tenant_id=tenant,
+            policy_id=draft["policy_id"],
+            actor_id="alice",
+        )
+
+
+def test_registry_requires_staging_before_activation(clean_db):
+    tenant = "tenant-registry"
+    draft = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="transition",
+        scope_id="11",
+        policy_json={"required_approvals": 1},
+        created_by="alice",
+        status="DRAFT",
+    )
+
+    with pytest.raises(ValueError, match="must be staged"):
         activate_registry_policy(
             tenant_id=tenant,
             policy_id=draft["policy_id"],
@@ -447,6 +479,16 @@ def test_registry_concurrent_activation_keeps_single_active(clean_db):
         created_by="alice",
         status="DRAFT",
     )
+    stage_registry_policy(
+        tenant_id=tenant,
+        policy_id=first["policy_id"],
+        actor_id="alice",
+    )
+    stage_registry_policy(
+        tenant_id=tenant,
+        policy_id=second["policy_id"],
+        actor_id="alice",
+    )
 
     barrier = threading.Barrier(2)
     errors: list[Exception] = []
@@ -485,3 +527,36 @@ def test_registry_concurrent_activation_keeps_single_active(clean_db):
         conn.close()
 
     assert active_count == 1
+
+
+def test_registry_rollback_restores_previous_active(clean_db):
+    tenant = "tenant-registry"
+    first = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="transition",
+        scope_id="99",
+        policy_json={"marker": "first", "required_approvals": 1},
+        created_by="alice",
+        status="ACTIVE",
+    )
+    second = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="transition",
+        scope_id="99",
+        policy_json={"marker": "second", "required_approvals": 2},
+        created_by="alice",
+        status="ACTIVE",
+    )
+    assert second["status"] == "ACTIVE"
+
+    restored = rollback_registry_policy(
+        tenant_id=tenant,
+        policy_id=second["policy_id"],
+        actor_id="alice",
+    )
+    assert restored["policy_id"] == first["policy_id"]
+    assert restored["status"] == "ACTIVE"
+
+    second_after = get_registry_policy(tenant_id=tenant, policy_id=second["policy_id"])
+    assert second_after is not None
+    assert second_after["status"] == "ARCHIVED"
