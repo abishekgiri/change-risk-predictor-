@@ -10,7 +10,7 @@ from releasegate.replay.events import list_replay_events
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
-from releasegate.utils.canonical import canonical_json
+from releasegate.utils.canonical import canonical_json, sha256_json
 
 
 NODE_DECISION = "DECISION"
@@ -24,6 +24,7 @@ NODE_DEPLOYMENT = "DEPLOYMENT"
 NODE_INCIDENT = "INCIDENT"
 NODE_ARTIFACT = "ARTIFACT"
 NODE_OVERRIDE = "OVERRIDE"
+NODE_CHECKPOINT = "CHECKPOINT"
 
 EDGE_USED_POLICY = "USED_POLICY"
 EDGE_USED_SIGNAL = "USED_SIGNAL"
@@ -34,6 +35,7 @@ EDGE_AUTHORIZED_BY = "AUTHORIZED_BY"
 EDGE_DERIVED_FROM = "DERIVED_FROM"
 EDGE_OVERRIDDEN_BY = "OVERRIDDEN_BY"
 EDGE_RESOLVED_BY = "RESOLVED_BY"
+EDGE_ANCHORED_BY = "ANCHORED_BY"
 
 
 def _utc_now() -> str:
@@ -64,6 +66,24 @@ def _edge_sort_key(edge: Dict[str, Any]) -> tuple:
         str(edge.get("to_node_id") or ""),
         str(edge.get("created_at") or ""),
     )
+
+
+def _node_hash_material(node: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": str(node.get("type") or ""),
+        "ref": str(node.get("ref") or ""),
+        "hash": str(node.get("hash") or ""),
+        "payload": node.get("payload") if isinstance(node.get("payload"), dict) else {},
+    }
+
+
+def _edge_hash_material(edge: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "type": str(edge.get("type") or ""),
+        "from": str(edge.get("from_node_id") or ""),
+        "to": str(edge.get("to_node_id") or ""),
+        "metadata": edge.get("metadata") if isinstance(edge.get("metadata"), dict) else {},
+    }
 
 
 def _normalise_node(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -537,6 +557,9 @@ def record_proof_pack_evidence(
     proof_pack_id: str,
     output_format: str,
     export_checksum: Optional[str],
+    checkpoint_id: Optional[str] = None,
+    checkpoint_hash: Optional[str] = None,
+    graph_hash: Optional[str] = None,
     bundle_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     effective_tenant = resolve_tenant_id(tenant_id)
@@ -556,6 +579,7 @@ def record_proof_pack_evidence(
             "proof_pack_id": proof_pack_id,
             "output_format": output_format,
             "bundle_version": bundle_version,
+            "graph_hash": graph_hash,
         },
     )
     append_edge(
@@ -565,7 +589,37 @@ def record_proof_pack_evidence(
         edge_type=EDGE_PRODUCED_ARTIFACT,
         metadata={"proof_pack_id": proof_pack_id},
     )
-    return {"decision": decision_node, "artifact": artifact_node}
+    result: Dict[str, Any] = {"decision": decision_node, "artifact": artifact_node}
+
+    if checkpoint_id or checkpoint_hash:
+        checkpoint_ref = str(checkpoint_id or checkpoint_hash or "")
+        checkpoint_node = upsert_node(
+            tenant_id=effective_tenant,
+            node_type=NODE_CHECKPOINT,
+            ref=checkpoint_ref,
+            node_hash=str(checkpoint_hash or "") or None,
+            payload={
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_hash": checkpoint_hash,
+            },
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=decision_node["node_id"],
+            to_node_id=checkpoint_node["node_id"],
+            edge_type=EDGE_ANCHORED_BY,
+            metadata={"checkpoint_id": checkpoint_id},
+        )
+        append_edge(
+            tenant_id=effective_tenant,
+            from_node_id=artifact_node["node_id"],
+            to_node_id=checkpoint_node["node_id"],
+            edge_type=EDGE_DERIVED_FROM,
+            metadata={"checkpoint_id": checkpoint_id},
+        )
+        result["checkpoint"] = checkpoint_node
+
+    return result
 
 
 def record_override_evidence(
@@ -722,6 +776,223 @@ def get_decision_evidence_graph(
         "nodes": sorted(nodes, key=lambda item: (str(item.get("type") or ""), str(item.get("ref") or ""))),
         "edges": edges,
     }
+
+
+def compute_evidence_graph_hash(graph: Dict[str, Any]) -> str:
+    anchors = graph.get("anchors") if isinstance(graph.get("anchors"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    normalized_nodes = sorted(
+        (_node_hash_material(node) for node in nodes if isinstance(node, dict)),
+        key=canonical_json,
+    )
+    normalized_edges = sorted(
+        (_edge_hash_material(edge) for edge in edges if isinstance(edge, dict)),
+        key=canonical_json,
+    )
+    payload = {
+        "decision_id": str(graph.get("decision_id") or ""),
+        "anchors": anchors,
+        "nodes": normalized_nodes,
+        "edges": normalized_edges,
+    }
+    return sha256_json(payload)
+
+
+def build_decision_compliance_graph(
+    *,
+    tenant_id: Optional[str],
+    decision_id: str,
+    max_depth: int = 3,
+    decision_snapshot: Optional[Dict[str, Any]] = None,
+    override_snapshot: Optional[Dict[str, Any]] = None,
+    checkpoint_snapshot: Optional[Dict[str, Any]] = None,
+    chain_proof: Optional[Dict[str, Any]] = None,
+    replay_request: Optional[Dict[str, Any]] = None,
+    proof_pack_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    base_graph = get_decision_evidence_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        max_depth=max_depth,
+    ) or {
+        "tenant_id": effective_tenant,
+        "decision_id": decision_id,
+        "nodes": [],
+        "edges": [],
+    }
+    decision_payload = decision_snapshot if isinstance(decision_snapshot, dict) else {}
+    override_payload = override_snapshot if isinstance(override_snapshot, dict) else {}
+    checkpoint_payload = checkpoint_snapshot if isinstance(checkpoint_snapshot, dict) else {}
+    chain_payload = chain_proof if isinstance(chain_proof, dict) else {}
+    replay_payload = replay_request if isinstance(replay_request, dict) else {}
+
+    checkpoint_ids = checkpoint_payload.get("ids") if isinstance(checkpoint_payload.get("ids"), dict) else {}
+    checkpoint_integrity = (
+        checkpoint_payload.get("integrity")
+        if isinstance(checkpoint_payload.get("integrity"), dict)
+        else {}
+    )
+    checkpoint_signatures = (
+        checkpoint_integrity.get("signatures")
+        if isinstance(checkpoint_integrity.get("signatures"), dict)
+        else {}
+    )
+    checkpoint_signature = (
+        (checkpoint_payload.get("signature") or {}).get("value")
+        if isinstance(checkpoint_payload.get("signature"), dict)
+        else ""
+    )
+    anchors = {
+        "policy_hash": str(
+            decision_payload.get("policy_hash")
+            or decision_payload.get("policy_bundle_hash")
+            or ""
+        ),
+        "override_event_id": str(override_payload.get("override_id") or ""),
+        "override_event_hash": str(override_payload.get("event_hash") or ""),
+        "checkpoint_id": str(checkpoint_ids.get("checkpoint_id") or ""),
+        "checkpoint_hash": str(
+            checkpoint_integrity.get("checkpoint_hash")
+            or checkpoint_payload.get("checkpoint_hash")
+            or ""
+        ),
+        "checkpoint_signature": str(
+            checkpoint_signature
+            or checkpoint_signatures.get("checkpoint_signature")
+            or ""
+        ),
+        "ledger_tip_hash": str(chain_payload.get("ledger_tip_hash") or ""),
+        "proof_pack_id": str(proof_pack_id or ""),
+        "replay_endpoint": str(replay_payload.get("endpoint") or ""),
+    }
+    nodes: List[Dict[str, Any]] = [
+        dict(node) for node in (base_graph.get("nodes") or []) if isinstance(node, dict)
+    ]
+    edges: List[Dict[str, Any]] = [
+        dict(edge) for edge in (base_graph.get("edges") or []) if isinstance(edge, dict)
+    ]
+
+    def _upsert_virtual_node(
+        *,
+        node_type: str,
+        ref: str,
+        node_hash: Optional[str],
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        for node in nodes:
+            if str(node.get("type") or "") == node_type and str(node.get("ref") or "") == ref:
+                return str(node.get("node_id") or "")
+        node_id = f"virtual:{node_type.lower()}:{ref}"
+        nodes.append(
+            {
+                "tenant_id": effective_tenant,
+                "node_id": node_id,
+                "type": node_type,
+                "ref": ref,
+                "hash": node_hash,
+                "payload": payload or {},
+                "created_at": None,
+            }
+        )
+        return node_id
+
+    decision_node_id = _upsert_virtual_node(
+        node_type=NODE_DECISION,
+        ref=str(decision_id),
+        node_hash=str(decision_payload.get("decision_hash") or "") or None,
+        payload={"decision_id": decision_id},
+    )
+
+    def _append_virtual_edge(
+        *,
+        from_node_id: str,
+        to_node_id: str,
+        edge_type: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        for edge in edges:
+            if (
+                str(edge.get("from_node_id") or "") == from_node_id
+                and str(edge.get("to_node_id") or "") == to_node_id
+                and str(edge.get("type") or "") == edge_type
+            ):
+                return
+        edges.append(
+            {
+                "tenant_id": effective_tenant,
+                "edge_id": f"virtual:{edge_type.lower()}:{from_node_id}:{to_node_id}",
+                "from_node_id": from_node_id,
+                "to_node_id": to_node_id,
+                "type": edge_type,
+                "metadata": metadata or {},
+                "created_at": None,
+            }
+        )
+
+    checkpoint_ref = anchors["checkpoint_id"] or anchors["checkpoint_hash"]
+    if checkpoint_ref:
+        checkpoint_node_id = _upsert_virtual_node(
+            node_type=NODE_CHECKPOINT,
+            ref=checkpoint_ref,
+            node_hash=anchors["checkpoint_hash"] or None,
+            payload={
+                "checkpoint_id": anchors["checkpoint_id"] or None,
+                "checkpoint_hash": anchors["checkpoint_hash"] or None,
+            },
+        )
+        _append_virtual_edge(
+            from_node_id=decision_node_id,
+            to_node_id=checkpoint_node_id,
+            edge_type=EDGE_ANCHORED_BY,
+            metadata={"checkpoint_id": anchors["checkpoint_id"] or None},
+        )
+
+    override_ref = anchors["override_event_id"] or anchors["override_event_hash"]
+    if override_ref:
+        override_node_id = _upsert_virtual_node(
+            node_type=NODE_OVERRIDE,
+            ref=override_ref,
+            node_hash=anchors["override_event_hash"] or None,
+            payload={"override_id": anchors["override_event_id"] or None},
+        )
+        _append_virtual_edge(
+            from_node_id=decision_node_id,
+            to_node_id=override_node_id,
+            edge_type=EDGE_OVERRIDDEN_BY,
+        )
+
+    if anchors["proof_pack_id"]:
+        artifact_ref = f"proof_pack:{anchors['proof_pack_id']}"
+        artifact_node_id = _upsert_virtual_node(
+            node_type=NODE_ARTIFACT,
+            ref=artifact_ref,
+            node_hash=None,
+            payload={
+                "artifact_type": "PROOF_PACK",
+                "proof_pack_id": anchors["proof_pack_id"],
+            },
+        )
+        _append_virtual_edge(
+            from_node_id=decision_node_id,
+            to_node_id=artifact_node_id,
+            edge_type=EDGE_PRODUCED_ARTIFACT,
+            metadata={"proof_pack_id": anchors["proof_pack_id"]},
+        )
+
+    graph_payload = {
+        "schema_name": "decision_evidence_graph",
+        "schema_version": "v2",
+        "tenant_id": effective_tenant,
+        "decision_id": decision_id,
+        "proof_pack_id": str(proof_pack_id or ""),
+        "anchors": anchors,
+        "nodes": sorted(nodes, key=lambda item: (str(item.get("type") or ""), str(item.get("ref") or ""))),
+        "edges": sorted(edges, key=_edge_sort_key),
+    }
+    graph_payload["graph_hash"] = compute_evidence_graph_hash(graph_payload)
+    return graph_payload
 
 
 def explain_decision(

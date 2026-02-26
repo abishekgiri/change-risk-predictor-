@@ -1024,6 +1024,7 @@ def _integrity_section(
     ledger_record_id: Optional[str] = None,
     checkpoint_signature: Optional[str] = None,
     signing_key_id: Optional[str] = None,
+    graph_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "canonicalization": CANONICALIZATION_VERSION,
@@ -1032,6 +1033,7 @@ def _integrity_section(
         "policy_hash": hashes.get("policy_hash") or "",
         "decision_hash": hashes.get("decision_hash") or "",
         "replay_hash": hashes.get("replay_hash") or "",
+        "graph_hash": graph_hash or "",
         "ledger": {
             "ledger_tip_hash": ledger_tip_hash or "",
             "ledger_record_id": ledger_record_id or "",
@@ -1755,24 +1757,26 @@ def audit_proof_pack(
     ledger_tip_hash = ledger_segment[-1].get("event_hash") if ledger_segment else ""
     ledger_record_id = ledger_segment[-1].get("override_id") if ledger_segment else ""
 
-    from releasegate.evidence.graph import get_decision_evidence_graph, record_proof_pack_evidence
+    from releasegate.evidence.graph import build_decision_compliance_graph, record_proof_pack_evidence
 
-    evidence_graph = get_decision_evidence_graph(
-        tenant_id=effective_tenant,
-        decision_id=decision_id,
-        max_depth=3,
-    ) or {
-        "tenant_id": effective_tenant,
-        "decision_id": decision_id,
-        "nodes": [],
-        "edges": [],
-    }
     replay_request = {
         "method": "POST",
         "endpoint": f"/decisions/{decision_id}/replay",
         "query": {"tenant_id": effective_tenant},
         "body": None,
     }
+    evidence_graph = build_decision_compliance_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+        max_depth=3,
+        decision_snapshot=decision_snapshot,
+        override_snapshot=override_snapshot,
+        checkpoint_snapshot=checkpoint_snapshot,
+        chain_proof=chain_proof,
+        replay_request=replay_request,
+        proof_pack_id=proof_pack_id,
+    )
+    graph_hash = str(evidence_graph.get("graph_hash") or "")
 
     bundle = {
         "schema_name": "proof_pack",
@@ -1796,6 +1800,7 @@ def audit_proof_pack(
             ledger_record_id=ledger_record_id,
             checkpoint_signature=checkpoint_signature,
             signing_key_id=signing_key_id,
+            graph_hash=graph_hash,
         ),
         "decision_id": decision_id,
         "attestation_id": decision_snapshot.get("attestation_id"),
@@ -1820,6 +1825,14 @@ def audit_proof_pack(
         proof_pack_id=proof_pack_id,
         output_format="json" if format.lower() == "json" else "zip",
         export_checksum=export_checksum,
+        checkpoint_id=checkpoint_id or None,
+        checkpoint_hash=str(
+            ((checkpoint_snapshot or {}).get("integrity") or {}).get("checkpoint_hash")
+            or (checkpoint_snapshot or {}).get("checkpoint_hash")
+            or ""
+        )
+        or None,
+        graph_hash=graph_hash or None,
         bundle_version="audit_proof_v1",
     )
 

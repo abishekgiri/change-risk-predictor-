@@ -368,6 +368,50 @@ def _verify_snapshot_hashes(bundle: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, **computed}
 
 
+def _verify_evidence_graph_hash(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    from releasegate.evidence.graph import compute_evidence_graph_hash
+
+    integrity = bundle.get("integrity") or {}
+    if not isinstance(integrity, dict):
+        raise VerificationFailure(
+            code="EVIDENCE_GRAPH_HASH_MISMATCH",
+            message="proof pack missing integrity section",
+            details={"field": "integrity"},
+        )
+
+    expected_graph_hash = str(integrity.get("graph_hash") or "")
+    evidence_graph = bundle.get("evidence_graph")
+    if not isinstance(evidence_graph, dict):
+        if expected_graph_hash:
+            raise VerificationFailure(
+                code="EVIDENCE_GRAPH_HASH_MISMATCH",
+                message="integrity has graph_hash but evidence_graph is missing",
+                details={"field": "evidence_graph"},
+            )
+        return {"ok": True, "graph_hash": ""}
+
+    computed_graph_hash = compute_evidence_graph_hash(evidence_graph)
+    embedded_graph_hash = str(evidence_graph.get("graph_hash") or "")
+    mismatches: Dict[str, Dict[str, str]] = {}
+    if embedded_graph_hash and embedded_graph_hash != computed_graph_hash:
+        mismatches["evidence_graph.graph_hash"] = {
+            "expected": computed_graph_hash,
+            "actual": embedded_graph_hash,
+        }
+    if expected_graph_hash and expected_graph_hash != computed_graph_hash:
+        mismatches["integrity.graph_hash"] = {
+            "expected": computed_graph_hash,
+            "actual": expected_graph_hash,
+        }
+    if mismatches:
+        raise VerificationFailure(
+            code="EVIDENCE_GRAPH_HASH_MISMATCH",
+            message="evidence graph hash verification failed",
+            details={"mismatches": mismatches},
+        )
+    return {"ok": True, "graph_hash": computed_graph_hash}
+
+
 def _verify_replay(bundle: Dict[str, Any]) -> Dict[str, Any]:
     decision_snapshot = bundle.get("decision_snapshot")
     if not isinstance(decision_snapshot, dict):
@@ -427,6 +471,7 @@ def verify_proof_pack_bundle(
         "ledger_ok": False,
         "signature_ok": False,
         "hashes_ok": False,
+        "graph_ok": False,
         "replay_ok": False,
         "matches_original": False,
         "failure_code": None,
@@ -444,6 +489,8 @@ def verify_proof_pack_bundle(
         result["signature_ok"] = True
         result["checks"]["hashes"] = _verify_snapshot_hashes(bundle)
         result["hashes_ok"] = True
+        result["checks"]["graph"] = _verify_evidence_graph_hash(bundle)
+        result["graph_ok"] = True
         result["checks"]["replay"] = _verify_replay(bundle)
         result["replay_ok"] = True
         result["matches_original"] = bool(result["checks"]["replay"].get("matches_original"))
@@ -477,6 +524,7 @@ def format_verification_summary(report: Dict[str, Any]) -> str:
         + (f" (key_id={checks.get('signature', {}).get('key_id')})" if checks.get("signature", {}).get("ok") else "")
     )
     lines.append(f"hashes: {'OK' if checks.get('hashes', {}).get('ok') else 'FAIL'}")
+    lines.append(f"graph: {'OK' if checks.get('graph', {}).get('ok') else 'FAIL'}")
     replay = checks.get("replay", {})
     replay_suffix = ""
     if replay.get("ok"):
