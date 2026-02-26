@@ -320,6 +320,30 @@ def test_gate_strict_mode_blocks_when_risk_missing(MockRecorder, base_request):
 
 
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_defaults_to_strict_mode_when_config_missing(MockRecorder, base_request):
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("RELEASEGATE_STRICT_MODE", None)
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    gate.client.get_issue_property = MagicMock(return_value={})
+
+    mock_decision = Decision(
+        decision_id="uuid-default-strict",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-default-strict",
+        message="BLOCKED: missing issue property `releasegate_risk` (strict mode)",
+        policy_bundle_hash="abc",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h"),
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    resp = gate.check_transition(base_request)
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_skips_when_no_policies_mapped(MockRecorder, base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
         gate = WorkflowGate()
@@ -375,6 +399,44 @@ def test_gate_skips_when_policy_mapping_invalid(MockRecorder, MockEngine, base_r
     assert resp.allow is True
     assert resp.status == "SKIPPED"
     assert "invalid policy references" in resp.reason
+
+
+@patch("releasegate.engine.ComplianceEngine")
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_strict_mode_blocks_on_engine_core_exception(MockRecorder, MockEngine, base_request):
+    gate = WorkflowGate()
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_run_result = MagicMock()
+    compliant = MagicMock()
+    compliant.policy_id = "SEC-PR-001"
+    compliant.status = "COMPLIANT"
+    compliant.violations = []
+    mock_run_result.results = [compliant]
+    mock_run_result.metadata = {"policy_hash": "hash-1"}
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    mock_decision = Decision(
+        decision_id="uuid-engine-exception",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-engine-exception",
+        message="System Error: boom",
+        policy_bundle_hash="hash-1",
+        reason_code="SYSTEM_ERROR",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h"),
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.integrations.jira.workflow_gate.evaluate_engine_core",
+        side_effect=RuntimeError("boom"),
+    ):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "SYSTEM_ERROR"
 
 
 @patch("releasegate.engine.ComplianceEngine")

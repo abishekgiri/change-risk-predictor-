@@ -20,6 +20,22 @@ class DecisionReason:
 
 
 @dataclass(frozen=True)
+class ApprovalRecord:
+    actor_id: str
+    role: str = ""
+
+
+@dataclass(frozen=True)
+class ConditionRule:
+    rule_id: str
+    when: Mapping[str, Any] = field(default_factory=dict)
+    result: str = "ALLOW"
+    priority: int = 1000
+    required_approvals: int = 0
+    required_roles: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class NormalizedContext:
     evaluation_kind: str
     environment: str
@@ -29,6 +45,12 @@ class NormalizedContext:
     pr_number: Optional[int] = None
     actor_id: str = ""
     evaluation_time: str = ""
+    risk_level: str = ""
+    changed_files: Optional[int] = None
+    pr_author_id: str = ""
+    override_requester_id: str = ""
+    override_approvers: Tuple[str, ...] = ()
+    approvals: Tuple[ApprovalRecord, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -56,6 +78,8 @@ class EvaluationInput:
     policy_refs: Tuple[PolicyRef, ...] = ()
     policy_outcomes: Tuple[PolicyOutcome, ...] = ()
     check_reasons: Tuple[DecisionReason, ...] = ()
+    condition_rules: Tuple[ConditionRule, ...] = ()
+    enforce_sod: bool = False
     success_status: str = "ALLOWED"
     success_reason_code: str = "POLICY_ALLOWED"
 
@@ -88,6 +112,24 @@ def decision_reason_to_dict(value: DecisionReason) -> Dict[str, Any]:
     }
 
 
+def approval_record_to_dict(value: ApprovalRecord) -> Dict[str, Any]:
+    return {
+        "actor_id": value.actor_id,
+        "role": value.role,
+    }
+
+
+def condition_rule_to_dict(value: ConditionRule) -> Dict[str, Any]:
+    return {
+        "rule_id": value.rule_id,
+        "when": dict(value.when or {}),
+        "result": value.result,
+        "priority": value.priority,
+        "required_approvals": value.required_approvals,
+        "required_roles": list(value.required_roles),
+    }
+
+
 def normalized_context_to_dict(value: NormalizedContext) -> Dict[str, Any]:
     return {
         "evaluation_kind": value.evaluation_kind,
@@ -98,6 +140,12 @@ def normalized_context_to_dict(value: NormalizedContext) -> Dict[str, Any]:
         "pr_number": value.pr_number,
         "actor_id": value.actor_id,
         "evaluation_time": value.evaluation_time,
+        "risk_level": value.risk_level,
+        "changed_files": value.changed_files,
+        "pr_author_id": value.pr_author_id,
+        "override_requester_id": value.override_requester_id,
+        "override_approvers": list(value.override_approvers),
+        "approvals": [approval_record_to_dict(item) for item in value.approvals],
         "metadata": dict(value.metadata or {}),
     }
 
@@ -116,6 +164,8 @@ def evaluation_input_to_dict(value: EvaluationInput) -> Dict[str, Any]:
         "policy_refs": [policy_ref_to_dict(item) for item in value.policy_refs],
         "policy_outcomes": [policy_outcome_to_dict(item) for item in value.policy_outcomes],
         "check_reasons": [decision_reason_to_dict(item) for item in value.check_reasons],
+        "condition_rules": [condition_rule_to_dict(item) for item in value.condition_rules],
+        "enforce_sod": value.enforce_sod,
         "success_status": value.success_status,
         "success_reason_code": value.success_reason_code,
     }

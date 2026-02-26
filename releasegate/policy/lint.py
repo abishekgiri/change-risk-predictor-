@@ -539,7 +539,6 @@ def _validate_rule_condition_tree(node: Any, *, path: str) -> List[Dict[str, Any
 
     return issues
 
-
 def _normalise_selector_value(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -576,8 +575,6 @@ def _selector_contains(broader: Dict[str, Any], narrower: Dict[str, Any]) -> boo
     return json.dumps(broader_conditions, sort_keys=True, separators=(",", ":")) == json.dumps(
         narrower_conditions, sort_keys=True, separators=(",", ":")
     )
-
-
 def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
     """
     Static checks for centralized policy-registry entries.
@@ -664,7 +661,7 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
                 )
             )
 
-    # Advanced rule checks for nested all/any rules.
+    # Rule-logic checks for advanced nested all/any conditions.
     registry_rules_raw = payload.get("rules")
     registry_rules = registry_rules_raw if isinstance(registry_rules_raw, list) else []
     seen_rule_ids: Dict[str, int] = {}

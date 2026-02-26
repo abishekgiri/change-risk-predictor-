@@ -3039,8 +3039,13 @@ def deploy_gate_check_endpoint(
     ),
 ):
     from releasegate.correlation.enforcement import evaluate_deploy_gate
+    from releasegate.governance.strict_mode import resolve_strict_fail_closed
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    strict_fail_closed = resolve_strict_fail_closed(
+        policy_overrides=payload.policy_overrides,
+        fallback=True,
+    )
     operation = "deploy_gate_check"
     idem_key = (
         str(x_idempotency_key or "").strip()
@@ -3085,18 +3090,36 @@ def deploy_gate_check_endpoint(
             return replayed
         raise HTTPException(status_code=409, detail="Deploy gate check is already in progress")
 
-    result = evaluate_deploy_gate(
-        tenant_id=effective_tenant,
-        decision_id=payload.decision_id,
-        issue_key=payload.issue_key,
-        correlation_id=payload.correlation_id,
-        deploy_id=payload.deploy_id,
-        repo=payload.repo,
-        env=payload.env,
-        commit_sha=payload.commit_sha,
-        artifact_digest=payload.artifact_digest,
-        policy_overrides=payload.policy_overrides,
-    )
+    try:
+        result = evaluate_deploy_gate(
+            tenant_id=effective_tenant,
+            decision_id=payload.decision_id,
+            issue_key=payload.issue_key,
+            correlation_id=payload.correlation_id,
+            deploy_id=payload.deploy_id,
+            repo=payload.repo,
+            env=payload.env,
+            commit_sha=payload.commit_sha,
+            artifact_digest=payload.artifact_digest,
+            policy_overrides=payload.policy_overrides,
+        )
+    except Exception as exc:
+        if not strict_fail_closed:
+            raise HTTPException(status_code=500, detail=f"Deploy gate evaluation failed: {exc}") from exc
+        result = {
+            "allow": False,
+            "status": "BLOCKED",
+            "reason_code": "SYSTEM_FAILURE",
+            "reason": "BLOCKED: deploy gate system failure in strict mode.",
+            "tenant_id": effective_tenant,
+            "decision_id": payload.decision_id,
+            "issue_key": payload.issue_key,
+            "correlation_id": payload.correlation_id,
+            "repo": payload.repo,
+            "pr_number": None,
+            "commit_sha": payload.commit_sha,
+            "env": payload.env,
+        }
     result = {
         **result,
         "idempotency_key": idem_key,
@@ -3140,8 +3163,13 @@ def incident_close_check_endpoint(
     ),
 ):
     from releasegate.correlation.enforcement import evaluate_incident_close_gate
+    from releasegate.governance.strict_mode import resolve_strict_fail_closed
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    strict_fail_closed = resolve_strict_fail_closed(
+        policy_overrides=payload.policy_overrides,
+        fallback=True,
+    )
     operation = "incident_close_gate_check"
     idem_key = (
         str(x_idempotency_key or "").strip()
@@ -3185,17 +3213,35 @@ def incident_close_check_endpoint(
             return replayed
         raise HTTPException(status_code=409, detail="Incident close gate check is already in progress")
 
-    result = evaluate_incident_close_gate(
-        tenant_id=effective_tenant,
-        incident_id=payload.incident_id,
-        decision_id=payload.decision_id,
-        issue_key=payload.issue_key,
-        correlation_id=payload.correlation_id,
-        deploy_id=payload.deploy_id,
-        repo=payload.repo,
-        env=payload.env,
-        policy_overrides=payload.policy_overrides,
-    )
+    try:
+        result = evaluate_incident_close_gate(
+            tenant_id=effective_tenant,
+            incident_id=payload.incident_id,
+            decision_id=payload.decision_id,
+            issue_key=payload.issue_key,
+            correlation_id=payload.correlation_id,
+            deploy_id=payload.deploy_id,
+            repo=payload.repo,
+            env=payload.env,
+            policy_overrides=payload.policy_overrides,
+        )
+    except Exception as exc:
+        if not strict_fail_closed:
+            raise HTTPException(status_code=500, detail=f"Incident gate evaluation failed: {exc}") from exc
+        result = {
+            "allow": False,
+            "status": "BLOCKED",
+            "reason_code": "SYSTEM_FAILURE",
+            "reason": "BLOCKED: incident gate system failure in strict mode.",
+            "tenant_id": effective_tenant,
+            "decision_id": payload.decision_id,
+            "issue_key": payload.issue_key,
+            "correlation_id": payload.correlation_id,
+            "repo": payload.repo,
+            "pr_number": None,
+            "commit_sha": None,
+            "env": payload.env,
+        }
     result = {
         **result,
         "idempotency_key": idem_key,

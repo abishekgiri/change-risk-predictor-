@@ -657,3 +657,49 @@ def test_incident_gate_strict_fail_closed_on_evidence_lookup_timeout(monkeypatch
     assert body["allow"] is False
     assert body["status"] == "BLOCKED"
     assert body["reason_code"] == "PROVIDER_TIMEOUT"
+
+
+def test_deploy_gate_strict_fail_closed_on_unhandled_system_failure(monkeypatch):
+    def _boom(**kwargs):
+        raise RuntimeError("unexpected deploy failure")
+
+    monkeypatch.setattr("releasegate.correlation.enforcement.evaluate_deploy_gate", _boom)
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "issue_key": "RG-515",
+            "repo": "acme/service",
+            "env": "prod",
+            "policy_overrides": {"strict_fail_closed": True},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "SYSTEM_FAILURE"
+
+
+def test_incident_gate_strict_fail_closed_on_unhandled_system_failure(monkeypatch):
+    def _boom(**kwargs):
+        raise RuntimeError("unexpected incident failure")
+
+    monkeypatch.setattr("releasegate.correlation.enforcement.evaluate_incident_close_gate", _boom)
+
+    resp = client.post(
+        "/gate/incident/close-check",
+        json={
+            "tenant_id": "tenant-test",
+            "incident_id": "INC-BOOM",
+            "policy_overrides": {"strict_fail_closed": True},
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "SYSTEM_FAILURE"
