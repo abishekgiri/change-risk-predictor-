@@ -417,6 +417,167 @@ def _normalize_registry_transition_id(value: Any) -> str:
     return str(value).strip()
 
 
+_RULE_SIMPLE_CONDITION_KEYS = {
+    "risk",
+    "environment",
+    "changed_files_gt",
+    "changed_files_gte",
+    "changed_files_lt",
+    "changed_files_lte",
+}
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _validate_rule_condition_tree(node: Any, *, path: str) -> List[Dict[str, Any]]:
+    issues: List[Dict[str, Any]] = []
+    if not isinstance(node, dict):
+        issues.append(
+            _issue(
+                "ERROR",
+                "RULE_INVALID_LOGIC",
+                f"`when` condition at `{path}` must be an object.",
+                metadata={"path": path},
+            )
+        )
+        return issues
+
+    has_all = "all" in node
+    has_any = "any" in node
+    if has_all and has_any:
+        issues.append(
+            _issue(
+                "ERROR",
+                "RULE_INVALID_LOGIC",
+                f"`when` condition at `{path}` cannot include both `all` and `any`.",
+                metadata={"path": path},
+            )
+        )
+        return issues
+
+    unknown_keys = sorted(
+        key for key in node.keys() if key not in _RULE_SIMPLE_CONDITION_KEYS and key not in {"all", "any"}
+    )
+    if unknown_keys:
+        issues.append(
+            _issue(
+                "ERROR",
+                "RULE_INVALID_LOGIC",
+                f"`when` condition at `{path}` contains unsupported keys: {', '.join(unknown_keys)}.",
+                metadata={"path": path, "keys": unknown_keys},
+            )
+        )
+
+    if has_all or has_any:
+        clause = "all" if has_all else "any"
+        children = node.get(clause)
+        if not isinstance(children, list) or not children:
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "RULE_INVALID_LOGIC",
+                    f"`{clause}` at `{path}` must contain at least one condition.",
+                    metadata={"path": path, "clause": clause},
+                )
+            )
+            return issues
+        for index, child in enumerate(children):
+            issues.extend(_validate_rule_condition_tree(child, path=f"{path}.{clause}[{index}]"))
+        return issues
+
+    simple_keys = sorted(key for key in node.keys() if key in _RULE_SIMPLE_CONDITION_KEYS)
+    if not simple_keys:
+        issues.append(
+            _issue(
+                "ERROR",
+                "RULE_INVALID_LOGIC",
+                f"`when` condition at `{path}` does not define any supported predicates.",
+                metadata={"path": path},
+            )
+        )
+        return issues
+
+    gt = _as_int(node.get("changed_files_gt"))
+    gte = _as_int(node.get("changed_files_gte"))
+    lt = _as_int(node.get("changed_files_lt"))
+    lte = _as_int(node.get("changed_files_lte"))
+    lower_value: Optional[int] = None
+    lower_inclusive = False
+    if gt is not None:
+        lower_value = gt
+        lower_inclusive = False
+    if gte is not None and (lower_value is None or gte > lower_value or (gte == lower_value and not lower_inclusive)):
+        lower_value = gte
+        lower_inclusive = True
+
+    upper_value: Optional[int] = None
+    upper_inclusive = False
+    if lt is not None:
+        upper_value = lt
+        upper_inclusive = False
+    if lte is not None and (upper_value is None or lte < upper_value or (lte == upper_value and not upper_inclusive)):
+        upper_value = lte
+        upper_inclusive = True
+
+    if lower_value is not None and upper_value is not None:
+        if lower_value > upper_value or (lower_value == upper_value and (not lower_inclusive or not upper_inclusive)):
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "CONTRADICTORY_RULES",
+                    f"`when` condition at `{path}` has contradictory changed_files bounds.",
+                    metadata={"path": path},
+                )
+            )
+
+    return issues
+
+
+def _normalise_selector_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalise_conditions(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _selectors_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    for key in ("transition_id", "project_id", "workflow_id", "environment"):
+        left_value = _normalise_selector_value(left.get(key))
+        right_value = _normalise_selector_value(right.get(key))
+        if left_value and right_value and left_value != right_value:
+            return False
+    left_conditions = _normalise_conditions(left.get("conditions"))
+    right_conditions = _normalise_conditions(right.get("conditions"))
+    if left_conditions and right_conditions:
+        return json.dumps(left_conditions, sort_keys=True, separators=(",", ":")) == json.dumps(
+            right_conditions, sort_keys=True, separators=(",", ":")
+        )
+    return True
+
+
+def _selector_contains(broader: Dict[str, Any], narrower: Dict[str, Any]) -> bool:
+    for key in ("transition_id", "project_id", "workflow_id", "environment"):
+        broader_value = _normalise_selector_value(broader.get(key))
+        narrower_value = _normalise_selector_value(narrower.get(key))
+        if broader_value and broader_value != narrower_value:
+            return False
+    broader_conditions = _normalise_conditions(broader.get("conditions"))
+    narrower_conditions = _normalise_conditions(narrower.get("conditions"))
+    if not broader_conditions:
+        return True
+    return json.dumps(broader_conditions, sort_keys=True, separators=(",", ":")) == json.dumps(
+        narrower_conditions, sort_keys=True, separators=(",", ":")
+    )
+
+
 def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
     """
     Static checks for centralized policy-registry entries.
@@ -500,11 +661,73 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
                         "ERROR",
                         "APPROVAL_REQUIREMENT_IMPOSSIBLE",
                         f"min_approvals={min_approvals} exceeds available approvers ({available}).",
+                )
+            )
+
+    # Advanced rule checks for nested all/any rules.
+    registry_rules_raw = payload.get("rules")
+    registry_rules = registry_rules_raw if isinstance(registry_rules_raw, list) else []
+    seen_rule_ids: Dict[str, int] = {}
+    for index, rule in enumerate(registry_rules):
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("rule_id") or rule.get("id") or f"rule-{index + 1}").strip()
+        prior_idx = seen_rule_ids.get(rule_id)
+        if prior_idx is not None:
+            issues.append(
+                _issue(
+                    "ERROR",
+                    "OVERLAPPING_RULES",
+                    f"Duplicate rule identifier `{rule_id}` at indexes {prior_idx} and {index}.",
+                    metadata={"rule_id": rule_id, "indexes": [prior_idx, index]},
+                )
+            )
+        else:
+            seen_rule_ids[rule_id] = index
+
+        when = rule.get("when")
+        if when is not None:
+            issues.extend(_validate_rule_condition_tree(when, path=f"rules[{index}].when"))
+
+        require = rule.get("require") if isinstance(rule.get("require"), dict) else {}
+        required_roles = require.get("roles")
+        top_level_roles = rule.get("required_roles")
+        if isinstance(required_roles, list) and isinstance(top_level_roles, list):
+            roles_a = sorted({str(role).strip().lower() for role in required_roles if str(role).strip()})
+            roles_b = sorted({str(role).strip().lower() for role in top_level_roles if str(role).strip()})
+            if roles_a and roles_b and roles_a != roles_b:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "CONTRADICTORY_RULES",
+                        (
+                            f"Rule `{rule_id}` defines conflicting required roles in `require.roles` "
+                            "and `required_roles`."
+                        ),
+                        metadata={"rule_id": rule_id},
+                    )
+                )
+        require_approvals = require.get("approvals")
+        top_level_approvals = rule.get("required_approvals")
+        if require_approvals is not None and top_level_approvals is not None:
+            approvals_a = _as_int(require_approvals)
+            approvals_b = _as_int(top_level_approvals)
+            if approvals_a is not None and approvals_b is not None and approvals_a != approvals_b:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "CONTRADICTORY_RULES",
+                        (
+                            f"Rule `{rule_id}` defines conflicting required approvals in `require.approvals` "
+                            "and `required_approvals`."
+                        ),
+                        metadata={"rule_id": rule_id},
                     )
                 )
 
     # Overlap + contradiction checks
     signatures: Dict[str, Dict[str, Any]] = {}
+    structural_rules: List[Dict[str, Any]] = []
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             continue
@@ -520,6 +743,20 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
             "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
         }
         signature = json.dumps(selector, sort_keys=True, separators=(",", ":"))
+        try:
+            priority = int(rule.get("priority") or 1000)
+        except Exception:
+            priority = 1000
+
+        structural_rules.append(
+            {
+                "index": index,
+                "priority": priority,
+                "result": result,
+                "selector": selector,
+                "transition_id": transition_id,
+            }
+        )
 
         prior = signatures.get(signature)
         if prior is None:
@@ -550,6 +787,61 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                 )
             )
+
+    structural_rules.sort(key=lambda item: (item["priority"], item["index"]))
+    for idx, current in enumerate(structural_rules):
+        for prior in structural_rules[:idx]:
+            if not _selectors_overlap(prior["selector"], current["selector"]):
+                continue
+
+            if prior["priority"] == current["priority"] and prior["result"] != current["result"]:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "AMBIGUOUS_OVERLAP",
+                        (
+                            f"Transition rules at indexes {prior['index']} and {current['index']} "
+                            "overlap at the same priority with conflicting outcomes."
+                        ),
+                        metadata={
+                            "rule_indexes": [prior["index"], current["index"]],
+                            "priority": current["priority"],
+                        },
+                    )
+                )
+
+            if _selector_contains(prior["selector"], current["selector"]):
+                if prior["result"] != current["result"]:
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "CONTRADICTORY_RULES",
+                            (
+                                f"Higher precedence rule at index {prior['index']} conflicts with narrower "
+                                f"rule at index {current['index']}."
+                            ),
+                            metadata={
+                                "rule_indexes": [prior["index"], current["index"]],
+                                "priority": [prior["priority"], current["priority"]],
+                            },
+                        )
+                    )
+                else:
+                    issues.append(
+                        _issue(
+                            "WARNING",
+                            "RULE_UNREACHABLE_SHADOWED",
+                            (
+                                f"Rule at index {current['index']} is shadowed by higher precedence "
+                                f"rule at index {prior['index']}."
+                            ),
+                            metadata={
+                                "rule_index": current["index"],
+                                "shadowed_by": prior["index"],
+                            },
+                        )
+                    )
+                break
 
     error_count = sum(1 for issue in issues if issue.get("severity") == "ERROR")
     warning_count = sum(1 for issue in issues if issue.get("severity") == "WARNING")
