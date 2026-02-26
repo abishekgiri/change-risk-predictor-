@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,9 @@ SCHEMA_NAME = "checkpoint"
 SCHEMA_VERSION = "checkpoint_v1"
 CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
 HASH_ALGORITHM = "sha256"
+_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_PERIOD_DAILY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_PERIOD_WEEKLY_RE = re.compile(r"^\d{4}-W\d{2}$")
 
 
 def parse_utc_datetime(value: Any) -> datetime:
@@ -58,13 +62,90 @@ def period_id_for_timestamp(timestamp: Any, cadence: str = DEFAULT_CADENCE) -> s
     return f"{iso.year}-W{iso.week:02d}"
 
 
-def _sanitize_path_part(value: str) -> str:
-    return value.replace("/", "__").replace("..", "_")
+def _safe_segment(value: str, *, field_name: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{field_name} is empty")
+    if "/" in raw or "\\" in raw or ".." in raw:
+        raise ValueError(f"{field_name} contains unsupported path characters")
+    if not _SEGMENT_RE.fullmatch(raw):
+        raise ValueError(f"{field_name} contains unsupported characters")
+    return raw
+
+
+def _repo_dir_name(repo: str) -> str:
+    raw = str(repo or "").strip()
+    parts = raw.split("/")
+    if len(parts) == 1:
+        return _safe_segment(parts[0], field_name="repo")
+    if len(parts) == 2:
+        owner_safe = _safe_segment(parts[0], field_name="repo owner")
+        name_safe = _safe_segment(parts[1], field_name="repo name")
+        return f"{owner_safe}__{name_safe}"
+    raise ValueError("repo must be a single slug or owner/repo format")
+
+
+def _chain_dir_name(chain_id: str) -> str:
+    normalized = str(chain_id or "").strip().replace(":", "__")
+    return _safe_segment(normalized, field_name="chain_id")
+
+
+def _safe_join_under_root(root: Path, *parts: str) -> Path:
+    root_abs = root.resolve(strict=False)
+    candidate = root_abs.joinpath(*parts).resolve(strict=False)
+    if os.path.commonpath([str(root_abs), str(candidate)]) != str(root_abs):
+        raise ValueError("Unsafe checkpoint path outside configured checkpoint directory")
+    return candidate
+
+
+def _validate_period_id(period_id: str, cadence: str) -> str:
+    value = str(period_id or "").strip()
+    if not value:
+        raise ValueError("period_id is empty")
+    if cadence == "daily":
+        if not _PERIOD_DAILY_RE.fullmatch(value):
+            raise ValueError("Invalid daily period_id format (expected YYYY-MM-DD)")
+        return value
+    if cadence == "weekly":
+        if not _PERIOD_WEEKLY_RE.fullmatch(value):
+            raise ValueError("Invalid weekly period_id format (expected YYYY-Www)")
+        return value
+    raise ValueError(f"Unsupported cadence `{cadence}`")
 
 
 def _checkpoint_store_dir(store_dir: Optional[str] = None) -> Path:
     resolved = store_dir or os.getenv("RELEASEGATE_CHECKPOINT_STORE_DIR", "audit_bundles/checkpoints")
-    path = Path(resolved)
+    path = Path(resolved).expanduser().resolve(strict=False)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _checkpoint_dir(
+    repo: str,
+    cadence: str,
+    *,
+    tenant_id: str,
+    store_dir: Optional[str] = None,
+) -> Path:
+    root = _checkpoint_store_dir(store_dir)
+    tenant_dir = _safe_segment(tenant_id, field_name="tenant_id")
+    repo_dir = _repo_dir_name(repo)
+    path = _safe_join_under_root(root, tenant_dir, repo_dir, cadence)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _lock_checkpoint_dir(
+    chain_id: str,
+    cadence: str,
+    *,
+    tenant_id: str,
+    store_dir: Optional[str] = None,
+) -> Path:
+    root = _checkpoint_store_dir(store_dir)
+    tenant_dir = _safe_segment(tenant_id, field_name="tenant_id")
+    chain_dir = _chain_dir_name(chain_id)
+    path = _safe_join_under_root(root, tenant_dir, "jira-lock", chain_dir, cadence)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -107,12 +188,9 @@ def _checkpoint_path(
     tenant_id: str,
     store_dir: Optional[str] = None,
 ) -> Path:
-    root = _checkpoint_store_dir(store_dir)
-    tenant_dir = _sanitize_path_part(tenant_id)
-    repo_dir = _sanitize_path_part(repo)
-    path = root / tenant_dir / repo_dir / cadence
-    path.mkdir(parents=True, exist_ok=True)
-    return path / f"{period_id}.json"
+    path = _checkpoint_dir(repo, cadence, tenant_id=tenant_id, store_dir=store_dir)
+    safe_period_id = _validate_period_id(period_id, cadence)
+    return _safe_join_under_root(path, f"{safe_period_id}.json")
 
 
 def _lock_checkpoint_path(
@@ -123,12 +201,9 @@ def _lock_checkpoint_path(
     tenant_id: str,
     store_dir: Optional[str] = None,
 ) -> Path:
-    root = _checkpoint_store_dir(store_dir)
-    tenant_dir = _sanitize_path_part(tenant_id)
-    chain_dir = _sanitize_path_part(chain_id)
-    path = root / tenant_dir / "jira-lock" / chain_dir / cadence
-    path.mkdir(parents=True, exist_ok=True)
-    return path / f"{period_id}.json"
+    path = _lock_checkpoint_dir(chain_id, cadence, tenant_id=tenant_id, store_dir=store_dir)
+    safe_period_id = _validate_period_id(period_id, cadence)
+    return _safe_join_under_root(path, f"{safe_period_id}.json")
 
 
 def _load_rows(repo: str, pr: Optional[int] = None, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -486,7 +561,7 @@ def latest_override_checkpoint(
 ) -> Optional[Dict[str, Any]]:
     cadence = _resolve_cadence(cadence)
     effective_tenant = resolve_tenant_id(tenant_id)
-    dir_path = _checkpoint_path(repo, cadence, "tmp", tenant_id=effective_tenant, store_dir=store_dir).parent
+    dir_path = _checkpoint_dir(repo, cadence, tenant_id=effective_tenant, store_dir=store_dir)
     if not dir_path.exists():
         return None
     files = [p for p in dir_path.glob("*.json") if p.is_file()]
@@ -706,7 +781,7 @@ def latest_jira_lock_checkpoint(
 ) -> Optional[Dict[str, Any]]:
     cadence = _resolve_cadence(cadence)
     effective_tenant = resolve_tenant_id(tenant_id)
-    dir_path = _lock_checkpoint_path(chain_id, cadence, "tmp", tenant_id=effective_tenant, store_dir=store_dir).parent
+    dir_path = _lock_checkpoint_dir(chain_id, cadence, tenant_id=effective_tenant, store_dir=store_dir)
     if not dir_path.exists():
         return None
     files = [p for p in dir_path.glob("*.json") if p.is_file()]
