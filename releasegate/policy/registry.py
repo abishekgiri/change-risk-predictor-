@@ -132,8 +132,6 @@ def _assert_transition_allowed(*, from_status: str, to_status: str, action: str)
     allowed = ALLOWED_STATUS_TRANSITIONS.get(from_enum, frozenset())
     if to_enum not in allowed:
         raise ValueError(f"invalid policy lifecycle transition `{normalized_from}` -> `{normalized_to}` for {action}")
-
-
 def _monotonic_conflicts(
     *,
     base_policy: Dict[str, Any],
@@ -1026,7 +1024,6 @@ def activate_registry_policy(
     if current_status == PolicyStatus.DRAFT.value:
         raise ValueError("policy must be staged before activation")
     _assert_transition_allowed(from_status=current_status, to_status=PolicyStatus.ACTIVE.value, action="activate")
-
     _ensure_monotonic_policy(
         tenant_id=effective_tenant,
         scope_type=str(policy.get("scope_type") or ""),

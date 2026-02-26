@@ -381,8 +381,6 @@ def test_policy_registry_api_rollback_restores_previous_active():
     assert "POLICY_CREATED" in event_types
     assert "POLICY_ACTIVATED" in event_types
     assert "POLICY_ARCHIVED" in event_types
-
-
 def test_simulate_decision_endpoint_has_no_persistence_side_effects():
     _reset_db()
     headers = jwt_headers(tenant_id="tenant-registry-api")

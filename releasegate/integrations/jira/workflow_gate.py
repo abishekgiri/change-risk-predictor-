@@ -1095,15 +1095,15 @@ class WorkflowGate:
                         "registry_policy": {
                             "effective_policy_hash": registry_effective_hash,
                             "component_policy_ids": registry_component_ids,
-                        "component_lineage": registry_component_lineage,
-                        "staged_component_lineage": registry_staged_lineage,
-                        "resolution_conflicts": registry_resolution_conflicts,
-                        "component_policies": registry_component_policies,
-                        "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
-                        "shadow_evaluation": shadow_evaluation,
+                            "component_lineage": registry_component_lineage,
+                            "staged_component_lineage": registry_staged_lineage,
+                            "resolution_conflicts": registry_resolution_conflicts,
+                            "component_policies": registry_component_policies,
+                            "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                            "shadow_evaluation": shadow_evaluation,
+                        },
                     },
-                },
-            )
+                )
             
             # Run ALL policies (Engine doesn't support filtering input yet)
             run_result = engine.evaluate(signal_map)

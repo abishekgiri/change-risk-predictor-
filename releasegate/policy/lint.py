@@ -844,7 +844,6 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
     coverage_issues = detect_transition_coverage(payload)
     if coverage_issues:
         issues.extend(coverage_issues)
-
     error_count = sum(1 for issue in issues if issue.get("severity") == "ERROR")
     warning_count = sum(1 for issue in issues if issue.get("severity") == "WARNING")
     return {

@@ -256,8 +256,6 @@ def test_registry_requires_staging_before_activation(clean_db):
             policy_id=draft["policy_id"],
             actor_id="alice",
         )
-
-
 def test_registry_monotonic_roles_treats_none_as_inherit_and_empty_as_weaken(clean_db):
     tenant = "tenant-registry"
     create_registry_policy(

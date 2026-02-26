@@ -845,8 +845,6 @@ def test_gate_logs_shadow_evaluation_when_staged_policy_exists(MockEngine, base_
     assert snapshot["active_decision"] == "ALLOWED"
     assert snapshot["staged_decision"] == "BLOCKED"
     assert snapshot["staged_policy_ids"] == ["staged-2"]
-
-
 def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
         gate = WorkflowGate()
