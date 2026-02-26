@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from releasegate.audit.checkpoints import create_override_checkpoint, verify_override_checkpoint
+from releasegate.audit.checkpoints import (
+    create_override_checkpoint,
+    latest_override_checkpoint,
+    verify_override_checkpoint,
+)
 from releasegate.audit.overrides import record_override
 from releasegate.config import DB_PATH
 from releasegate.storage.base import resolve_tenant_id
@@ -38,12 +42,22 @@ def test_create_and_verify_override_checkpoint(tmp_path):
     )
 
     assert created["created"] is True
+    assert str(payload.get("checkpoint_hash") or "").startswith("sha256:")
     assert verified["exists"] is True
     assert verified["valid"] is True
     assert verified["signature_valid"] is True
+    assert verified["checkpoint_hash_match"] is True
     assert verified["chain_valid"] is True
     assert verified["root_hash_match"] is True
     assert verified["event_count_match"] is True
+
+    latest = latest_override_checkpoint(
+        repo=repo,
+        cadence="daily",
+        store_dir=store_dir,
+    )
+    assert latest is not None
+    assert latest.get("ids", {}).get("checkpoint_id") == created.get("ids", {}).get("checkpoint_id")
 
 
 def test_checkpoint_creation_fails_for_invalid_chain(tmp_path):

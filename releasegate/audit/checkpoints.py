@@ -12,6 +12,7 @@ from releasegate.integrations.jira.lock_store import compute_lock_chain_root
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
+from releasegate.utils.canonical import sha256_json
 
 
 EMPTY_ROOT_HASH = hashlib.sha256(b"releasegate-empty-checkpoint").hexdigest()
@@ -278,6 +279,12 @@ def _sign_payload(
     }
 
 
+def checkpoint_hash(payload: Dict[str, Any]) -> str:
+    material = dict(payload or {})
+    material.pop("checkpoint_hash", None)
+    return f"sha256:{sha256_json(material)}"
+
+
 def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optional[str] = None) -> bool:
     payload = checkpoint.get("payload")
     signature_obj = checkpoint.get("signature", {})
@@ -392,6 +399,7 @@ def create_override_checkpoint(
         "last_event_at": chain.get("last_event_at"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    payload["checkpoint_hash"] = checkpoint_hash(payload)
     signature_obj = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
     checkpoint_id = _checkpoint_id(payload)
     checkpoint = {
@@ -558,6 +566,7 @@ def verify_override_checkpoint(
         "period_id": payload.get("period_id", period_id),
         "signature_valid": bool(signature_valid),
         "signature_error": signature_error,
+        "checkpoint_hash_match": str(payload.get("checkpoint_hash") or "") == checkpoint_hash(payload),
         "chain_valid": bool(chain.get("valid_chain")),
         "root_hash_match": bool(root_hash_match),
         "event_count_match": bool(event_count_match),
@@ -609,6 +618,7 @@ def create_jira_lock_checkpoint(
         "last_event_at": chain.get("last_event_at"),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
+    payload["checkpoint_hash"] = checkpoint_hash(payload)
     signature_obj = _sign_payload(payload, signing_key=signing_key, tenant_id=effective_tenant)
     checkpoint_id = _lock_checkpoint_id(payload)
     checkpoint = {
@@ -780,6 +790,7 @@ def verify_jira_lock_checkpoint(
         "period_id": payload.get("period_id", period_id),
         "signature_valid": bool(signature_valid),
         "signature_error": signature_error,
+        "checkpoint_hash_match": str(payload.get("checkpoint_hash") or "") == checkpoint_hash(payload),
         "chain_valid": bool(chain.get("valid_chain")),
         "head_hash_match": bool(head_hash_match),
         "head_seq_match": bool(head_seq_match),
