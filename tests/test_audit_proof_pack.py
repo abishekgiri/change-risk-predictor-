@@ -121,6 +121,11 @@ def test_audit_proof_pack_contains_evidence(monkeypatch, tmp_path):
     assert body["chain_proof"]["valid"] is True
     assert body["checkpoint_proof"]["exists"] is True
     assert body["checkpoint_proof"]["valid"] is True
+    assert body["integrity"]["graph_hash"]
+    assert body["evidence_graph"]["graph_hash"] == body["integrity"]["graph_hash"]
+    assert body["evidence_graph"]["anchors"]["checkpoint_id"]
+    graph_node_types = {node.get("type") for node in body["evidence_graph"].get("nodes", [])}
+    assert "CHECKPOINT" in graph_node_types
 
 
 def test_audit_proof_pack_zip_format(monkeypatch, tmp_path):
@@ -205,6 +210,7 @@ def test_export_proof_alias_includes_manifest_graph_and_replay_request(monkeypat
         evidence_graph = json.loads(zf.read("evidence_graph.json").decode("utf-8"))
         assert "nodes" in evidence_graph
         assert "edges" in evidence_graph
+        assert evidence_graph.get("graph_hash")
         replay_request = json.loads(zf.read("replay_request.json").decode("utf-8"))
         assert replay_request.get("endpoint") == f"/decisions/{stored.decision_id}/replay"
 def test_export_proof_bundle_rejects_cross_tenant_access(monkeypatch, tmp_path):
@@ -258,3 +264,47 @@ def test_export_proof_bundle_rejects_cross_tenant_access(monkeypatch, tmp_path):
         ),
     )
     assert isolated.status_code == 404
+
+
+def test_audit_proof_pack_graph_hash_is_deterministic(monkeypatch, tmp_path):
+    repo = f"proof-determinism-{uuid.uuid4().hex[:8]}"
+    pr_number = 81
+    decision = Decision(
+        timestamp=datetime.now(timezone.utc),
+        release_status="ALLOWED",
+        context_id=f"jira-{repo}-{pr_number}",
+        message="ALLOWED: deterministic graph",
+        policy_bundle_hash="proof-hash",
+        evaluation_key=f"{repo}:{pr_number}:{uuid.uuid4().hex}",
+        actor_id="proof-user",
+        reason_code="POLICY_ALLOWED",
+        inputs_present={"releasegate_risk": True},
+        input_snapshot={"signal_map": {"repo": repo, "pr_number": pr_number, "diff": {}}, "policies_requested": []},
+        enforcement_targets=EnforcementTargets(
+            repository=repo,
+            pr_number=pr_number,
+            ref="HEAD",
+            external={"jira": ["PROOF-5"]},
+        ),
+    )
+    stored = AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number)
+
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "proof-secret")
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_STORE_DIR", str(tmp_path))
+
+    first = client.get(
+        f"/audit/proof-pack/{stored.decision_id}",
+        params={"format": "json", "tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["proofpack:read", "checkpoint:read", "policy:read"]),
+    )
+    second = client.get(
+        f"/audit/proof-pack/{stored.decision_id}",
+        params={"format": "json", "tenant_id": "tenant-test"},
+        headers=jwt_headers(scopes=["proofpack:read", "checkpoint:read", "policy:read"]),
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["integrity"]["graph_hash"] == second_body["integrity"]["graph_hash"]
+    assert first_body["evidence_graph"]["graph_hash"] == second_body["evidence_graph"]["graph_hash"]
