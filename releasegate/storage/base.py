@@ -7,6 +7,27 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 import os
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def require_tenant_id() -> bool:
+    """
+    Strict tenant-boundary mode:
+    - default: required
+    - opt-out: set RELEASEGATE_REQUIRE_TENANT_ID=false (dev/test only)
+    """
+    return _env_bool("RELEASEGATE_REQUIRE_TENANT_ID", True)
+
+
 def resolve_tenant_id(tenant_id: Optional[str] = None, *, allow_none: bool = False) -> Optional[str]:
     """
     Resolve tenant identity to a stable non-empty value.
@@ -16,6 +37,8 @@ def resolve_tenant_id(tenant_id: Optional[str] = None, *, allow_none: bool = Fal
         return raw
     if allow_none:
         return None
+    if not require_tenant_id():
+        return "default"
     raise ValueError("tenant_id is required. Provide --tenant or set RELEASEGATE_TENANT_ID.")
 
 

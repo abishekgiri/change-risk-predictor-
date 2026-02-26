@@ -99,6 +99,28 @@ def _request_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _allow_cross_tenant_access(auth: AuthContext) -> bool:
+    if not _env_bool("RELEASEGATE_ALLOW_CROSS_TENANT_ACCESS", False):
+        return False
+    roles = {str(role).strip().lower() for role in auth.roles}
+    if roles.intersection({"platform_admin", "super_admin"}):
+        return True
+    scopes = set(auth.scopes)
+    return bool(scopes.intersection({"tenant:impersonate", "tenant:admin", "*"}))
+
+
 def _safe_log_security_event(
     request: Request,
     *,
@@ -376,9 +398,11 @@ def _authenticate_internal_service(request: Request, *, rate_profile: str) -> Au
     tenant_hint = (
         (request.headers.get("X-Tenant-Id") or "").strip()
         or (os.getenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID") or "").strip()
-        or "default"
     )
-    tenant_id = resolve_tenant_id(tenant_hint)
+    try:
+        tenant_id = resolve_tenant_id(tenant_hint or None)
+    except ValueError as exc:
+        raise _auth_error(401, "AUTH_TENANT_REQUIRED", str(exc)) from exc
     enforce_tenant_rate_limit(tenant_id=tenant_id, profile=rate_profile)
     request.state.pre_tenant_rate_limited = True
 
@@ -520,6 +544,6 @@ def tenant_from_request(auth: AuthContext, requested_tenant: Optional[str]) -> s
     if not requested_tenant:
         return auth.tenant_id
     resolved = resolve_tenant_id(requested_tenant)
-    if resolved != auth.tenant_id and "admin" not in auth.roles:
+    if resolved != auth.tenant_id and not _allow_cross_tenant_access(auth):
         raise _auth_error(403, "TENANT_SCOPE_FORBIDDEN", "Cannot access another tenant")
     return resolved

@@ -67,6 +67,21 @@ def test_ci_score_allows_internal_service_key(monkeypatch):
     assert isinstance(body["score"], int)
 
 
+def test_ci_score_internal_service_requires_tenant_context(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "phase3-internal-service")
+    monkeypatch.setenv("RELEASEGATE_REQUIRE_TENANT_ID", "true")
+    monkeypatch.delenv("RELEASEGATE_TENANT_ID", raising=False)
+    monkeypatch.delenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID", raising=False)
+    response = client.post(
+        "/ci/score",
+        json={"repo": "org/repo", "pr": 27},
+        headers={"X-Internal-Service-Key": "phase3-internal-service"},
+    )
+    assert response.status_code == 401
+    detail = response.json().get("detail") or {}
+    assert detail.get("error_code") == "AUTH_TENANT_REQUIRED"
+
+
 def test_audit_export_requires_auth():
     resp = client.get("/audit/export", params={"repo": "any", "tenant_id": "tenant-test"})
     assert resp.status_code == 401

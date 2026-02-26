@@ -77,6 +77,45 @@ def test_policy_registry_api_create_activate_and_list():
     assert payload["policies"][0]["policy_id"] == created["policy_id"]
 
 
+def test_policy_registry_api_rejects_cross_tenant_access_by_default():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api-a")
+    response = client.get(
+        "/policies",
+        headers=headers,
+        params={
+            "tenant_id": "tenant-registry-api-b",
+            "scope_type": "transition",
+            "scope_id": "2",
+        },
+    )
+    assert response.status_code == 403
+    detail = response.json().get("detail") or {}
+    assert detail.get("error_code") == "TENANT_SCOPE_FORBIDDEN"
+
+
+def test_policy_registry_api_allows_cross_tenant_for_platform_admin_when_enabled(monkeypatch):
+    _reset_db()
+    monkeypatch.setenv("RELEASEGATE_ALLOW_CROSS_TENANT_ACCESS", "true")
+    headers = jwt_headers(
+        tenant_id="tenant-registry-api-a",
+        roles=["admin", "platform_admin"],
+        scopes=["policy:read", "tenant:impersonate"],
+    )
+    response = client.get(
+        "/policies",
+        headers=headers,
+        params={
+            "tenant_id": "tenant-registry-api-b",
+            "scope_type": "transition",
+            "scope_id": "2",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tenant_id"] == "tenant-registry-api-b"
+
+
 def test_policy_registry_api_simulate_decision_uses_effective_policy():
     _reset_db()
     headers = jwt_headers(tenant_id="tenant-registry-api")

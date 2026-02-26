@@ -203,10 +203,6 @@ def _resolve_trusted_signing_key(
         if resolved:
             return resolved, key_file
 
-    env_key = (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY") or "").strip()
-    if env_key:
-        return env_key, "env:RELEASEGATE_CHECKPOINT_SIGNING_KEY"
-
     default_json = Path.home() / ".releasegate" / "keys" / f"{tenant_id}.json"
     if default_json.exists():
         resolved = _load_key_from_file(str(default_json), tenant_id=tenant_id, key_id=key_id)
@@ -218,6 +214,10 @@ def _resolve_trusted_signing_key(
         raw = default_key.read_text(encoding="utf-8").strip()
         if raw:
             return raw, str(default_key)
+
+    env_key = (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY") or "").strip()
+    if env_key:
+        return env_key, "env:RELEASEGATE_CHECKPOINT_SIGNING_KEY"
 
     raise VerificationFailure(
         code="CHECKPOINT_SIGNATURE_INVALID",

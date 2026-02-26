@@ -207,3 +207,56 @@ def test_export_proof_alias_includes_manifest_graph_and_replay_request(monkeypat
         assert "edges" in evidence_graph
         replay_request = json.loads(zf.read("replay_request.json").decode("utf-8"))
         assert replay_request.get("endpoint") == f"/decisions/{stored.decision_id}/replay"
+
+
+def test_export_proof_bundle_rejects_cross_tenant_access(monkeypatch, tmp_path):
+    repo = f"proof-tenant-{uuid.uuid4().hex[:8]}"
+    pr_number = 80
+    decision = Decision(
+        timestamp=datetime.now(timezone.utc),
+        release_status="ALLOWED",
+        context_id=f"jira-{repo}-{pr_number}",
+        message="ALLOWED: tenant isolation",
+        policy_bundle_hash="proof-hash",
+        evaluation_key=f"{repo}:{pr_number}:{uuid.uuid4().hex}",
+        actor_id="proof-user",
+        reason_code="POLICY_ALLOWED",
+        inputs_present={"releasegate_risk": True},
+        input_snapshot={"signal_map": {"repo": repo, "pr_number": pr_number, "diff": {}}, "policies_requested": []},
+        enforcement_targets=EnforcementTargets(
+            repository=repo,
+            pr_number=pr_number,
+            ref="HEAD",
+            external={"jira": ["PROOF-4"]},
+        ),
+    )
+    stored = AuditRecorder.record_with_context(
+        decision,
+        repo=repo,
+        pr_number=pr_number,
+        tenant_id="tenant-alpha",
+    )
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "proof-secret")
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_STORE_DIR", str(tmp_path))
+
+    cross_tenant = client.get(
+        f"/decisions/{stored.decision_id}/export-proof",
+        params={"tenant_id": "tenant-beta"},
+        headers=jwt_headers(
+            tenant_id="tenant-alpha",
+            roles=["admin"],
+            scopes=["proofpack:read", "checkpoint:read", "policy:read"],
+        ),
+    )
+    assert cross_tenant.status_code == 403
+    assert (cross_tenant.json().get("detail") or {}).get("error_code") == "TENANT_SCOPE_FORBIDDEN"
+
+    isolated = client.get(
+        f"/decisions/{stored.decision_id}/export-proof",
+        headers=jwt_headers(
+            tenant_id="tenant-beta",
+            roles=["admin"],
+            scopes=["proofpack:read", "checkpoint:read", "policy:read"],
+        ),
+    )
+    assert isolated.status_code == 404

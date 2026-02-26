@@ -11,6 +11,7 @@ from releasegate.audit.checkpoints import (
 )
 from releasegate.audit.overrides import record_override
 from releasegate.config import DB_PATH
+from releasegate.security.checkpoint_keys import rotate_checkpoint_signing_key
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
 
@@ -104,3 +105,58 @@ def test_checkpoint_creation_fails_for_invalid_chain(tmp_path):
             store_dir=store_dir,
             signing_key=key,
         )
+
+
+def test_checkpoint_uses_tenant_scoped_signing_key_before_global_env(monkeypatch, tmp_path):
+    repo = f"checkpoint-tenant-{uuid.uuid4().hex[:8]}"
+    store_dir = str(tmp_path)
+    tenant_id = "tenant-test"
+    global_key = "global-checkpoint-secret"
+    tenant_key = "tenant-checkpoint-secret"
+
+    monkeypatch.setenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", global_key)
+    rotate_checkpoint_signing_key(
+        tenant_id=tenant_id,
+        raw_key=tenant_key,
+        created_by="tests",
+    )
+    record_override(
+        repo=repo,
+        pr_number=3,
+        issue_key="CP-3",
+        decision_id="d1",
+        actor="u1",
+        reason="r1",
+        tenant_id=tenant_id,
+    )
+
+    created = create_override_checkpoint(
+        repo=repo,
+        cadence="daily",
+        pr=3,
+        store_dir=store_dir,
+        tenant_id=tenant_id,
+    )
+    period_id = created["payload"]["period_id"]
+
+    verified_with_tenant = verify_override_checkpoint(
+        repo=repo,
+        cadence="daily",
+        period_id=period_id,
+        pr=3,
+        store_dir=store_dir,
+        signing_key=tenant_key,
+        tenant_id=tenant_id,
+    )
+    assert verified_with_tenant["signature_valid"] is True
+
+    verified_with_global = verify_override_checkpoint(
+        repo=repo,
+        cadence="daily",
+        period_id=period_id,
+        pr=3,
+        store_dir=store_dir,
+        signing_key=global_key,
+        tenant_id=tenant_id,
+    )
+    assert verified_with_global["signature_valid"] is False
