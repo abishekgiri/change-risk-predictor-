@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Callable, TypeVar
 import requests
 from releasegate.attestation.canonicalize import canonicalize_json_bytes
+from releasegate.engine_core.evaluate import evaluate as evaluate_engine_core
+from releasegate.engine_core.types import (
+    EvaluationInput as CoreEvaluationInput,
+    NormalizedContext as CoreNormalizedContext,
+    PolicyOutcome as CorePolicyOutcome,
+    PolicyRef as CorePolicyRef,
+)
 from releasegate.integrations.github_risk import PRRiskInput, build_issue_risk_property, classify_pr_risk
 from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
 from releasegate.integrations.jira.client import JiraClient, JiraDependencyTimeout
@@ -1049,7 +1056,42 @@ class WorkflowGate:
                     tenant_id=tenant_id,
                 )
             
-            status, blocking_policies, requirements = self._evaluate_policy_results(relevant_results)
+            core_policy_refs = tuple(
+                CorePolicyRef(
+                    policy_id=str(binding.policy_id),
+                    policy_version=str(binding.policy_version or ""),
+                    policy_hash=str(binding.policy_hash or ""),
+                    source="jira_transition",
+                )
+                for binding in policy_bindings
+            )
+            core_policy_outcomes = tuple(
+                CorePolicyOutcome.from_untyped(
+                    policy_id=str(getattr(result, "policy_id", "")),
+                    status=str(getattr(result, "status", "")),
+                    violations=list(getattr(result, "violations", []) or []),
+                )
+                for result in relevant_results
+            )
+            core_decision = evaluate_engine_core(
+                CoreEvaluationInput(
+                    context=CoreNormalizedContext(
+                        evaluation_kind="jira_transition",
+                        environment=str(request.environment),
+                        issue_key=str(request.issue_key),
+                        transition_id=str(request.transition_id),
+                        repo=str(repo or ""),
+                        pr_number=pr_number,
+                        actor_id=str(request.actor_account_id or ""),
+                        evaluation_time=datetime.now(timezone.utc).isoformat(),
+                    ),
+                    policy_refs=core_policy_refs,
+                    policy_outcomes=core_policy_outcomes,
+                )
+            )
+            status = DecisionType(core_decision.status)
+            blocking_policies = list(core_decision.blocking_policy_ids)
+            requirements = list(core_decision.requirements)
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
@@ -1059,7 +1101,7 @@ class WorkflowGate:
                 evaluation_key=f"{evaluation_key}:evaluated",
                 unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                reason_code=self._reason_code_for_status(status.value),
+                reason_code=core_decision.reason_code,
                 inputs_present={"releasegate_risk": True},
                 policy_hash=policy_hash,
                 policy_bindings=policy_bindings,
@@ -1075,6 +1117,12 @@ class WorkflowGate:
                     },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
+                    "engine_core": {
+                        "status": core_decision.status,
+                        "reason_code": core_decision.reason_code,
+                        "blocking_policy_ids": list(core_decision.blocking_policy_ids),
+                        "requirements": list(core_decision.requirements),
+                    },
                 },
             )
             
@@ -2430,29 +2478,3 @@ class WorkflowGate:
             return True
         level = risk_meta.get("releasegate_risk") or risk_meta.get("risk_level")
         return not bool(level)
-
-    def _reason_code_for_status(self, status: str) -> str:
-        if status == "BLOCKED":
-            return "POLICY_BLOCKED"
-        if status == "CONDITIONAL":
-            return "POLICY_CONDITIONAL"
-        return "POLICY_ALLOWED"
-
-    def _evaluate_policy_results(self, relevant_results: List[Any]) -> tuple[DecisionType, List[str], List[str]]:
-        """
-        Pure decision reduction: policy results -> (status, blocking_policy_ids, requirements)
-        """
-        status = DecisionType.ALLOWED
-        blocking_policies: List[str] = []
-        requirements: List[str] = []
-
-        for res in relevant_results:
-            if res.status == "BLOCK":
-                status = DecisionType.BLOCKED
-                blocking_policies.append(res.policy_id)
-                requirements.extend(res.violations)
-            elif res.status == "WARN" and status != DecisionType.BLOCKED:
-                status = DecisionType.CONDITIONAL
-                requirements.extend(res.violations)
-
-        return status, blocking_policies, requirements

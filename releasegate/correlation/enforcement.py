@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from releasegate.audit.reader import AuditReader
+from releasegate.engine_core.evaluate import evaluate as evaluate_engine_core
+from releasegate.engine_core.types import (
+    Decision as CoreDecision,
+    DecisionReason as CoreDecisionReason,
+    EvaluationInput as CoreEvaluationInput,
+    NormalizedContext as CoreNormalizedContext,
+)
 from releasegate.evidence.graph import (
     record_deployment_evidence,
     record_incident_evidence,
@@ -167,6 +174,46 @@ class CorrelationResult:
         }
 
 
+def _core_gate_decision(
+    *,
+    evaluation_kind: str,
+    env: Optional[str],
+    issue_key: Optional[str],
+    transition_id: Optional[str] = None,
+    repo: Optional[str],
+    pr_number: Optional[int],
+    actor_id: Optional[str] = None,
+    reason_code: Optional[str] = None,
+    reason_message: Optional[str] = None,
+) -> CoreDecision:
+    check_reasons = ()
+    if reason_code:
+        check_reasons = (
+            CoreDecisionReason(
+                code=str(reason_code),
+                message=str(reason_message or reason_code),
+                details={},
+            ),
+        )
+    return evaluate_engine_core(
+        CoreEvaluationInput(
+            context=CoreNormalizedContext(
+                evaluation_kind=evaluation_kind,
+                environment=str(env or ""),
+                issue_key=str(issue_key or ""),
+                transition_id=str(transition_id or ""),
+                repo=str(repo or ""),
+                pr_number=pr_number,
+                actor_id=str(actor_id or ""),
+                evaluation_time="",
+            ),
+            check_reasons=check_reasons,
+            success_status="ALLOWED",
+            success_reason_code="CORRELATION_ALLOWED",
+        )
+    )
+
+
 def _deny(
     *,
     tenant_id: str,
@@ -180,10 +227,19 @@ def _deny(
     commit_sha: Optional[str],
     env: Optional[str],
 ) -> CorrelationResult:
-    return CorrelationResult(
-        allow=False,
-        status="BLOCKED",
+    core_decision = _core_gate_decision(
+        evaluation_kind="correlation_gate",
+        env=env,
+        issue_key=issue_key,
+        repo=repo,
+        pr_number=pr_number,
         reason_code=reason_code,
+        reason_message=reason,
+    )
+    return CorrelationResult(
+        allow=core_decision.allow,
+        status=core_decision.status,
+        reason_code=core_decision.reason_code,
         reason=reason,
         tenant_id=tenant_id,
         decision_id=decision_id,
@@ -208,10 +264,19 @@ def _allow(
     commit_sha: Optional[str],
     env: Optional[str],
 ) -> CorrelationResult:
+    core_decision = _core_gate_decision(
+        evaluation_kind="correlation_gate",
+        env=env,
+        issue_key=issue_key,
+        repo=repo,
+        pr_number=pr_number,
+        reason_code=None,
+        reason_message=reason,
+    )
     return CorrelationResult(
-        allow=True,
-        status="ALLOWED",
-        reason_code="CORRELATION_ALLOWED",
+        allow=core_decision.allow,
+        status=core_decision.status,
+        reason_code=core_decision.reason_code,
         reason=reason,
         tenant_id=tenant_id,
         decision_id=decision_id,
