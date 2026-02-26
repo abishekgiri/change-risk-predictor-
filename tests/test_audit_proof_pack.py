@@ -207,8 +207,6 @@ def test_export_proof_alias_includes_manifest_graph_and_replay_request(monkeypat
         assert "edges" in evidence_graph
         replay_request = json.loads(zf.read("replay_request.json").decode("utf-8"))
         assert replay_request.get("endpoint") == f"/decisions/{stored.decision_id}/replay"
-
-
 def test_export_proof_bundle_rejects_cross_tenant_access(monkeypatch, tmp_path):
     repo = f"proof-tenant-{uuid.uuid4().hex[:8]}"
     pr_number = 80
