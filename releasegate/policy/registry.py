@@ -16,6 +16,29 @@ from releasegate.utils.canonical import canonical_json, sha256_json
 SCOPE_TYPES = {"org", "project", "workflow", "transition"}
 POLICY_STATUSES = {"DRAFT", "ACTIVE", "DEPRECATED", "ARCHIVED"}
 ROLLOUT_SCOPES = {"project", "workflow", "transition"}
+SCOPE_PRECEDENCE = ("org", "project", "workflow", "transition")
+_SCOPE_RANK = {scope: idx for idx, scope in enumerate(SCOPE_PRECEDENCE)}
+_MISSING = object()
+
+
+class PolicyConflictError(ValueError):
+    def __init__(self, *, code: str, scope_type: str, scope_id: str, stage: str, conflicts: Sequence[Dict[str, Any]]):
+        self.code = str(code)
+        self.scope_type = str(scope_type)
+        self.scope_id = str(scope_id)
+        self.stage = str(stage)
+        self.conflicts = [dict(conflict) for conflict in conflicts]
+        super().__init__(self.__str__())
+
+    def __str__(self) -> str:
+        payload = {
+            "error_code": self.code,
+            "scope_type": self.scope_type,
+            "scope_id": self.scope_id,
+            "stage": self.stage,
+            "conflicts": self.conflicts,
+        }
+        return f"{self.code}: {canonical_json(payload)}"
 
 
 def _utc_now() -> str:
@@ -71,6 +94,226 @@ def _normalise_policy_json(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _policy_hash(policy_json: Dict[str, Any]) -> str:
     return f"sha256:{sha256_json(policy_json)}"
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _normalise_roles(raw: Any) -> set[str]:
+    if not isinstance(raw, list):
+        return set()
+    return {str(item).strip().lower() for item in raw if str(item).strip()}
+
+
+def _monotonic_conflicts(
+    *,
+    base_policy: Dict[str, Any],
+    incoming_policy: Dict[str, Any],
+    from_scope: str,
+    to_scope: str,
+) -> List[Dict[str, Any]]:
+    """
+    Enforce monotonic governance across policy hierarchy levels.
+    Child scopes can add restrictions, but must not weaken inherited minimum guarantees.
+    """
+    incoming = json.loads(canonical_json(incoming_policy))
+    conflicts: List[Dict[str, Any]] = []
+
+    base_strict = bool(base_policy.get("strict_fail_closed", False))
+    if base_strict and "strict_fail_closed" in incoming and not bool(incoming.get("strict_fail_closed")):
+        conflicts.append(
+            {
+                "code": "POLICY_WEAKENING_STRICT_FAIL_CLOSED",
+                "field": "strict_fail_closed",
+                "from_scope": from_scope,
+                "to_scope": to_scope,
+                "parent_value": True,
+                "child_value": incoming.get("strict_fail_closed"),
+            }
+        )
+
+    base_required = _safe_int(base_policy.get("required_approvals"))
+    child_required_raw = incoming.get("required_approvals", _MISSING)
+    child_required = _safe_int(child_required_raw) if child_required_raw is not _MISSING else None
+    if base_required is not None and child_required is not None and child_required < base_required:
+        conflicts.append(
+            {
+                "code": "POLICY_WEAKENING_REQUIRED_APPROVALS",
+                "field": "required_approvals",
+                "from_scope": from_scope,
+                "to_scope": to_scope,
+                "parent_value": base_required,
+                "child_value": child_required,
+            }
+        )
+
+    base_approval_cfg = base_policy.get("approval_requirements")
+    child_approval_cfg = incoming.get("approval_requirements")
+    if isinstance(base_approval_cfg, dict) and isinstance(child_approval_cfg, dict):
+        base_min = _safe_int(base_approval_cfg.get("min_approvals"))
+        child_min_raw = child_approval_cfg.get("min_approvals", _MISSING)
+        child_min = _safe_int(child_min_raw) if child_min_raw is not _MISSING else None
+        if base_min is not None and child_min is not None and child_min < base_min:
+            conflicts.append(
+                {
+                    "code": "POLICY_WEAKENING_MIN_APPROVALS",
+                    "field": "approval_requirements.min_approvals",
+                    "from_scope": from_scope,
+                    "to_scope": to_scope,
+                    "parent_value": base_min,
+                    "child_value": child_min,
+                }
+            )
+
+        base_roles = _normalise_roles(base_approval_cfg.get("required_roles"))
+        child_roles_raw = child_approval_cfg.get("required_roles", _MISSING)
+        if base_roles and child_roles_raw is not _MISSING:
+            child_roles = _normalise_roles(child_roles_raw)
+            if not child_roles:
+                conflicts.append(
+                    {
+                        "code": "POLICY_WEAKENING_REQUIRED_ROLES",
+                        "field": "approval_requirements.required_roles",
+                        "from_scope": from_scope,
+                        "to_scope": to_scope,
+                        "parent_value": sorted(base_roles),
+                        "child_value": [],
+                    }
+                )
+            elif not base_roles.issubset(child_roles):
+                conflicts.append(
+                    {
+                        "code": "POLICY_WEAKENING_REQUIRED_ROLES",
+                        "field": "approval_requirements.required_roles",
+                        "from_scope": from_scope,
+                        "to_scope": to_scope,
+                        "parent_value": sorted(base_roles),
+                        "child_value": sorted(child_roles),
+                    }
+                )
+
+    return conflicts
+
+
+def _scope_context_for_policy(
+    *,
+    tenant_id: str,
+    scope_type: str,
+    scope_id: str,
+    policy_json: Dict[str, Any],
+) -> Dict[str, Optional[str]]:
+    org_id = str(policy_json.get("org_id") or tenant_id).strip() or tenant_id
+    project_id = str(policy_json.get("project_id") or "").strip() or None
+    workflow_id = str(policy_json.get("workflow_id") or "").strip() or None
+    transition_id = str(policy_json.get("transition_id") or "").strip() or None
+
+    if scope_type == "project":
+        project_id = scope_id
+    elif scope_type == "workflow":
+        workflow_id = scope_id
+    elif scope_type == "transition":
+        transition_id = scope_id
+
+    return {
+        "org_id": org_id,
+        "project_id": project_id,
+        "workflow_id": workflow_id,
+        "transition_id": transition_id,
+    }
+
+
+def _scope_candidates_for_context(context: Dict[str, Optional[str]], scope_type: str, tenant_id: str) -> List[str]:
+    if scope_type == "org":
+        return [str(context.get("org_id") or tenant_id), tenant_id, "default", "*"]
+    if scope_type == "project":
+        project_id = str(context.get("project_id") or "").strip()
+        return [project_id, "default", "*"] if project_id else ["default", "*"]
+    if scope_type == "workflow":
+        workflow_id = str(context.get("workflow_id") or "").strip()
+        return [workflow_id, "default", "*"] if workflow_id else ["default", "*"]
+    if scope_type == "transition":
+        transition_id = str(context.get("transition_id") or "").strip()
+        return [transition_id, "default", "*"] if transition_id else ["default", "*"]
+    return []
+
+
+def _resolve_parent_policy_baseline(
+    *,
+    tenant_id: str,
+    scope_type: str,
+    scope_id: str,
+    policy_json: Dict[str, Any],
+) -> Dict[str, Any]:
+    if scope_type == "org":
+        return {"effective_policy": {}, "parent_scopes": []}
+
+    context = _scope_context_for_policy(
+        tenant_id=tenant_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        policy_json=policy_json,
+    )
+    baseline: Dict[str, Any] = {}
+    parent_scopes: List[str] = []
+    current_rank = _SCOPE_RANK.get(scope_type, len(SCOPE_PRECEDENCE))
+    for parent_scope in SCOPE_PRECEDENCE:
+        if _SCOPE_RANK.get(parent_scope, 0) >= current_rank:
+            break
+        active = _latest_scope_policy(
+            tenant_id=tenant_id,
+            scope_type=parent_scope,
+            scope_candidates=_scope_candidates_for_context(context, parent_scope, tenant_id),
+            status="ACTIVE",
+        )
+        if not active:
+            continue
+        fragment = active.get("policy_json")
+        if not isinstance(fragment, dict):
+            continue
+        baseline = deep_merge_policies(baseline, fragment)
+        parent_scopes.append(parent_scope)
+    return {"effective_policy": baseline, "parent_scopes": parent_scopes}
+
+
+def _ensure_monotonic_policy(
+    *,
+    tenant_id: str,
+    scope_type: str,
+    scope_id: str,
+    policy_json: Dict[str, Any],
+    stage: str,
+) -> None:
+    parent = _resolve_parent_policy_baseline(
+        tenant_id=tenant_id,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        policy_json=policy_json,
+    )
+    parent_policy = parent.get("effective_policy") if isinstance(parent.get("effective_policy"), dict) else {}
+    if not parent_policy:
+        return
+    parent_scopes = parent.get("parent_scopes") if isinstance(parent.get("parent_scopes"), list) else []
+    from_scope = ",".join(parent_scopes) if parent_scopes else "parent"
+    conflicts = _monotonic_conflicts(
+        base_policy=parent_policy,
+        incoming_policy=policy_json,
+        from_scope=from_scope,
+        to_scope=scope_type,
+    )
+    if conflicts:
+        raise PolicyConflictError(
+            code="POLICY_MONOTONICITY_VIOLATION",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            stage=stage,
+            conflicts=conflicts,
+        )
 
 
 def _parse_json_field(raw: Any, fallback: Any) -> Any:
@@ -205,6 +448,13 @@ def create_registry_policy(
     normalized_rollout_scope = _normalise_rollout_scope(rollout_scope)
     normalized_policy_json = _normalise_policy_json(policy_json)
     policy_hash = _policy_hash(normalized_policy_json)
+    _ensure_monotonic_policy(
+        tenant_id=effective_tenant,
+        scope_type=normalized_scope_type,
+        scope_id=normalized_scope_id,
+        policy_json=normalized_policy_json,
+        stage="create",
+    )
 
     lint_report = lint_registry_policy(normalized_policy_json)
     lint_errors = [issue for issue in lint_report.get("issues", []) if issue.get("severity") == "ERROR"]
@@ -414,6 +664,7 @@ def resolve_registry_policy(
 
     effective_policy: Dict[str, Any] = {}
     selected_components: List[Dict[str, Any]] = []
+    resolution_conflicts: List[Dict[str, Any]] = []
 
     for scope_type, candidates in scope_lookup:
         filtered_candidates = [str(value).strip() for value in candidates if str(value or "").strip()]
@@ -437,12 +688,35 @@ def resolve_registry_policy(
         policy_fragment = selected.get("policy_json")
         if not isinstance(policy_fragment, dict):
             continue
+        parent_scope = selected_components[-1]["scope_type"] if selected_components else "baseline"
+        conflicts = _monotonic_conflicts(
+            base_policy=effective_policy,
+            incoming_policy=policy_fragment,
+            from_scope=str(parent_scope),
+            to_scope=scope_type,
+        )
+        if conflicts:
+            resolution_conflicts.extend(conflicts)
+            selected = dict(selected)
+            selected["inheritance_conflicts"] = conflicts
+            selected["policy_json_effective"] = policy_fragment
         effective_policy = deep_merge_policies(effective_policy, policy_fragment)
         selected_components.append(selected)
 
     effective_policy = json.loads(canonical_json(effective_policy))
     effective_policy_hash = _policy_hash(effective_policy)
     component_policy_ids = [str(component.get("policy_id") or "") for component in selected_components if component.get("policy_id")]
+    component_lineage: Dict[str, Dict[str, Any]] = {}
+    for component in selected_components:
+        scope = str(component.get("scope_type") or "").strip().lower()
+        if scope not in SCOPE_PRECEDENCE:
+            continue
+        component_lineage[scope] = {
+            "policy_id": component.get("policy_id"),
+            "version": component.get("version"),
+            "scope_id": component.get("scope_id"),
+            "policy_hash": component.get("policy_hash"),
+        }
 
     return {
         "tenant_id": effective_tenant,
@@ -456,7 +730,9 @@ def resolve_registry_policy(
         "effective_policy": effective_policy,
         "effective_policy_hash": effective_policy_hash,
         "component_policy_ids": component_policy_ids,
+        "component_lineage": component_lineage,
         "components": selected_components,
+        "resolution_conflicts": resolution_conflicts,
     }
 
 
@@ -478,6 +754,13 @@ def activate_registry_policy(
         raise ValueError("policy has lint errors and cannot be activated")
     if str(policy.get("status") or "").upper() == "ACTIVE":
         return policy
+    _ensure_monotonic_policy(
+        tenant_id=effective_tenant,
+        scope_type=str(policy.get("scope_type") or ""),
+        scope_id=str(policy.get("scope_id") or ""),
+        policy_json=policy.get("policy_json") if isinstance(policy.get("policy_json"), dict) else {},
+        stage="activate",
+    )
 
     now_iso = _utc_now()
     supersedes_policy_id: Optional[str] = None
@@ -597,7 +880,16 @@ def simulate_registry_decision(
             "effective_policy": selected.get("policy_json") if isinstance(selected.get("policy_json"), dict) else {},
             "effective_policy_hash": selected.get("policy_hash") or _policy_hash(selected.get("policy_json") or {}),
             "component_policy_ids": [str(selected.get("policy_id") or "")],
+            "component_lineage": {
+                str(selected.get("scope_type") or ""): {
+                    "policy_id": selected.get("policy_id"),
+                    "version": selected.get("version"),
+                    "scope_id": selected.get("scope_id"),
+                    "policy_hash": selected.get("policy_hash"),
+                }
+            },
             "components": [selected],
+            "resolution_conflicts": [],
         }
     else:
         resolved = resolve_registry_policy(
@@ -673,6 +965,8 @@ def simulate_registry_decision(
         "policy_hash": resolved.get("effective_policy_hash"),
         "effective_policy_hash": resolved.get("effective_policy_hash"),
         "component_policy_ids": resolved.get("component_policy_ids", []),
+        "component_lineage": resolved.get("component_lineage", {}),
+        "resolution_conflicts": resolved.get("resolution_conflicts", []),
         "effective_policy_json": effective_policy,
         "resolution_inputs": resolved.get("resolution_inputs", {}),
         "matched_rule": selected_rule,
