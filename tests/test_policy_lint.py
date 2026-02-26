@@ -233,3 +233,39 @@ def test_registry_lint_detects_impossible_approval_requirements():
 
     assert report["ok"] is False
     assert any(issue["code"] == "APPROVAL_REQUIREMENT_IMPOSSIBLE" for issue in report["issues"])
+
+
+def test_registry_lint_detects_invalid_nested_rule_logic():
+    report = lint_registry_policy(
+        {
+            "rules": [
+                {"id": "bad-empty-all", "when": {"all": []}, "result": "ALLOW"},
+                {"id": "bad-unknown", "when": {"foo": "bar"}, "result": "ALLOW"},
+            ]
+        }
+    )
+
+    assert report["ok"] is False
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "RULE_INVALID_LOGIC" in codes
+
+
+def test_registry_lint_detects_conflicting_rule_requirements():
+    report = lint_registry_policy(
+        {
+            "rules": [
+                {
+                    "id": "rule-1",
+                    "when": {"risk": "HIGH"},
+                    "require": {"approvals": 2, "roles": ["Security"]},
+                    "required_approvals": 1,
+                    "required_roles": ["EM"],
+                    "result": "WARN",
+                }
+            ]
+        }
+    )
+
+    assert report["ok"] is False
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "CONTRADICTORY_RULES" in codes
