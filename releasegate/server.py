@@ -2452,14 +2452,14 @@ def run_policy_release_scheduler_endpoint(
 ):
     from releasegate.policy.releases import run_policy_release_scheduler
 
-    effective_tenant = _effective_tenant(auth, tenant_id) if tenant_id else None
+    effective_tenant = _effective_tenant(auth, tenant_id)
     result = run_policy_release_scheduler(
         tenant_id=effective_tenant,
         actor_id=auth.principal_id,
         now=now,
     )
     log_security_event(
-        tenant_id=effective_tenant or (auth.tenant_id if auth and auth.tenant_id else "default"),
+        tenant_id=effective_tenant,
         principal_id=auth.principal_id,
         auth_method=auth.auth_method,
         action="policy_release_scheduler_run",

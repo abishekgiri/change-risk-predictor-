@@ -153,12 +153,15 @@ def _lock_checkpoint_dir(
 def _checkpoint_signing_material(
     signing_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    preferred_key_id: Optional[str] = None,
 ) -> Dict[str, str]:
     if signing_key:
         return {"key": signing_key, "key_id": "manual"}
 
+    preferred = str(preferred_key_id or "").strip()
     env_key = os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY", "").strip()
-    if env_key:
+
+    if preferred in {"manual", "env"} and env_key:
         return {
             "key": env_key,
             "key_id": (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID") or "env").strip(),
@@ -166,9 +169,16 @@ def _checkpoint_signing_material(
 
     if tenant_id:
         try:
-            from releasegate.security.checkpoint_keys import get_active_checkpoint_signing_key_record
+            from releasegate.security.checkpoint_keys import (
+                get_active_checkpoint_signing_key_record,
+                get_checkpoint_signing_key_record,
+            )
 
-            record = get_active_checkpoint_signing_key_record(tenant_id)
+            record = None
+            if preferred:
+                record = get_checkpoint_signing_key_record(tenant_id, preferred)
+            if not record:
+                record = get_active_checkpoint_signing_key_record(tenant_id)
             if record and record.get("key"):
                 return {
                     "key": str(record["key"]),
@@ -176,6 +186,12 @@ def _checkpoint_signing_material(
                 }
         except Exception:
             pass
+
+    if env_key:
+        return {
+            "key": env_key,
+            "key_id": (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID") or "env").strip(),
+        }
 
     raise ValueError("Checkpoint signing key missing. Set RELEASEGATE_CHECKPOINT_SIGNING_KEY.")
 
@@ -343,9 +359,14 @@ def _sign_payload(
     payload: Dict[str, Any],
     signing_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    preferred_key_id: Optional[str] = None,
 ) -> Dict[str, str]:
     effective_tenant = tenant_id or payload.get("tenant_id")
-    material = _checkpoint_signing_material(signing_key, tenant_id=effective_tenant)
+    material = _checkpoint_signing_material(
+        signing_key,
+        tenant_id=effective_tenant,
+        preferred_key_id=preferred_key_id,
+    )
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
         "algorithm": "HMAC-SHA256",
@@ -366,7 +387,12 @@ def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optiona
     signature = signature_obj.get("value")
     if not isinstance(payload, dict) or not isinstance(signature, str):
         return False
-    expected = _sign_payload(payload, signing_key=signing_key, tenant_id=payload.get("tenant_id")).get("value")
+    expected = _sign_payload(
+        payload,
+        signing_key=signing_key,
+        tenant_id=payload.get("tenant_id"),
+        preferred_key_id=signature_obj.get("key_id"),
+    ).get("value")
     return hmac.compare_digest(expected, signature)
 
 
