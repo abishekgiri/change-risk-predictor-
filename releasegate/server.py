@@ -2166,7 +2166,7 @@ def create_registry_policy_endpoint(
         rate_profile="default",
     ),
 ):
-    from releasegate.policy.registry import create_registry_policy
+    from releasegate.policy.registry import PolicyConflictError, create_registry_policy
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
     try:
@@ -2180,6 +2180,17 @@ def create_registry_policy_endpoint(
             rollout_scope=payload.rollout_scope,
             created_by=payload.created_by or auth.principal_id,
         )
+    except PolicyConflictError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": exc.code,
+                "scope_type": exc.scope_type,
+                "scope_id": exc.scope_id,
+                "stage": exc.stage,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_security_event(
@@ -2258,7 +2269,7 @@ def activate_registry_policy_endpoint(
         rate_profile="default",
     ),
 ):
-    from releasegate.policy.registry import activate_registry_policy
+    from releasegate.policy.registry import PolicyConflictError, activate_registry_policy
 
     activate_payload = payload or PolicyRegistryActivateRequest()
     effective_tenant = _effective_tenant(auth, activate_payload.tenant_id)
@@ -2268,6 +2279,17 @@ def activate_registry_policy_endpoint(
             policy_id=policy_id,
             actor_id=activate_payload.actor_id or auth.principal_id,
         )
+    except PolicyConflictError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_code": exc.code,
+                "scope_type": exc.scope_type,
+                "scope_id": exc.scope_id,
+                "stage": exc.stage,
+                "conflicts": exc.conflicts,
+            },
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         status_code = 404 if "not found" in message.lower() else 400

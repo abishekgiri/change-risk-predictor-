@@ -173,6 +173,8 @@ def test_policy_registry_api_simulate_decision_uses_effective_policy():
     assert simulated["status"] == "BLOCKED"
     assert "POLICY_DENIED" in simulated["reason_codes"]
     assert len(simulated["component_policy_ids"]) >= 1
+    assert "component_lineage" in simulated
+    assert simulated["resolution_conflicts"] == []
 
 
 def test_policy_registry_api_blocks_activation_when_lint_errors_exist():
@@ -205,6 +207,105 @@ def test_policy_registry_api_blocks_activation_when_lint_errors_exist():
     )
     assert activate_resp.status_code == 400
     assert "lint errors" in activate_resp.text.lower()
+
+
+def test_policy_registry_api_rejects_monotonic_weakening_on_create():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api")
+
+    org = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "org",
+            "scope_id": "tenant-registry-api",
+            "status": "ACTIVE",
+            "policy_json": {
+                "strict_fail_closed": True,
+                "required_approvals": 2,
+                "approval_requirements": {
+                    "min_approvals": 2,
+                    "required_roles": ["security"],
+                    "role_capacity": {"security": 2},
+                },
+            },
+        },
+    )
+    assert org.status_code == 200, org.text
+
+    weak = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "project",
+            "scope_id": "PROJ",
+            "status": "DRAFT",
+            "policy_json": {
+                "strict_fail_closed": False,
+                "required_approvals": 1,
+                "approval_requirements": {"min_approvals": 1, "required_roles": []},
+            },
+        },
+    )
+    assert weak.status_code == 400
+    detail = weak.json().get("detail") or {}
+    assert detail.get("error_code") == "POLICY_MONOTONICITY_VIOLATION"
+    assert detail.get("stage") == "create"
+
+
+def test_policy_registry_api_rejects_monotonic_weakening_on_activate():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api")
+
+    weak_draft = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "project",
+            "scope_id": "PROJ",
+            "status": "DRAFT",
+            "policy_json": {
+                "strict_fail_closed": False,
+                "required_approvals": 1,
+            },
+        },
+    )
+    assert weak_draft.status_code == 200, weak_draft.text
+    weak_policy_id = weak_draft.json()["policy_id"]
+
+    org = client.post(
+        "/policies",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "org",
+            "scope_id": "tenant-registry-api",
+            "status": "ACTIVE",
+            "policy_json": {
+                "strict_fail_closed": True,
+                "required_approvals": 2,
+                "approval_requirements": {
+                    "min_approvals": 2,
+                    "required_roles": ["security"],
+                    "role_capacity": {"security": 2},
+                },
+            },
+        },
+    )
+    assert org.status_code == 200, org.text
+
+    activate = client.post(
+        f"/policies/{weak_policy_id}/activate",
+        headers=headers,
+        json={"tenant_id": "tenant-registry-api"},
+    )
+    assert activate.status_code == 400
+    detail = activate.json().get("detail") or {}
+    assert detail.get("error_code") == "POLICY_MONOTONICITY_VIOLATION"
+    assert detail.get("stage") == "activate"
 
 
 def test_simulate_decision_endpoint_has_no_persistence_side_effects():

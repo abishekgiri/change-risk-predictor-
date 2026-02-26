@@ -508,13 +508,12 @@ def _validate_rule_condition_tree(node: Any, *, path: str) -> List[Dict[str, Any
     gte = _as_int(node.get("changed_files_gte"))
     lt = _as_int(node.get("changed_files_lt"))
     lte = _as_int(node.get("changed_files_lte"))
-
     lower_value: Optional[int] = None
     lower_inclusive = False
     if gt is not None:
         lower_value = gt
         lower_inclusive = False
-    if gte is not None and (lower_value is None or gte > lower_value or (gte == lower_value and lower_inclusive is False)):
+    if gte is not None and (lower_value is None or gte > lower_value or (gte == lower_value and not lower_inclusive)):
         lower_value = gte
         lower_inclusive = True
 
@@ -523,7 +522,7 @@ def _validate_rule_condition_tree(node: Any, *, path: str) -> List[Dict[str, Any
     if lt is not None:
         upper_value = lt
         upper_inclusive = False
-    if lte is not None and (upper_value is None or lte < upper_value or (lte == upper_value and upper_inclusive is False)):
+    if lte is not None and (upper_value is None or lte < upper_value or (lte == upper_value and not upper_inclusive)):
         upper_value = lte
         upper_inclusive = True
 
@@ -540,7 +539,42 @@ def _validate_rule_condition_tree(node: Any, *, path: str) -> List[Dict[str, Any
 
     return issues
 
+def _normalise_selector_value(value: Any) -> str:
+    return str(value or "").strip().lower()
 
+
+def _normalise_conditions(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _selectors_overlap(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    for key in ("transition_id", "project_id", "workflow_id", "environment"):
+        left_value = _normalise_selector_value(left.get(key))
+        right_value = _normalise_selector_value(right.get(key))
+        if left_value and right_value and left_value != right_value:
+            return False
+    left_conditions = _normalise_conditions(left.get("conditions"))
+    right_conditions = _normalise_conditions(right.get("conditions"))
+    if left_conditions and right_conditions:
+        return json.dumps(left_conditions, sort_keys=True, separators=(",", ":")) == json.dumps(
+            right_conditions, sort_keys=True, separators=(",", ":")
+        )
+    return True
+
+
+def _selector_contains(broader: Dict[str, Any], narrower: Dict[str, Any]) -> bool:
+    for key in ("transition_id", "project_id", "workflow_id", "environment"):
+        broader_value = _normalise_selector_value(broader.get(key))
+        narrower_value = _normalise_selector_value(narrower.get(key))
+        if broader_value and broader_value != narrower_value:
+            return False
+    broader_conditions = _normalise_conditions(broader.get("conditions"))
+    narrower_conditions = _normalise_conditions(narrower.get("conditions"))
+    if not broader_conditions:
+        return True
+    return json.dumps(broader_conditions, sort_keys=True, separators=(",", ":")) == json.dumps(
+        narrower_conditions, sort_keys=True, separators=(",", ":")
+    )
 def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
     """
     Static checks for centralized policy-registry entries.
@@ -690,6 +724,7 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
 
     # Overlap + contradiction checks
     signatures: Dict[str, Dict[str, Any]] = {}
+    structural_rules: List[Dict[str, Any]] = []
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             continue
@@ -705,6 +740,20 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
             "conditions": rule.get("conditions") if isinstance(rule.get("conditions"), dict) else {},
         }
         signature = json.dumps(selector, sort_keys=True, separators=(",", ":"))
+        try:
+            priority = int(rule.get("priority") or 1000)
+        except Exception:
+            priority = 1000
+
+        structural_rules.append(
+            {
+                "index": index,
+                "priority": priority,
+                "result": result,
+                "selector": selector,
+                "transition_id": transition_id,
+            }
+        )
 
         prior = signatures.get(signature)
         if prior is None:
@@ -735,6 +784,61 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
                     ),
                 )
             )
+
+    structural_rules.sort(key=lambda item: (item["priority"], item["index"]))
+    for idx, current in enumerate(structural_rules):
+        for prior in structural_rules[:idx]:
+            if not _selectors_overlap(prior["selector"], current["selector"]):
+                continue
+
+            if prior["priority"] == current["priority"] and prior["result"] != current["result"]:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "AMBIGUOUS_OVERLAP",
+                        (
+                            f"Transition rules at indexes {prior['index']} and {current['index']} "
+                            "overlap at the same priority with conflicting outcomes."
+                        ),
+                        metadata={
+                            "rule_indexes": [prior["index"], current["index"]],
+                            "priority": current["priority"],
+                        },
+                    )
+                )
+
+            if _selector_contains(prior["selector"], current["selector"]):
+                if prior["result"] != current["result"]:
+                    issues.append(
+                        _issue(
+                            "ERROR",
+                            "CONTRADICTORY_RULES",
+                            (
+                                f"Higher precedence rule at index {prior['index']} conflicts with narrower "
+                                f"rule at index {current['index']}."
+                            ),
+                            metadata={
+                                "rule_indexes": [prior["index"], current["index"]],
+                                "priority": [prior["priority"], current["priority"]],
+                            },
+                        )
+                    )
+                else:
+                    issues.append(
+                        _issue(
+                            "WARNING",
+                            "RULE_UNREACHABLE_SHADOWED",
+                            (
+                                f"Rule at index {current['index']} is shadowed by higher precedence "
+                                f"rule at index {prior['index']}."
+                            ),
+                            metadata={
+                                "rule_index": current["index"],
+                                "shadowed_by": prior["index"],
+                            },
+                        )
+                    )
+                break
 
     error_count = sum(1 for issue in issues if issue.get("severity") == "ERROR")
     warning_count = sum(1 for issue in issues if issue.get("severity") == "WARNING")

@@ -950,6 +950,16 @@ class WorkflowGate:
                 for policy_id in (registry_resolution.get("component_policy_ids") or [])
                 if str(policy_id).strip()
             ]
+            registry_component_lineage = (
+                registry_resolution.get("component_lineage")
+                if isinstance(registry_resolution.get("component_lineage"), dict)
+                else {}
+            )
+            registry_resolution_conflicts = (
+                registry_resolution.get("resolution_conflicts")
+                if isinstance(registry_resolution.get("resolution_conflicts"), list)
+                else []
+            )
             registry_component_policies: List[Dict[str, Any]] = []
             for component in (registry_resolution.get("components") or []):
                 if not isinstance(component, dict):
@@ -976,19 +986,52 @@ class WorkflowGate:
                         policy={
                             "effective_policy_hash": registry_effective_hash,
                             "component_policy_ids": registry_component_ids,
+                            "component_lineage": registry_component_lineage,
+                            "resolution_conflicts": registry_resolution_conflicts,
                             "component_policies": registry_component_policies,
                             "effective_policy": registry_effective_policy,
                         },
                     )
                 )
             bindings_hash = self._policy_bindings_hash(policy_bindings)
+            policy_hash = bindings_hash or self._current_policy_hash()
+
+            if registry_resolution_conflicts:
+                return self._deny(
+                    request,
+                    evaluation_key=f"{evaluation_key}:policy-resolution-conflict",
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    reason_code="POLICY_RESOLUTION_CONFLICT",
+                    message="BLOCKED: policy resolution conflict detected",
+                    unlock_conditions=["Resolve policy hierarchy conflicts before retrying transition."],
+                    event="jira.transition.policy_resolution_conflict",
+                    dependency="policy_registry",
+                    error_code="POLICY_RESOLUTION_CONFLICT",
+                    policy_hash=policy_hash,
+                    policy_bindings=policy_bindings,
+                    inputs_present={"releasegate_risk": True},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "risk_meta": risk_meta,
+                        "registry_policy": {
+                            "effective_policy_hash": registry_effective_hash,
+                            "component_policy_ids": registry_component_ids,
+                            "component_lineage": registry_component_lineage,
+                            "resolution_conflicts": registry_resolution_conflicts,
+                            "component_policies": registry_component_policies,
+                            "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                        },
+                    },
+                )
             
             # Run ALL policies (Engine doesn't support filtering input yet)
             run_result = engine.evaluate(signal_map)
             
             # Filter results to ONLY the policies required by this Jira transition
             relevant_results = [r for r in run_result.results if r.policy_id in policies]
-            policy_hash = bindings_hash or self._current_policy_hash()
 
             if unresolved_policy_ids:
                 invalid_detail = {
@@ -1222,6 +1265,8 @@ class WorkflowGate:
                     "registry_policy": {
                         "effective_policy_hash": registry_effective_hash,
                         "component_policy_ids": registry_component_ids,
+                        "component_lineage": registry_component_lineage,
+                        "resolution_conflicts": registry_resolution_conflicts,
                         "component_policies": registry_component_policies,
                         "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
                     },

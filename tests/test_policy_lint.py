@@ -269,3 +269,32 @@ def test_registry_lint_detects_conflicting_rule_requirements():
     assert report["ok"] is False
     codes = {issue["code"] for issue in report["issues"]}
     assert "CONTRADICTORY_RULES" in codes
+
+
+def test_registry_lint_detects_ambiguous_overlap_for_wildcard_selectors():
+    report = lint_registry_policy(
+        {
+            "transition_rules": [
+                {"transition_id": "2", "project_id": "", "priority": 100, "result": "ALLOW"},
+                {"transition_id": "2", "project_id": "proj-a", "priority": 100, "result": "BLOCK"},
+            ]
+        }
+    )
+
+    assert report["ok"] is False
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "AMBIGUOUS_OVERLAP" in codes
+
+
+def test_registry_lint_detects_shadowed_narrower_rule():
+    report = lint_registry_policy(
+        {
+            "transition_rules": [
+                {"transition_id": "2", "project_id": "", "priority": 10, "result": "ALLOW"},
+                {"transition_id": "2", "project_id": "proj-a", "priority": 20, "result": "ALLOW"},
+            ]
+        }
+    )
+
+    codes = {issue["code"] for issue in report["issues"]}
+    assert "RULE_UNREACHABLE_SHADOWED" in codes

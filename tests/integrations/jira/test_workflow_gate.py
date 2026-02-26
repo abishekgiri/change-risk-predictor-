@@ -716,6 +716,41 @@ def test_gate_strict_blocks_when_policy_resolution_invalid(base_request):
     assert resp.reason_code == "POLICY_INVALID"
 
 
+def test_gate_strict_blocks_when_policy_resolution_conflict(base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+    fake_resolution = {
+        "effective_policy": {"transition_rules": [{"transition_id": "31", "result": "ALLOW"}]},
+        "effective_policy_hash": "sha256:effective",
+        "component_policy_ids": ["org-1", "project-1"],
+        "component_lineage": {
+            "org": {"policy_id": "org-1", "version": 1, "policy_hash": "sha256:org", "scope_id": "tenant-test"},
+            "project": {"policy_id": "project-1", "version": 1, "policy_hash": "sha256:project", "scope_id": "TEST"},
+        },
+        "resolution_conflicts": [
+            {"code": "POLICY_WEAKENING_REQUIRED_APPROVALS", "field": "required_approvals"},
+        ],
+        "components": [
+            {"policy_id": "org-1", "scope_type": "org", "scope_id": "tenant-test", "version": 1, "policy_hash": "sha256:org"},
+            {"policy_id": "project-1", "scope_type": "project", "scope_id": "TEST", "version": 1, "policy_hash": "sha256:project"},
+        ],
+        "resolution_inputs": {"org_id": "tenant-test", "project_id": "TEST", "workflow_id": "default", "transition_id": "31"},
+    }
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.policy.registry.resolve_registry_policy",
+        return_value=fake_resolution,
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "POLICY_RESOLUTION_CONFLICT"
+    assert "policy resolution conflict" in resp.reason.lower()
+
+
 def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
         gate = WorkflowGate()

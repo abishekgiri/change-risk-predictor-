@@ -87,7 +87,7 @@ def test_registry_inheritance_resolves_org_project_workflow_transition(clean_db)
         tenant_id=tenant,
         scope_type="org",
         scope_id=tenant,
-        policy_json={"required_approvals": 1, "strict_fail_closed": True, "policy_source": "org"},
+        policy_json={"required_approvals": 1, "strict_fail_closed": False, "policy_source": "org"},
         created_by="alice",
         status="ACTIVE",
     )
@@ -139,6 +139,129 @@ def test_registry_inheritance_resolves_org_project_workflow_transition(clean_db)
     assert first["effective_policy"]["strict_fail_closed"] is False
     assert first["effective_policy"]["transition_flag"] == "ship"
     assert first["effective_policy"]["policy_source"] == "transition"
+    assert first["component_lineage"]["org"]["policy_id"]
+    assert first["component_lineage"]["project"]["policy_id"]
+    assert first["component_lineage"]["workflow"]["policy_id"]
+    assert first["component_lineage"]["transition"]["policy_id"]
+
+
+def test_registry_rejects_monotonic_weakening_on_create(clean_db):
+    tenant = "tenant-registry"
+    create_registry_policy(
+        tenant_id=tenant,
+        scope_type="org",
+        scope_id=tenant,
+        policy_json={
+            "strict_fail_closed": True,
+            "required_approvals": 2,
+            "approval_requirements": {
+                "min_approvals": 2,
+                "required_roles": ["security", "platform"],
+                "role_capacity": {"security": 2, "platform": 2},
+            },
+        },
+        created_by="alice",
+        status="ACTIVE",
+    )
+    with pytest.raises(ValueError, match="POLICY_MONOTONICITY_VIOLATION"):
+        create_registry_policy(
+            tenant_id=tenant,
+            scope_type="project",
+            scope_id="PROJ",
+            policy_json={
+                "strict_fail_closed": False,
+                "required_approvals": 1,
+                "approval_requirements": {
+                    "min_approvals": 1,
+                    "required_roles": [],
+                    "role_capacity": {"security": 3},
+                },
+            },
+            created_by="alice",
+            status="ACTIVE",
+        )
+
+
+def test_registry_rejects_monotonic_weakening_on_activate(clean_db):
+    tenant = "tenant-registry"
+    # Draft created before a stricter org baseline existed.
+    draft = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="project",
+        scope_id="PROJ",
+        policy_json={
+            "strict_fail_closed": False,
+            "required_approvals": 1,
+            "approval_requirements": {
+                "min_approvals": 1,
+                "required_roles": ["security"],
+                "role_capacity": {"security": 2},
+            },
+        },
+        created_by="alice",
+        status="DRAFT",
+    )
+    create_registry_policy(
+        tenant_id=tenant,
+        scope_type="org",
+        scope_id=tenant,
+        policy_json={
+            "strict_fail_closed": True,
+            "required_approvals": 2,
+            "approval_requirements": {
+                "min_approvals": 2,
+                "required_roles": ["security", "platform"],
+                "role_capacity": {"security": 2, "platform": 2},
+            },
+        },
+        created_by="alice",
+        status="ACTIVE",
+    )
+
+    with pytest.raises(ValueError, match="POLICY_MONOTONICITY_VIOLATION"):
+        activate_registry_policy(
+            tenant_id=tenant,
+            policy_id=draft["policy_id"],
+            actor_id="alice",
+        )
+
+
+def test_registry_monotonic_roles_treats_none_as_inherit_and_empty_as_weaken(clean_db):
+    tenant = "tenant-registry"
+    create_registry_policy(
+        tenant_id=tenant,
+        scope_type="org",
+        scope_id=tenant,
+        policy_json={
+            "approval_requirements": {
+                "min_approvals": 1,
+                "required_roles": ["security"],
+                "role_capacity": {"security": 1},
+            },
+        },
+        created_by="alice",
+        status="ACTIVE",
+    )
+
+    inherited = create_registry_policy(
+        tenant_id=tenant,
+        scope_type="project",
+        scope_id="PROJ",
+        policy_json={"required_approvals": 2},
+        created_by="alice",
+        status="DRAFT",
+    )
+    assert inherited["status"] == "DRAFT"
+
+    with pytest.raises(ValueError, match="POLICY_MONOTONICITY_VIOLATION"):
+        create_registry_policy(
+            tenant_id=tenant,
+            scope_type="project",
+            scope_id="PROJ-BAD",
+            policy_json={"approval_requirements": {"required_roles": []}},
+            created_by="alice",
+            status="DRAFT",
+        )
 
 
 def test_registry_rollout_falls_back_to_previous_deprecated_policy(clean_db):
