@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from releasegate.overrides.state import OverrideState, resolve_override_state
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -26,40 +27,9 @@ def _get_last_hash(repo: str, tenant_id: str) -> Optional[str]:
     return row.get("event_hash") if row else None
 
 
-def _parse_iso_datetime(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        raw = str(value).strip()
-        if not raw:
-            return None
-        if raw.endswith("Z"):
-            raw = f"{raw[:-1]}+00:00"
-        try:
-            dt = datetime.fromisoformat(raw)
-        except Exception:
-            return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 def _require_expires_at() -> bool:
     raw = str(os.getenv("RELEASEGATE_OVERRIDE_REQUIRE_EXPIRES_AT", "true") or "true").strip().lower()
     return raw in {"1", "true", "yes", "on"}
-
-
-def _override_expired(*, row: Dict[str, Any], at_time: Optional[datetime]) -> bool:
-    effective_now = _parse_iso_datetime(at_time) if at_time is not None else datetime.now(timezone.utc)
-    if effective_now is None:
-        effective_now = datetime.now(timezone.utc)
-    expires_at = _parse_iso_datetime(row.get("expires_at"))
-    if expires_at is None:
-        # Hardened default: overrides must be time-bound.
-        return _require_expires_at()
-    return effective_now > expires_at
 
 
 def record_override(
@@ -237,7 +207,13 @@ def get_active_override(
     if not row:
         return None
     enriched = dict(row)
-    expired = _override_expired(row=enriched, at_time=at_time)
+    state = resolve_override_state(
+        enriched,
+        now_utc=at_time,
+        require_expires_at=_require_expires_at(),
+    )
+    expired = state != OverrideState.ACTIVE
+    enriched["state"] = state.value
     enriched["expired"] = expired
     if expired and not include_expired:
         return None

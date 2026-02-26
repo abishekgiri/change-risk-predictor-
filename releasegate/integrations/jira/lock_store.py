@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -16,6 +16,7 @@ EVENT_LOCK = "LOCK"
 EVENT_UNLOCK = "UNLOCK"
 EVENT_OVERRIDE = "OVERRIDE"
 EVENT_OVERRIDE_EXPIRE = "OVERRIDE_EXPIRE"
+EVENT_OVERRIDE_STALE = "OVERRIDE_STALE"
 LOCK_CHAIN_ROOT_HASH = "0" * 64
 
 
@@ -191,6 +192,127 @@ def get_current_lock_state(*, tenant_id: str, issue_key: str) -> Optional[JiraLo
         override_reason=row.get("override_reason"),
         override_by=row.get("override_by"),
         updated_at=row.get("updated_at"),
+    )
+
+
+def _latest_override_binding(*, tenant_id: str, issue_key: str) -> Dict[str, str]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    row = storage.fetchone(
+        """
+        SELECT policy_hash, policy_resolution_hash, context_json
+        FROM jira_lock_events
+        WHERE tenant_id = ? AND issue_key = ? AND event_type = ?
+        ORDER BY seq DESC, created_at DESC
+        LIMIT 1
+        """,
+        (effective_tenant, issue_key, EVENT_OVERRIDE),
+    )
+    if not row:
+        return {}
+    context = _json_loads_obj(row.get("context_json"))
+    return {
+        "evaluation_key": str(context.get("evaluation_key") or "").strip(),
+        "policy_hash": str(
+            context.get("policy_hash")
+            or row.get("policy_hash")
+            or row.get("policy_resolution_hash")
+            or ""
+        ).strip(),
+        "risk_hash": str(context.get("risk_hash") or "").strip(),
+    }
+
+
+def _current_override_binding(
+    *,
+    policy_hash: Optional[str],
+    policy_resolution_hash: Optional[str],
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, str]:
+    normalized_context = context if isinstance(context, dict) else {}
+    return {
+        "evaluation_key": str(normalized_context.get("evaluation_key") or "").strip(),
+        "policy_hash": str(
+            normalized_context.get("policy_hash")
+            or policy_hash
+            or policy_resolution_hash
+            or ""
+        ).strip(),
+        "risk_hash": str(normalized_context.get("risk_hash") or "").strip(),
+    }
+
+
+def _override_freshness_mismatches(
+    *,
+    expected: Dict[str, str],
+    actual: Dict[str, str],
+) -> Dict[str, Dict[str, str]]:
+    mismatches: Dict[str, Dict[str, str]] = {}
+    for key in ("evaluation_key", "policy_hash", "risk_hash"):
+        expected_value = str(expected.get(key) or "").strip()
+        if not expected_value:
+            continue
+        actual_value = str(actual.get(key) or "").strip()
+        if expected_value != actual_value:
+            mismatches[key] = {
+                "expected": expected_value,
+                "actual": actual_value,
+            }
+    return mismatches
+
+
+def _revalidate_override_freshness(
+    *,
+    tenant_id: str,
+    issue_key: str,
+    state: Optional[JiraLockState],
+    policy_hash: Optional[str],
+    policy_resolution_hash: Optional[str],
+    actor: Optional[str],
+    context: Optional[Dict[str, Any]],
+) -> tuple[Optional[JiraLockState], Optional[str]]:
+    if not state or not state.override_expires_at:
+        return state, None
+    expected = _latest_override_binding(tenant_id=tenant_id, issue_key=issue_key)
+    if not expected:
+        return state, None
+    actual = _current_override_binding(
+        policy_hash=policy_hash,
+        policy_resolution_hash=policy_resolution_hash,
+        context=context,
+    )
+    mismatches = _override_freshness_mismatches(expected=expected, actual=actual)
+    if not mismatches:
+        return state, None
+
+    event_id = _append_event(
+        tenant_id=tenant_id,
+        issue_key=issue_key,
+        event_type=EVENT_OVERRIDE_STALE,
+        decision_id=state.decision_id,
+        repo=state.repo,
+        pr_number=state.pr_number,
+        reason_codes=["OVERRIDE_STALE"],
+        policy_hash=policy_hash or state.policy_hash,
+        policy_resolution_hash=policy_resolution_hash or state.policy_resolution_hash,
+        override_expires_at=state.override_expires_at,
+        override_reason=state.override_reason,
+        actor=actor,
+        context={
+            "override_freshness_mismatches": mismatches,
+            "expected_binding": expected,
+            "actual_binding": actual,
+        },
+    )
+    return (
+        replace(
+            state,
+            override_expires_at=None,
+            override_reason=None,
+            override_by=None,
+        ),
+        event_id,
     )
 
 
@@ -388,14 +510,14 @@ def expire_override_if_needed(*, tenant_id: str, issue_key: str, actor: Optional
     _upsert_current(
         tenant_id=tenant_id,
         issue_key=issue_key,
-        locked=state.locked,
-        lock_reason_codes=state.lock_reason_codes,
+        locked=True,
+        lock_reason_codes=["OVERRIDE_EXPIRED"],
         policy_hash=state.policy_hash,
         policy_resolution_hash=state.policy_resolution_hash,
         decision_id=state.decision_id,
         repo=state.repo,
         pr_number=state.pr_number,
-        locked_by=state.locked_by,
+        locked_by=actor or state.locked_by,
         override_expires_at=None,
         override_reason=None,
         override_by=None,
@@ -430,6 +552,17 @@ def apply_transition_lock_update(
     Returns the created event_id if an event was recorded, otherwise None.
     """
     state = get_current_lock_state(tenant_id=tenant_id, issue_key=issue_key)
+    stale_event_id: Optional[str] = None
+    if not (override_expires_at or override_reason):
+        state, stale_event_id = _revalidate_override_freshness(
+            tenant_id=tenant_id,
+            issue_key=issue_key,
+            state=state,
+            policy_hash=policy_hash,
+            policy_resolution_hash=policy_resolution_hash,
+            actor=actor,
+            context=context,
+        )
 
     # Overrides always record an event and unlock.
     if override_expires_at or override_reason:
@@ -512,17 +645,21 @@ def apply_transition_lock_update(
         issue_key=issue_key,
         locked=bool(state.locked) if state else bool(desired_locked),
         lock_reason_codes=state.lock_reason_codes if state else list(reason_codes),
-        policy_hash=state.policy_hash if state else policy_hash,
-        policy_resolution_hash=state.policy_resolution_hash if state else policy_resolution_hash,
-        decision_id=state.decision_id if state else decision_id,
-        repo=state.repo if state else repo,
-        pr_number=state.pr_number if state else pr_number,
-        locked_by=state.locked_by if state else locked_by,
+        policy_hash=policy_hash if policy_hash is not None else (state.policy_hash if state else None),
+        policy_resolution_hash=(
+            policy_resolution_hash
+            if policy_resolution_hash is not None
+            else (state.policy_resolution_hash if state else None)
+        ),
+        decision_id=decision_id if decision_id is not None else (state.decision_id if state else None),
+        repo=repo if repo is not None else (state.repo if state else None),
+        pr_number=pr_number if pr_number is not None else (state.pr_number if state else None),
+        locked_by=locked_by if locked_by is not None else (state.locked_by if state else None),
         override_expires_at=state.override_expires_at if state else None,
         override_reason=state.override_reason if state else None,
         override_by=state.override_by if state else None,
     )
-    return None
+    return stale_event_id
 
 
 def list_lock_chain_events(
