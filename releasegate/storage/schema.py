@@ -903,6 +903,7 @@ def _init_postgres_schema() -> str:
             created_by TEXT,
             activated_at TIMESTAMPTZ,
             activated_by TEXT,
+            archived_at TIMESTAMPTZ,
             supersedes_policy_id TEXT,
             PRIMARY KEY (tenant_id, policy_id)
         )
@@ -935,6 +936,26 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS policy_registry_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_events_tenant_policy_created
+        ON policy_registry_events(tenant_id, policy_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE OR REPLACE FUNCTION releasegate_prevent_policy_registry_payload_mutation()
         RETURNS trigger AS $$
         BEGIN
@@ -960,6 +981,16 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_registry_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy registry events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -971,6 +1002,26 @@ def _init_postgres_schema() -> str:
                 BEFORE UPDATE ON policy_registry_entries
                 FOR EACH ROW
                 EXECUTE FUNCTION releasegate_prevent_policy_registry_payload_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_events_update
+                BEFORE UPDATE ON policy_registry_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_events_delete
+                BEFORE DELETE ON policy_registry_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_events_mutation();
             END IF;
         END $$;
         """
