@@ -80,9 +80,24 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
   - local/mock modes are rejected when strict mode is enabled
 - Current implementation status:
   - `local|mock` KMS adapter implemented for development/testing
-  - cloud adapters (`aws|gcp|azure`) are reserved but not yet implemented in code
+  - `aws` KMS adapter implemented (`GenerateDataKey`, `Decrypt`, and optional `Sign`)
+  - `gcp|azure` adapters are still pending
 - Legacy encrypted records can still be read for migration compatibility unless strict mode is enabled.
 - Key material access is audit logged (`decrypt`/`sign`) in append-only `key_access_log`.
+- AWS KMS runtime configuration:
+  - `RELEASEGATE_KMS_MODE=aws`
+  - `RELEASEGATE_KMS_KEY_ID=<aws-kms-key-arn-or-id>`
+  - optional tuning:
+    - `RELEASEGATE_AWS_KMS_REGION`
+    - `RELEASEGATE_AWS_KMS_MAX_ATTEMPTS`
+    - `RELEASEGATE_AWS_KMS_CONNECT_TIMEOUT_SECONDS`
+    - `RELEASEGATE_AWS_KMS_READ_TIMEOUT_SECONDS`
+  - optional KMS signing key map:
+    - `RELEASEGATE_AWS_KMS_SIGNING_KEYS` (JSON object of `{logical_key_id: kms_key_id}`)
+    - `RELEASEGATE_AWS_KMS_SIGNING_ALGORITHM` (default `EDDSA`)
+- Live AWS contract test:
+  - opt-in with `RELEASEGATE_RUN_AWS_KMS_CONTRACT_TESTS=1`
+  - provide `RELEASEGATE_AWS_KMS_CONTRACT_KEY_ID` (or reuse `RELEASEGATE_KMS_KEY_ID`)
 
 ## Request Signatures (Webhook Security)
 
