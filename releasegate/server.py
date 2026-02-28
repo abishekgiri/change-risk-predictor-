@@ -3980,8 +3980,9 @@ def verify_release_attestation(
                 include_verify_only=True,
                 include_revoked=True,
             )
-        except Exception:
-            statuses = {}
+        except Exception as exc:
+            logger.warning("Failed to check key revocation status for tenant_id=%s: %s", tenant_hint, exc)
+            raise HTTPException(status_code=503, detail="Failed to verify key status.") from exc
 
     def _key_is_revoked(key_id: str) -> bool:
         normalized = str(key_id or "").strip()
@@ -4005,8 +4006,11 @@ def verify_release_attestation(
     if tenant_hint and attestation_id:
         try:
             compromise = is_attestation_compromised(tenant_id=tenant_hint, attestation_id=attestation_id)
-        except Exception:
-            compromise = {"compromised": False, "event_id": None}
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Attestation compromise status check failed",
+            ) from exc
     report["key_revoked"] = bool(key_revoked)
     report["compromised"] = bool(compromise.get("compromised"))
     report["compromise_event_id"] = compromise.get("event_id")

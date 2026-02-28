@@ -330,3 +330,32 @@ def test_key_access_log_is_append_only():
             )
     finally:
         conn.close()
+
+
+def test_verify_fails_closed_when_compromise_check_errors(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-fail-closed-check"
+    headers = jwt_headers(tenant_id=tenant_id, roles=["admin"])
+
+    rotate = client.post(f"/tenants/{tenant_id}/rotate-key", json={}, headers=headers)
+    assert rotate.status_code == 200
+    key = rotate.json()
+    attestation = _build_attestation(
+        tenant_id=tenant_id,
+        key_id=key["key_id"],
+        private_key_pem=str(key["private_key"]),
+        decision_id="decision-fail-closed-1",
+    )
+
+    def _raise_compromise_error(*, tenant_id: str, attestation_id: str):
+        raise RuntimeError("transient datastore failure")
+
+    monkeypatch.setattr(
+        "releasegate.tenants.compromise.is_attestation_compromised",
+        _raise_compromise_error,
+    )
+
+    verify_resp = client.post("/verify", json={"attestation": attestation})
+    assert verify_resp.status_code == 503
+    body = verify_resp.json()
+    assert body.get("detail") == "Attestation compromise status check failed"
