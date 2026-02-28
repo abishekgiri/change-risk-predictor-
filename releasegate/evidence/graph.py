@@ -25,6 +25,7 @@ NODE_INCIDENT = "INCIDENT"
 NODE_ARTIFACT = "ARTIFACT"
 NODE_OVERRIDE = "OVERRIDE"
 NODE_CHECKPOINT = "CHECKPOINT"
+NODE_EXTERNAL_ANCHOR = "EXTERNAL_ANCHOR"
 
 EDGE_USED_POLICY = "USED_POLICY"
 EDGE_USED_SIGNAL = "USED_SIGNAL"
@@ -810,6 +811,7 @@ def build_decision_compliance_graph(
     chain_proof: Optional[Dict[str, Any]] = None,
     replay_request: Optional[Dict[str, Any]] = None,
     proof_pack_id: Optional[str] = None,
+    external_anchor_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     effective_tenant = resolve_tenant_id(tenant_id)
     base_graph = get_decision_evidence_graph(
@@ -827,6 +829,9 @@ def build_decision_compliance_graph(
     checkpoint_payload = checkpoint_snapshot if isinstance(checkpoint_snapshot, dict) else {}
     chain_payload = chain_proof if isinstance(chain_proof, dict) else {}
     replay_payload = replay_request if isinstance(replay_request, dict) else {}
+    external_anchor_payload = (
+        external_anchor_snapshot if isinstance(external_anchor_snapshot, dict) else {}
+    )
 
     checkpoint_ids = checkpoint_payload.get("ids") if isinstance(checkpoint_payload.get("ids"), dict) else {}
     checkpoint_integrity = (
@@ -866,6 +871,13 @@ def build_decision_compliance_graph(
         "ledger_tip_hash": str(chain_payload.get("ledger_tip_hash") or ""),
         "proof_pack_id": str(proof_pack_id or ""),
         "replay_endpoint": str(replay_payload.get("endpoint") or ""),
+        "external_anchor_provider": str(external_anchor_payload.get("provider") or ""),
+        "external_anchor_ref": str(
+            external_anchor_payload.get("external_ref")
+            or external_anchor_payload.get("anchor_id")
+            or ""
+        ),
+        "external_anchor_root_hash": str(external_anchor_payload.get("root_hash") or ""),
     }
     nodes: List[Dict[str, Any]] = [
         dict(node) for node in (base_graph.get("nodes") or []) if isinstance(node, dict)
@@ -979,6 +991,28 @@ def build_decision_compliance_graph(
             to_node_id=artifact_node_id,
             edge_type=EDGE_PRODUCED_ARTIFACT,
             metadata={"proof_pack_id": anchors["proof_pack_id"]},
+        )
+
+    if anchors["external_anchor_provider"] and anchors["external_anchor_root_hash"]:
+        anchor_ref = (
+            anchors["external_anchor_ref"]
+            or f"{anchors['external_anchor_provider']}:{anchors['external_anchor_root_hash']}"
+        )
+        external_anchor_node_id = _upsert_virtual_node(
+            node_type=NODE_EXTERNAL_ANCHOR,
+            ref=anchor_ref,
+            node_hash=anchors["external_anchor_root_hash"] or None,
+            payload={
+                "provider": anchors["external_anchor_provider"],
+                "external_ref": anchors["external_anchor_ref"] or None,
+                "root_hash": anchors["external_anchor_root_hash"],
+            },
+        )
+        _append_virtual_edge(
+            from_node_id=decision_node_id,
+            to_node_id=external_anchor_node_id,
+            edge_type=EDGE_ANCHORED_BY,
+            metadata={"provider": anchors["external_anchor_provider"]},
         )
 
     graph_payload = {

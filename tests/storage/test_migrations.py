@@ -40,6 +40,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260220_021_override_expiry_metadata" in migration_ids
         assert "20260220_022_policy_registry_control_plane" in migration_ids
         assert "20260226_023_policy_lifecycle_state_machine" in migration_ids
+        assert "20260228_024_external_root_anchors" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -137,6 +138,24 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "leaf_count" in root_cols
         assert "root_hash" in root_cols
         assert root_pk == ["tenant_id", "date_utc"]
+
+        cur.execute("PRAGMA table_info(audit_external_root_anchors)")
+        external_anchor_info = cur.fetchall()
+        external_anchor_cols = {row[1] for row in external_anchor_info}
+        external_anchor_pk = [
+            row[1] for row in sorted((r for r in external_anchor_info if r[5] > 0), key=lambda r: r[5])
+        ]
+        assert {
+            "tenant_id",
+            "anchor_id",
+            "provider",
+            "date_utc",
+            "root_hash",
+            "external_ref",
+            "receipt_json",
+            "created_at",
+        } <= external_anchor_cols
+        assert external_anchor_pk == ["tenant_id", "anchor_id"]
 
         cur.execute("PRAGMA table_info(jira_lock_events)")
         lock_event_info = cur.fetchall()
