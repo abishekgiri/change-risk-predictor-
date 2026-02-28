@@ -24,6 +24,7 @@ from releasegate.integrations.jira.override_validation import (
 )
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
 from releasegate.security.auth import require_access
+from releasegate.security.rate_limit import enforce_issue_rate_limit
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
 from releasegate.utils.canonical import sha256_json
@@ -53,6 +54,7 @@ async def check_transition(
     """
     tenant_id = resolve_tenant_id(request.tenant_id or auth.tenant_id or request.context_overrides.get("tenant_id"))
     request.tenant_id = tenant_id
+    enforce_issue_rate_limit(tenant_id=tenant_id, issue_key=request.issue_key, profile="webhook")
 
     # Best-effort: clear expired overrides before evaluating this transition.
     try:
