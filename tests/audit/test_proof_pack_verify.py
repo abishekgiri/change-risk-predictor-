@@ -124,6 +124,7 @@ def test_verify_proof_pack_valid(monkeypatch, tmp_path):
     assert report["checks"]["ledger"]["ok"] is True
     assert report["checks"]["signature"]["ok"] is True
     assert report["checks"]["hashes"]["ok"] is True
+    assert report["checks"]["graph"]["ok"] is True
     assert report["checks"]["replay"]["ok"] is True
 
 
@@ -154,6 +155,15 @@ def test_verify_proof_pack_tampered_signature_fails(monkeypatch, tmp_path):
     report = verify_proof_pack_bundle(tampered, signing_key="verify-secret")
     assert report["ok"] is False
     assert report["error_code"] == "CHECKPOINT_SIGNATURE_INVALID"
+
+
+def test_verify_proof_pack_tampered_graph_fails(monkeypatch, tmp_path):
+    bundle = _build_proof_pack(monkeypatch, tmp_path)
+    tampered = copy.deepcopy(bundle)
+    tampered["evidence_graph"]["anchors"]["checkpoint_id"] = "tampered-checkpoint"
+    report = verify_proof_pack_bundle(tampered, signing_key="verify-secret")
+    assert report["ok"] is False
+    assert report["error_code"] == "EVIDENCE_GRAPH_HASH_MISMATCH"
 
 
 def test_verify_proof_pack_replay_mismatch_fails(monkeypatch, tmp_path):

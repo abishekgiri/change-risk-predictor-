@@ -467,6 +467,8 @@ ReleaseGate enforces governance constraints such as:
 - Override requestor cannot self-approve
 - Role-based approval validation
 - Time-bound overrides with required justification
+- Automatic override expiry enforcement (`OVERRIDE_EXPIRED`) with re-lock behavior
+- Override freshness revalidation (`OVERRIDE_STALE`) when evaluation binding changes
 
 Overrides include:
 
@@ -475,6 +477,7 @@ Overrides include:
 - `actor_id`
 - Idempotency key
 - Ledger reference
+- Evaluation binding fields (`evaluation_key`, `policy_hash`, `risk_hash`)
 
 ### 4. Immutable Audit Ledger
 
@@ -513,7 +516,9 @@ Export a portable proof bundle (ZIP / JSON) containing:
 - `override_snapshot` (if applicable)
 - `chain_proof`
 - `checkpoint_proof`
+- `evidence_graph` (decision -> policy -> override -> checkpoint -> artifact)
 - `schema_version` metadata
+- Deterministic `graph_hash` in `integrity` and verifier-side graph hash validation
 
 **This allows independent verification outside the system.**
 

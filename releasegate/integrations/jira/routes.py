@@ -26,6 +26,7 @@ from releasegate.observability.internal_metrics import snapshot as metrics_snaps
 from releasegate.security.auth import require_access
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
+from releasegate.utils.canonical import sha256_json
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -246,6 +247,9 @@ def _apply_jira_lock_best_effort(
         row = AuditReader.get_decision(decision_id=response.decision_id, tenant_id=tenant_id)
         policy_hash = None
         policy_resolution_hash = None
+        input_hash = None
+        evaluation_key = None
+        risk_hash = ""
         reason_codes: List[str] = []
         repo = None
         pr_number = None
@@ -256,6 +260,8 @@ def _apply_jira_lock_best_effort(
             pr_number = row.get("pr_number")
             policy_hash = row.get("policy_hash") or row.get("policy_bundle_hash") or response.policy_hash
             policy_resolution_hash = row.get("policy_bundle_hash") or row.get("policy_hash") or response.policy_hash
+            input_hash = row.get("input_hash")
+            evaluation_key = row.get("evaluation_key")
             raw_full = row.get("full_decision_json")
             if isinstance(raw_full, str) and raw_full:
                 try:
@@ -265,6 +271,14 @@ def _apply_jira_lock_best_effort(
                 rc = payload.get("reason_code")
                 if rc:
                     reason_codes.append(str(rc))
+                signal_map = (
+                    ((payload.get("input_snapshot") or {}).get("signal_map") or {})
+                    if isinstance(payload, dict)
+                    else {}
+                )
+                risk_payload = signal_map.get("risk") if isinstance(signal_map, dict) else None
+                if isinstance(risk_payload, dict) and risk_payload:
+                    risk_hash = sha256_json(risk_payload)
         if not reason_codes:
             # Fall back to the response status if we couldn't load the decision.
             reason_codes = [str(response.status)]
@@ -302,6 +316,10 @@ def _apply_jira_lock_best_effort(
                 "target_status": request.target_status,
                 "request_id": request.context_overrides.get("delivery_id")
                 or request.context_overrides.get("idempotency_key"),
+                "evaluation_key": str(evaluation_key or request.context_overrides.get("idempotency_key") or ""),
+                "input_hash": str(input_hash or ""),
+                "policy_hash": str(policy_hash or policy_resolution_hash or response.policy_hash or ""),
+                "risk_hash": risk_hash,
             },
         )
     except Exception:
