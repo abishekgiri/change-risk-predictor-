@@ -56,7 +56,7 @@ def _build_aws_kms_client(*, region_name: Optional[str], endpoint_url: Optional[
             connect_timeout=connect_timeout,
             read_timeout=read_timeout,
         )
-    except Exception:
+    except (ImportError, ValueError):
         config = None
 
     kwargs: Dict[str, Any] = {}
