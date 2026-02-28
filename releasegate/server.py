@@ -3973,6 +3973,7 @@ def verify_release_attestation(
         public_keys_by_key_id=public_keys,
     )
     statuses: Dict[str, Dict[str, Any]] = {}
+    key_revoked = False
     if tenant_hint:
         try:
             statuses = get_tenant_signing_public_keys_with_status(
@@ -3980,8 +3981,9 @@ def verify_release_attestation(
                 include_verify_only=True,
                 include_revoked=True,
             )
-        except Exception:
-            statuses = {}
+        except Exception as exc:
+            logger.warning("Failed to check key revocation status for tenant_id=%s: %s", tenant_hint, exc)
+            raise HTTPException(status_code=503, detail="Failed to verify key status.") from exc
 
     def _key_is_revoked(key_id: str) -> bool:
         normalized = str(key_id or "").strip()
