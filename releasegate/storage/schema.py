@@ -1544,6 +1544,36 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            rotated_at TIMESTAMPTZ,
+            revoked_at TIMESTAMPTZ,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active
+        ON tenant_signing_keys(tenant_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created
+        ON tenant_signing_keys(tenant_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS idempotency_keys (
             tenant_id TEXT NOT NULL,
             operation TEXT NOT NULL,
@@ -2159,6 +2189,23 @@ def init_db() -> str:
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            revoked_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_context_id ON audit_decisions(context_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_created ON audit_decisions(tenant_id, repo, created_at)")
@@ -2208,6 +2255,12 @@ def init_db() -> str:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at ON idempotency_keys(expires_at)")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created ON checkpoint_signing_keys(tenant_id, is_active, created_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active ON tenant_signing_keys(tenant_id) WHERE status = 'ACTIVE'"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created ON tenant_signing_keys(tenant_id, status, created_at)"
     )
 
     cursor.execute(
