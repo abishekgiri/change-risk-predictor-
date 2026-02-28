@@ -10,7 +10,7 @@ from releasegate.storage.schema import init_db
 
 def test_forward_only_migrations_applied_and_tenant_columns_present():
     current = init_db()
-    assert current.startswith("202602")
+    assert current.startswith("2026")
 
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -41,6 +41,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260220_022_policy_registry_control_plane" in migration_ids
         assert "20260226_023_policy_lifecycle_state_machine" in migration_ids
         assert "20260228_024_external_root_anchors" in migration_ids
+        assert "20260301_025_tenant_signing_key_lifecycle" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -94,6 +95,26 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         checkpoint_keys_info = cur.fetchall()
         checkpoint_keys_pk = [row[1] for row in sorted((r for r in checkpoint_keys_info if r[5] > 0), key=lambda r: r[5])]
         assert checkpoint_keys_pk == ["tenant_id", "key_id"]
+
+        cur.execute("PRAGMA table_info(tenant_signing_keys)")
+        tenant_signing_keys_info = cur.fetchall()
+        tenant_signing_keys_cols = {row[1] for row in tenant_signing_keys_info}
+        tenant_signing_keys_pk = [
+            row[1] for row in sorted((r for r in tenant_signing_keys_info if r[5] > 0), key=lambda r: r[5])
+        ]
+        assert {
+            "tenant_id",
+            "key_id",
+            "public_key",
+            "encrypted_private_key",
+            "status",
+            "created_by",
+            "created_at",
+            "rotated_at",
+            "revoked_at",
+            "metadata_json",
+        } <= tenant_signing_keys_cols
+        assert tenant_signing_keys_pk == ["tenant_id", "key_id"]
 
         cur.execute("PRAGMA table_info(webhook_signing_keys)")
         webhook_keys_info = cur.fetchall()

@@ -60,6 +60,11 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
   - Introduce a new `key_id`, publish it in `/keys` and the signed manifest.
   - Keep old public keys available for verification until retention windows expire.
   - Revoke compromised keys by setting status `REVOKED` in the signed key manifest.
+- Tenant signing-key lifecycle:
+  - One `ACTIVE` signing key per tenant.
+  - Previous keys move to `VERIFY_ONLY` so older proofs remain verifiable after rotation.
+  - `REVOKED` keys are excluded from normal verification key pools.
+  - Optional compatibility mode (`RELEASEGATE_ALLOW_REVOKED_SIGNING_KEY_VERIFY=true`) verifies revoked signatures but flags them in verifier output.
 - Revocation list artifact:
   - Source of truth: `/.well-known/releasegate-keys.json` (signed by `/.well-known/releasegate-keys.sig`).
   - Revoked keys remain verifiable cryptographically, but are marked untrusted by verifier policy.
@@ -76,9 +81,11 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
 ## Rate Limiting And Abuse Controls
 
 - Per-IP and per-tenant rate limits are enforced.
+- Webhook transition checks also enforce per-issue burst limits to prevent transition spam loops.
 - Webhook request flow:
   - per-IP pre-limit is applied before signature verification
   - per-tenant limit is applied after key lookup and before nonce writes
+- Default limits are profile-based (`default`, `heavy`, `webhook`) and configurable with `RELEASEGATE_RATE_LIMIT_*` environment overrides.
 - Higher-sensitivity endpoints use stricter limits:
   - replay
   - simulation

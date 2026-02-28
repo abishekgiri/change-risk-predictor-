@@ -4,7 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -128,15 +128,84 @@ def parse_public_key(value: str) -> Ed25519PublicKey:
     return _load_public_key_from_raw(value)
 
 
-def load_public_keys_map(*, key_file: Optional[str] = None) -> Dict[str, str]:
+def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519PrivateKey, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    if effective_tenant:
+        try:
+            from releasegate.tenants.keys import get_active_tenant_signing_key_record
+
+            record = get_active_tenant_signing_key_record(effective_tenant)
+        except Exception:
+            record = None
+        if isinstance(record, dict):
+            key_id = str(record.get("key_id") or "").strip()
+            private_key = str(record.get("private_key") or "").strip()
+            if key_id and private_key:
+                loaded = _load_ed25519_private_key_from_text(
+                    private_key,
+                    env_var_name=f"tenant_signing_keys[{effective_tenant}]",
+                )
+                return loaded, key_id
+    return load_private_key_from_env(), current_key_id()
+
+
+def _load_keys_from_tenant_store(
+    *,
+    tenant_id: Optional[str],
+    include_verify_only: bool,
+    include_revoked: bool,
+) -> Dict[str, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    if not effective_tenant:
+        return {}
+    try:
+        from releasegate.tenants.keys import get_tenant_signing_public_keys_with_status
+
+        key_records = get_tenant_signing_public_keys_with_status(
+            tenant_id=effective_tenant,
+            include_verify_only=include_verify_only,
+            include_revoked=include_revoked,
+        )
+    except Exception:
+        return {}
+    key_map: Dict[str, str] = {}
+    for key_id, item in key_records.items():
+        if not isinstance(item, dict):
+            continue
+        public_key = str(item.get("public_key") or "").strip()
+        if not public_key:
+            continue
+        key_map[str(key_id)] = public_key
+    return key_map
+
+
+def load_public_keys_map(
+    *,
+    key_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    include_verify_only: bool = True,
+    include_revoked: bool = False,
+) -> Dict[str, str]:
     """
     Returns mapping: key_id -> public_key_material.
     public_key_material can be PEM or base64/raw 32-byte representation.
+    Resolution order:
+      1) tenant signing keys (if tenant_id provided and keys exist)
+      2) explicit key_file
+      3) RELEASEGATE_ATTESTATION_PUBLIC_KEYS / default file fallback
     """
     key_map: Dict[str, str] = {}
 
     configured = (os.getenv("RELEASEGATE_ATTESTATION_PUBLIC_KEYS") or "").strip()
     key_id = current_key_id()
+
+    tenant_keys = _load_keys_from_tenant_store(
+        tenant_id=tenant_id,
+        include_verify_only=include_verify_only,
+        include_revoked=include_revoked,
+    )
+    if tenant_keys:
+        return tenant_keys
 
     def _consume_payload(raw_text: str) -> None:
         text = raw_text.strip()

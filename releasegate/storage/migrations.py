@@ -1693,6 +1693,53 @@ def _migration_20260228_024_external_root_anchors(cursor) -> None:
         END;
         """
     )
+
+
+def _migration_20260301_025_tenant_signing_key_lifecycle(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            revoked_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active
+        ON tenant_signing_keys(tenant_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created
+        ON tenant_signing_keys(tenant_id, status, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_signing_keys_key_material_mutation
+        BEFORE UPDATE ON tenant_signing_keys
+        WHEN
+            COALESCE(NEW.public_key, '') != COALESCE(OLD.public_key, '')
+            OR COALESCE(NEW.encrypted_private_key, '') != COALESCE(OLD.encrypted_private_key, '')
+            OR COALESCE(NEW.created_at, '') != COALESCE(OLD.created_at, '')
+            OR COALESCE(NEW.created_by, '') != COALESCE(OLD.created_by, '')
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant signing key material is immutable');
+        END;
+        """
+    )
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1813,6 +1860,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260228_024_external_root_anchors",
         description="Add append-only external transparency root anchor receipts.",
         apply=_migration_20260228_024_external_root_anchors,
+    ),
+    Migration(
+        migration_id="20260301_025_tenant_signing_key_lifecycle",
+        description="Add tenant attestation signing keys with active/verify/revoked lifecycle and single-active constraint.",
+        apply=_migration_20260301_025_tenant_signing_key_lifecycle,
     ),
 ]
 
