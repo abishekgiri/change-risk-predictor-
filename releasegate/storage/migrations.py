@@ -1647,7 +1647,52 @@ def _migration_20260226_023_policy_lifecycle_state_machine(cursor) -> None:
         """
     )
 
-
+def _migration_20260228_024_external_root_anchors(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_external_root_anchors (
+            tenant_id TEXT NOT NULL,
+            anchor_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            external_ref TEXT,
+            receipt_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, anchor_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_external_root_anchor_target
+        ON audit_external_root_anchors(tenant_id, provider, date_utc, root_hash)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_root_anchor_tenant_date
+        ON audit_external_root_anchors(tenant_id, date_utc, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_external_root_anchor_update
+        BEFORE UPDATE ON audit_external_root_anchors
+        BEGIN
+            SELECT RAISE(FAIL, 'External root anchors are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_external_root_anchor_delete
+        BEFORE DELETE ON audit_external_root_anchors
+        BEGIN
+            SELECT RAISE(FAIL, 'External root anchors are append-only: DELETE not allowed');
+        END;
+        """
+    )
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1763,6 +1808,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260226_023_policy_lifecycle_state_machine",
         description="Add staged lifecycle controls, archived timestamps, and immutable policy registry events.",
         apply=_migration_20260226_023_policy_lifecycle_state_machine,
+    ),
+    Migration(
+        migration_id="20260228_024_external_root_anchors",
+        description="Add append-only external transparency root anchor receipts.",
+        apply=_migration_20260228_024_external_root_anchors,
     ),
 ]
 

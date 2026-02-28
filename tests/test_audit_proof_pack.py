@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from releasegate.audit.checkpoints import create_override_checkpoint
 from releasegate.audit.overrides import record_override
 from releasegate.audit.recorder import AuditRecorder
+from releasegate.attestation.crypto import load_public_keys_map
+from releasegate.attestation.dsse import verify_dsse
 from releasegate.decision.types import Decision, EnforcementTargets, PolicyBinding
 from releasegate.server import app
 from tests.auth_helpers import jwt_headers
@@ -124,6 +126,11 @@ def test_audit_proof_pack_contains_evidence(monkeypatch, tmp_path):
     assert body["integrity"]["graph_hash"]
     assert body["evidence_graph"]["graph_hash"] == body["integrity"]["graph_hash"]
     assert body["evidence_graph"]["anchors"]["checkpoint_id"]
+    assert body["in_toto_statement"]["predicateType"] == "https://releasegate.dev/proof-pack/v1"
+    valid_dsse, decoded_statement, dsse_error = verify_dsse(body["dsse_envelope"], load_public_keys_map())
+    assert valid_dsse is True
+    assert dsse_error is None
+    assert decoded_statement == body["in_toto_statement"]
     graph_node_types = {node.get("type") for node in body["evidence_graph"].get("nodes", [])}
     assert "CHECKPOINT" in graph_node_types
 
@@ -203,14 +210,24 @@ def test_export_proof_alias_includes_manifest_graph_and_replay_request(monkeypat
         assert "manifest.json" in names
         assert "evidence_graph.json" in names
         assert "replay_request.json" in names
+        assert "in_toto_statement.json" in names
+        assert "dsse_envelope.json" in names
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         file_names = {entry.get("filename") for entry in manifest.get("files", [])}
         assert "evidence_graph.json" in file_names
         assert "replay_request.json" in file_names
+        assert "in_toto_statement.json" in file_names
+        assert "dsse_envelope.json" in file_names
         evidence_graph = json.loads(zf.read("evidence_graph.json").decode("utf-8"))
         assert "nodes" in evidence_graph
         assert "edges" in evidence_graph
         assert evidence_graph.get("graph_hash")
+        in_toto_statement = json.loads(zf.read("in_toto_statement.json").decode("utf-8"))
+        dsse_envelope = json.loads(zf.read("dsse_envelope.json").decode("utf-8"))
+        valid_dsse, decoded_statement, dsse_error = verify_dsse(dsse_envelope, load_public_keys_map())
+        assert valid_dsse is True
+        assert dsse_error is None
+        assert decoded_statement == in_toto_statement
         replay_request = json.loads(zf.read("replay_request.json").decode("utf-8"))
         assert replay_request.get("endpoint") == f"/decisions/{stored.decision_id}/replay"
 def test_export_proof_bundle_rejects_cross_tenant_access(monkeypatch, tmp_path):

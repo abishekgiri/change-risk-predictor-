@@ -21,6 +21,20 @@ class SigstoreSigningError(RuntimeError):
     pass
 
 
+def _dsse_pae(payload_type: str, payload_bytes: bytes) -> bytes:
+    payload_type_bytes = str(payload_type).encode("utf-8")
+    return (
+        b"DSSEv1 "
+        + str(len(payload_type_bytes)).encode("ascii")
+        + b" "
+        + payload_type_bytes
+        + b" "
+        + str(len(payload_bytes)).encode("ascii")
+        + b" "
+        + payload_bytes
+    )
+
+
 def wrap_dsse(payload_json: Dict[str, Any], signing_key: Ed25519PrivateKey, key_id: str) -> Dict[str, Any]:
     if not isinstance(payload_json, dict):
         raise ValueError("payload_json must be a JSON object")
@@ -30,7 +44,7 @@ def wrap_dsse(payload_json: Dict[str, Any], signing_key: Ed25519PrivateKey, key_
 
     payload_bytes = canonicalize_jcs_bytes(payload_json)
     payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
-    signature = signing_key.sign(payload_bytes)
+    signature = signing_key.sign(_dsse_pae(DSSE_PAYLOAD_TYPE, payload_bytes))
     signature_b64 = base64.b64encode(signature).decode("ascii")
 
     return {
@@ -71,12 +85,13 @@ def wrap_dsse_sigstore(
 
     payload_bytes = canonicalize_jcs_bytes(payload_json)
     payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
+    pae_bytes = _dsse_pae(DSSE_PAYLOAD_TYPE, payload_bytes)
 
     # cosign operates on files; write deterministic bytes and sign them.
     with tempfile.TemporaryDirectory() as td:
-        payload_file = os.path.join(td, "payload.json")
+        payload_file = os.path.join(td, "payload.pae")
         with open(payload_file, "wb") as f:
-            f.write(payload_bytes)
+            f.write(pae_bytes)
 
         proc_env = dict(os.environ)
         if env:
@@ -151,11 +166,12 @@ def verify_dsse_sigstore(
         payload_bytes = base64.b64decode(payload_b64.encode("ascii"), validate=True)
     except Exception:
         return False, None, "INVALID_PAYLOAD_BASE64"
+    pae_bytes = _dsse_pae(payload_type, payload_bytes)
 
     with tempfile.TemporaryDirectory() as td:
-        payload_file = os.path.join(td, "payload.json")
+        payload_file = os.path.join(td, "payload.pae")
         with open(payload_file, "wb") as f:
-            f.write(payload_bytes)
+            f.write(pae_bytes)
 
         cmd = [cosign_exe, "verify-blob", "--bundle", bundle_path]
         if certificate_identity:
@@ -198,6 +214,7 @@ def wrap_dsse_multi(
 
     payload_bytes = canonicalize_jcs_bytes(payload_json)
     payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
+    pae_bytes = _dsse_pae(DSSE_PAYLOAD_TYPE, payload_bytes)
 
     signatures: list[dict] = []
     for key_id, signing_key in signers:
@@ -206,7 +223,7 @@ def wrap_dsse_multi(
             raise ValueError("key_id is required for each signer")
         if signing_key is None:
             raise ValueError(f"signing_key is required for signer {effective_key_id}")
-        sig = signing_key.sign(payload_bytes)
+        sig = signing_key.sign(pae_bytes)
         signatures.append(
             {
                 "keyid": effective_key_id,
@@ -255,6 +272,7 @@ def verify_dsse_signatures(
         payload_bytes = base64.b64decode(payload_b64.encode("ascii"), validate=True)
     except Exception:
         return None, [], "INVALID_PAYLOAD_BASE64"
+    pae_bytes = _dsse_pae(payload_type, payload_bytes)
 
     payload_json: Optional[Dict[str, Any]] = None
     results: list[dict] = []
@@ -291,10 +309,15 @@ def verify_dsse_signatures(
             continue
 
         try:
-            public_key.verify(signature, payload_bytes)
+            public_key.verify(signature, pae_bytes)
             results.append({"keyid": key_id, "ok": True})
         except Exception:
-            results.append({"keyid": key_id, "ok": False, "error_code": "SIGNATURE_INVALID"})
+            # Backward-compatible verify path for older envelopes that signed raw payload bytes.
+            try:
+                public_key.verify(signature, payload_bytes)
+                results.append({"keyid": key_id, "ok": True, "legacy_raw_payload_signature": True})
+            except Exception:
+                results.append({"keyid": key_id, "ok": False, "error_code": "SIGNATURE_INVALID"})
 
     if any(r.get("ok") is True for r in results):
         try:

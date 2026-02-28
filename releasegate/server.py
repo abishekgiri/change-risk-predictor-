@@ -763,6 +763,62 @@ def transparency_root_by_date(date_utc: str, tenant_id: Optional[str] = None):
     )
 
 
+@app.post("/transparency/root/{date_utc}/anchor")
+def anchor_transparency_root_endpoint(
+    date_utc: str,
+    provider: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["proofpack:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.anchoring.roots import anchor_transparency_root
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        anchored = anchor_transparency_root(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+            provider_name=provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"external anchor failed: {exc}") from exc
+    if not anchored:
+        raise HTTPException(status_code=404, detail="transparency root not found for date")
+    return {"ok": True, "anchor": anchored}
+
+
+@app.get("/transparency/root/{date_utc}/anchors")
+def transparency_root_anchors_by_date(
+    date_utc: str,
+    limit: int = 20,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["proofpack:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.anchoring.roots import list_root_anchors
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        items = list_root_anchors(tenant_id=effective_tenant, date_utc=date_utc, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "date_utc": date_utc,
+        "count": len(items),
+        "items": items,
+    }
+
+
 @app.get("/transparency/proof/{attestation_id}")
 def transparency_inclusion_proof(attestation_id: str, tenant_id: Optional[str] = None):
     from releasegate.audit.transparency import get_transparency_inclusion_proof
@@ -1700,6 +1756,7 @@ def audit_proof_pack(
     checkpoint_snapshot = None
     ledger_segment = []
     period_id = None
+    external_anchor = None
 
     if repo:
         overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=effective_tenant)
@@ -1728,6 +1785,22 @@ def audit_proof_pack(
             )
         except Exception as exc:
             checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
+
+    try:
+        from releasegate.anchoring.roots import get_root_anchor_for_date
+
+        anchor_date = ""
+        if isinstance(created_at, str):
+            anchor_date = created_at[:10]
+        elif isinstance(created_at, datetime):
+            anchor_date = created_at.astimezone(timezone.utc).date().isoformat()
+        if anchor_date:
+            external_anchor = get_root_anchor_for_date(
+                date_utc=anchor_date,
+                tenant_id=effective_tenant,
+            )
+    except Exception:
+        external_anchor = None
 
     proof_pack_id = record_proof_pack_generation(
         decision_id=decision_id,
@@ -1775,6 +1848,7 @@ def audit_proof_pack(
         chain_proof=chain_proof,
         replay_request=replay_request,
         proof_pack_id=proof_pack_id,
+        external_anchor_snapshot=external_anchor,
     )
     graph_hash = str(evidence_graph.get("graph_hash") or "")
 
@@ -1814,10 +1888,34 @@ def audit_proof_pack(
         "checkpoint_snapshot": checkpoint_snapshot,
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
+        "external_anchor": external_anchor,
         "evidence_graph": evidence_graph,
         "replay_request": replay_request,
     }
     export_checksum = sha256_json(bundle)
+    in_toto_statement = None
+    dsse_envelope = None
+    dsse_error = None
+    try:
+        from releasegate.attestation import build_proof_pack_statement
+        from releasegate.attestation.crypto import (
+            MissingSigningKeyError,
+            current_key_id,
+            load_private_key_from_env,
+        )
+        from releasegate.attestation.dsse import wrap_dsse
+
+        in_toto_statement = build_proof_pack_statement(bundle, export_checksum=export_checksum)
+        try:
+            dsse_envelope = wrap_dsse(
+                in_toto_statement,
+                signing_key=load_private_key_from_env(),
+                key_id=current_key_id(),
+            )
+        except MissingSigningKeyError as exc:
+            dsse_error = {"error_code": "MISSING_SIGNING_KEY", "message": str(exc)}
+    except Exception as exc:
+        dsse_error = {"error_code": "DSSE_BUILD_FAILED", "message": str(exc)}
 
     record_proof_pack_evidence(
         tenant_id=effective_tenant,
@@ -1851,6 +1949,12 @@ def audit_proof_pack(
             "export_checksum": export_checksum,
             "proof_pack_id": proof_pack_id,
         }
+        if isinstance(in_toto_statement, dict):
+            payload["in_toto_statement"] = in_toto_statement
+        if isinstance(dsse_envelope, dict):
+            payload["dsse_envelope"] = dsse_envelope
+        if isinstance(dsse_error, dict):
+            payload["dsse_error"] = dsse_error
         complete_idempotency(
             tenant_id=effective_tenant,
             operation="proof_pack_export",
@@ -1874,9 +1978,16 @@ def audit_proof_pack(
         "ledger_segment.json": bundle["ledger_segment"],
         "override_snapshot.json": bundle["override_snapshot"],
         "policy_snapshot.json": bundle["policy_snapshot"],
+        "external_anchor.json": bundle["external_anchor"],
         "evidence_graph.json": bundle["evidence_graph"],
         "replay_request.json": bundle["replay_request"],
     }
+    if isinstance(in_toto_statement, dict):
+        zip_entries["in_toto_statement.json"] = in_toto_statement
+    if isinstance(dsse_envelope, dict):
+        zip_entries["dsse_envelope.json"] = dsse_envelope
+    if isinstance(dsse_error, dict):
+        zip_entries["dsse_error.json"] = dsse_error
     zip_entries["manifest.json"] = _proof_bundle_manifest(
         decision_id=decision_id,
         proof_pack_id=proof_pack_id,
