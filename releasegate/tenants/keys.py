@@ -33,9 +33,15 @@ def _fernet() -> Fernet:
     if raw:
         try:
             return Fernet(raw.encode("utf-8"))
-        except Exception:
-            pass
-    seed = (raw or os.getenv("RELEASEGATE_JWT_SECRET") or "releasegate-local-dev").encode("utf-8")
+        except Exception as exc:
+            raise ValueError("Invalid RELEASEGATE_KEY_ENCRYPTION_SECRET provided") from exc
+
+    # Fallback for local development ONLY. This is not secure for production.
+    env = (os.getenv("RELEASEGATE_ENV") or "development").lower()
+    if env not in {"dev", "development", "test"}:
+        raise ValueError("RELEASEGATE_KEY_ENCRYPTION_SECRET must be set in production environments.")
+
+    seed = (os.getenv("RELEASEGATE_JWT_SECRET") or "releasegate-local-dev").encode("utf-8")
     key = base64.urlsafe_b64encode(hashlib.sha256(seed).digest())
     return Fernet(key)
 
