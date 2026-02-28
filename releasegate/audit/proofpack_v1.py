@@ -290,7 +290,8 @@ def verify_proofpack_v1_file(
     except Exception as exc:
         return {"ok": False, "error_code": "ATTESTATION_INVALID", "details": {"error": str(exc)}}
 
-    key_map = load_public_keys_map(key_file=key_file)
+    tenant_hint = str(attestation_payload.get("tenant_id") or "").strip() or None
+    key_map = load_public_keys_map(key_file=key_file, tenant_id=tenant_hint)
     attest_report = verify_attestation_payload(attestation_payload, public_keys_by_key_id=key_map)
     if not (
         attest_report.get("schema_valid")

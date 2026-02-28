@@ -29,6 +29,11 @@ from releasegate.security.audit import log_security_event
 from releasegate.security.api_keys import create_api_key, list_api_keys, revoke_api_key, rotate_api_key
 from releasegate.security.checkpoint_keys import list_checkpoint_signing_keys, rotate_checkpoint_signing_key
 from releasegate.security.webhook_keys import create_webhook_key, list_webhook_keys
+from releasegate.tenants.keys import (
+    list_tenant_signing_keys,
+    revoke_tenant_signing_key,
+    rotate_tenant_signing_key,
+)
 from releasegate.integrations.jira.routes import router as jira_router
 from releasegate.security.types import AuthContext
 from releasegate.audit.idempotency import (
@@ -243,6 +248,18 @@ class CreateApiKeyRequest(BaseModel):
 class RotateCheckpointSigningKeyRequest(BaseModel):
     key: str = Field(min_length=16)
     tenant_id: Optional[str] = None
+
+
+class RotateTenantSigningKeyRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    key_id: Optional[str] = None
+    private_key: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RevokeTenantSigningKeyRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class RotateApiKeyRequest(BaseModel):
@@ -555,14 +572,25 @@ async def github_webhook(
 
 
 @app.get("/keys")
-def get_public_keys():
+def get_public_keys(tenant_id: Optional[str] = None):
     """
     Returns active public attestation keys.
     Includes both modern and legacy field aliases for compatibility.
     """
     from releasegate.attestation.crypto import load_public_keys_map
 
-    key_map = load_public_keys_map()
+    effective_tenant = str(tenant_id or "").strip() or None
+    key_map = load_public_keys_map(tenant_id=effective_tenant)
+    key_status_map: Dict[str, str] = {}
+    if effective_tenant:
+        try:
+            for row in list_tenant_signing_keys(effective_tenant):
+                key_id = str(row.get("key_id") or "").strip()
+                if not key_id:
+                    continue
+                key_status_map[key_id] = str(row.get("status") or "").upper()
+        except Exception:
+            key_status_map = {}
     keys = []
     public_keys_by_key_id: Dict[str, str] = {}
     for key_id, public_key in sorted(key_map.items()):
@@ -578,10 +606,12 @@ def get_public_keys():
                 "kty": "OKP",
                 "use": "sig",
                 "pem": public_key,
+                "status": key_status_map.get(key_id) or "ACTIVE",
             }
         )
     return {
         "issuer": "releasegate",
+        "tenant_id": effective_tenant,
         "keys": keys,
         "public_keys_by_key_id": public_keys_by_key_id,
     }
@@ -672,7 +702,7 @@ def list_attestations(
 @app.get("/attestations/{attestation_id}.dsse")
 def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None):
     from releasegate.attestation import build_intoto_statement, wrap_dsse
-    from releasegate.attestation.crypto import MissingSigningKeyError, current_key_id, load_private_key_from_env
+    from releasegate.attestation.crypto import MissingSigningKeyError, load_private_key_for_tenant
     from releasegate.audit.attestations import get_release_attestation_by_id
 
     try:
@@ -688,10 +718,11 @@ def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None
 
     try:
         statement = build_intoto_statement(attestation)
+        signing_key, key_id = load_private_key_for_tenant(str(row.get("tenant_id") or tenant_id or "").strip() or None)
         envelope = wrap_dsse(
             statement,
-            signing_key=load_private_key_from_env(),
-            key_id=current_key_id(),
+            signing_key=signing_key,
+            key_id=key_id,
         )
     except MissingSigningKeyError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1900,17 +1931,17 @@ def audit_proof_pack(
         from releasegate.attestation import build_proof_pack_statement
         from releasegate.attestation.crypto import (
             MissingSigningKeyError,
-            current_key_id,
-            load_private_key_from_env,
+            load_private_key_for_tenant,
         )
         from releasegate.attestation.dsse import wrap_dsse
 
         in_toto_statement = build_proof_pack_statement(bundle, export_checksum=export_checksum)
         try:
+            signing_key, key_id = load_private_key_for_tenant(effective_tenant)
             dsse_envelope = wrap_dsse(
                 in_toto_statement,
-                signing_key=load_private_key_from_env(),
-                key_id=current_key_id(),
+                signing_key=signing_key,
+                key_id=key_id,
             )
         except MissingSigningKeyError as exc:
             dsse_error = {"error_code": "MISSING_SIGNING_KEY", "message": str(exc)}
@@ -2940,6 +2971,90 @@ def list_checkpoint_keys(
     }
 
 
+@app.post("/tenants/{tenant_id}/rotate-key")
+def rotate_tenant_attestation_key(
+    tenant_id: str,
+    payload: RotateTenantSigningKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    requested_tenant = payload.tenant_id or tenant_id
+    if payload.tenant_id and str(payload.tenant_id).strip() != str(tenant_id).strip():
+        raise HTTPException(status_code=400, detail="tenant_id mismatch between path and payload")
+    effective_tenant = _effective_tenant(auth, requested_tenant)
+    try:
+        rotated = rotate_tenant_signing_key(
+            tenant_id=effective_tenant,
+            created_by=auth.principal_id,
+            raw_private_key=payload.private_key,
+            key_id=payload.key_id,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_signing_key_rotate",
+        target_type="tenant_signing_key",
+        target_id=str(rotated.get("key_id") or ""),
+    )
+    return rotated
+
+
+@app.get("/tenants/{tenant_id}/signing-keys")
+def list_tenant_attestation_keys(
+    tenant_id: str,
+    auth: AuthContext = require_access(
+        roles=["admin", "auditor"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "keys": list_tenant_signing_keys(tenant_id=effective_tenant),
+    }
+
+
+@app.post("/tenants/{tenant_id}/signing-keys/{key_id}/revoke")
+def revoke_tenant_attestation_key(
+    tenant_id: str,
+    key_id: str,
+    payload: RevokeTenantSigningKeyRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        rate_profile="default",
+    ),
+):
+    requested_tenant = payload.tenant_id or tenant_id
+    if payload.tenant_id and str(payload.tenant_id).strip() != str(tenant_id).strip():
+        raise HTTPException(status_code=400, detail="tenant_id mismatch between path and payload")
+    effective_tenant = _effective_tenant(auth, requested_tenant)
+    try:
+        revoked = revoke_tenant_signing_key(
+            tenant_id=effective_tenant,
+            key_id=key_id,
+            revoked_by=auth.principal_id,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_signing_key_revoke",
+        target_type="tenant_signing_key",
+        target_id=key_id,
+        metadata={"reason": payload.reason or ""},
+    )
+    return revoked
+
+
 @app.post("/decisions/{decision_id}/replay")
 def replay_stored_decision(
     decision_id: str,
@@ -3525,9 +3640,10 @@ def verify_release_attestation(
     from releasegate.attestation.verify import verify_attestation_payload
 
     attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
+    tenant_hint = str((attestation or {}).get("tenant_id") or payload.get("tenant_id") or "").strip() or None
     report = verify_attestation_payload(
         attestation,
-        public_keys_by_key_id=load_public_keys_map(),
+        public_keys_by_key_id=load_public_keys_map(tenant_id=tenant_hint),
     )
     report["ok"] = bool(
         report.get("schema_valid")
