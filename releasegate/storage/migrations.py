@@ -1740,6 +1740,60 @@ def _migration_20260301_025_tenant_signing_key_lifecycle(cursor) -> None:
         END;
         """
     )
+
+
+def _migration_20260302_026_anchor_jobs(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            submitted_at TEXT,
+            confirmed_at TEXT,
+            PRIMARY KEY (tenant_id, job_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash
+        ON anchor_jobs(tenant_id, root_hash)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt
+        ON anchor_jobs(tenant_id, status, next_attempt_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt
+        ON anchor_jobs(status, next_attempt_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at
+        ON anchor_jobs(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at
+        ON anchor_jobs(tenant_id, confirmed_at DESC)
+        """
+    )
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1865,6 +1919,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260301_025_tenant_signing_key_lifecycle",
         description="Add tenant attestation signing keys with active/verify/revoked lifecycle and single-active constraint.",
         apply=_migration_20260301_025_tenant_signing_key_lifecycle,
+    ),
+    Migration(
+        migration_id="20260302_026_anchor_jobs",
+        description="Add anchor job lifecycle table for scheduled external root anchoring and retries.",
+        apply=_migration_20260302_026_anchor_jobs,
     ),
 ]
 
