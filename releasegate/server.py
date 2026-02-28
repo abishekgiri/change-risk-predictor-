@@ -3973,7 +3973,6 @@ def verify_release_attestation(
         public_keys_by_key_id=public_keys,
     )
     statuses: Dict[str, Dict[str, Any]] = {}
-    key_revoked = False
     if tenant_hint:
         try:
             statuses = get_tenant_signing_public_keys_with_status(
