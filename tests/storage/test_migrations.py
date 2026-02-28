@@ -42,6 +42,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260226_023_policy_lifecycle_state_machine" in migration_ids
         assert "20260228_024_external_root_anchors" in migration_ids
         assert "20260301_025_tenant_signing_key_lifecycle" in migration_ids
+        assert "20260302_026_anchor_jobs" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -177,6 +178,28 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= external_anchor_cols
         assert external_anchor_pk == ["tenant_id", "anchor_id"]
+
+        cur.execute("PRAGMA table_info(anchor_jobs)")
+        anchor_job_info = cur.fetchall()
+        anchor_job_cols = {row[1] for row in anchor_job_info}
+        anchor_job_pk = [row[1] for row in sorted((r for r in anchor_job_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "job_id",
+            "root_hash",
+            "date_utc",
+            "ledger_head_seq",
+            "status",
+            "attempts",
+            "next_attempt_at",
+            "last_error",
+            "external_anchor_id",
+            "created_at",
+            "updated_at",
+            "submitted_at",
+            "confirmed_at",
+        } <= anchor_job_cols
+        assert anchor_job_pk == ["tenant_id", "job_id"]
 
         cur.execute("PRAGMA table_info(jira_lock_events)")
         lock_event_info = cur.fetchall()

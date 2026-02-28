@@ -531,6 +531,57 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq BIGINT NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TIMESTAMPTZ NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            submitted_at TIMESTAMPTZ,
+            confirmed_at TIMESTAMPTZ,
+            PRIMARY KEY (tenant_id, job_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash
+        ON anchor_jobs(tenant_id, root_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt
+        ON anchor_jobs(tenant_id, status, next_attempt_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt
+        ON anchor_jobs(status, next_attempt_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at
+        ON anchor_jobs(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at
+        ON anchor_jobs(tenant_id, confirmed_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE OR REPLACE FUNCTION releasegate_prevent_transparency_mutation()
         RETURNS trigger AS $$
         BEGIN
@@ -2135,6 +2186,27 @@ def init_db() -> str:
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            submitted_at TEXT,
+            confirmed_at TEXT,
+            PRIMARY KEY (tenant_id, job_id)
+        )
+        """
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_context_id ON audit_decisions(context_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_created ON audit_decisions(tenant_id, repo, created_at)")
@@ -2190,6 +2262,21 @@ def init_db() -> str:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created ON tenant_signing_keys(tenant_id, status, created_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash ON anchor_jobs(tenant_id, root_hash)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt ON anchor_jobs(tenant_id, status, next_attempt_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt ON anchor_jobs(status, next_attempt_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at ON anchor_jobs(tenant_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at ON anchor_jobs(tenant_id, confirmed_at)"
     )
 
     cursor.execute(

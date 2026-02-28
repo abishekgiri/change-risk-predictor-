@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from releasegate.anchoring.provider import AnchorProviderError, anchor_root, verify_root_anchor_receipt
 from releasegate.audit.transparency import get_or_compute_transparency_root
+from releasegate.config import get_anchor_provider_name
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -240,18 +241,37 @@ def anchor_transparency_root(
     root_hash = str(root_entry.get("root_hash") or "").strip()
     if not root_hash:
         raise AnchorProviderError("transparency root hash is unavailable")
+    selected_provider = str(provider_name or get_anchor_provider_name()).strip().lower()
+    if selected_provider:
+        existing = _get_by_target(
+            tenant_id=effective_tenant,
+            provider=selected_provider,
+            date_utc=normalized_date,
+            root_hash=root_hash,
+        )
+        if existing:
+            return existing
 
     receipt = anchor_root(
         date_utc=normalized_date,
         root_hash=root_hash,
         tenant_id=effective_tenant,
-        provider_name=provider_name,
+        provider_name=selected_provider or provider_name,
     )
     if not receipt:
         return None
-    provider = str(receipt.get("provider") or provider_name or "").strip().lower()
+    provider = str(receipt.get("provider") or selected_provider or "").strip().lower()
     if not provider:
         raise AnchorProviderError("anchor receipt missing provider")
+
+    existing = _get_by_target(
+        tenant_id=effective_tenant,
+        provider=provider,
+        date_utc=normalized_date,
+        root_hash=root_hash,
+    )
+    if existing:
+        return existing
 
     if not verify_root_anchor_receipt(
         receipt=receipt,
@@ -267,6 +287,29 @@ def anchor_transparency_root(
         root_hash=root_hash,
         external_ref=str(receipt.get("external_ref") or "").strip() or None,
         receipt=receipt,
+    )
+
+
+def get_root_anchor_by_target(
+    *,
+    tenant_id: Optional[str],
+    provider: str,
+    date_utc: str,
+    root_hash: str,
+) -> Optional[Dict[str, Any]]:
+    init_db()
+    _ensure_external_root_anchors_table()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_date = str(date_utc or "").strip()
+    normalized_root_hash = str(root_hash or "").strip()
+    if not normalized_provider or not normalized_date or not normalized_root_hash:
+        return None
+    return _get_by_target(
+        tenant_id=effective_tenant,
+        provider=normalized_provider,
+        date_utc=normalized_date,
+        root_hash=normalized_root_hash,
     )
 
 

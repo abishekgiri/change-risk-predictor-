@@ -262,6 +262,10 @@ class RevokeTenantSigningKeyRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class AnchorTickRequest(BaseModel):
+    tenant_id: Optional[str] = None
+
+
 class RotateApiKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
 
@@ -987,11 +991,34 @@ def metrics_for_tenant(
     }
 
 
+@app.post("/internal/anchor/tick")
+def anchor_tick(
+    payload: AnchorTickRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.anchoring.anchor_scheduler import tick
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    report = tick(tenant_id=effective_tenant)
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "report": report,
+    }
+
+
 @app.on_event("startup")
 def verify_ledger_on_startup():
+    from releasegate.anchoring.anchor_scheduler import scheduler_status, start_anchor_scheduler
     from releasegate.storage.schema import init_db
 
     init_db()
+    app.state.anchor_scheduler = start_anchor_scheduler()
+    app.state.anchor_scheduler_status = scheduler_status()
     if not LEDGER_VERIFY_ON_STARTUP:
         return
     from releasegate.audit.overrides import verify_all_override_chains
@@ -1014,6 +1041,13 @@ def verify_ledger_on_startup():
             "Override ledger verified at startup: checked_chains=%s",
             result.get("checked_chains", result.get("checked_repos", 0)),
         )
+
+
+@app.on_event("shutdown")
+def stop_background_workers():
+    from releasegate.anchoring.anchor_scheduler import stop_anchor_scheduler
+
+    app.state.anchor_scheduler = stop_anchor_scheduler()
 
 
 @app.get("/audit/ledger/verify")
