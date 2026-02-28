@@ -4005,8 +4005,11 @@ def verify_release_attestation(
     if tenant_hint and attestation_id:
         try:
             compromise = is_attestation_compromised(tenant_id=tenant_hint, attestation_id=attestation_id)
-        except Exception:
-            compromise = {"compromised": False, "event_id": None}
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Attestation compromise status check failed",
+            ) from exc
     report["key_revoked"] = bool(key_revoked)
     report["compromised"] = bool(compromise.get("compromised"))
     report["compromise_event_id"] = compromise.get("event_id")
