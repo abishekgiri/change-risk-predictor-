@@ -193,6 +193,16 @@ def test_bulk_resign_and_key_access_log():
     assert resign_body["resigned_count"] >= 1
     assert "supersedes_attestation_id" in resign_body["items"][0]
 
+    verify_resp = client.post("/verify", json={"attestation": attestation})
+    assert verify_resp.status_code == 200
+    verify_body = verify_resp.json()
+    assert verify_body["valid_signature"] is True
+    assert verify_body["accepted"] is False
+    assert verify_body["superseded_by_resignature"] is True
+    assert verify_body["superseding_signature_valid"] is True
+    assert verify_body["superseding_accepted"] is True
+    assert verify_body["accepted_effective"] is True
+
     key_access = client.get(
         f"/tenants/{tenant_id}/key-access-log",
         headers=jwt_headers(tenant_id=tenant_id, roles=["admin"]),

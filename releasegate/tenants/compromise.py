@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import uuid
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from releasegate.attestation.canonicalize import canonicalize_attestation_payload
-from releasegate.attestation.crypto import load_private_key_for_tenant, sign_bytes
+from releasegate.attestation.crypto import sign_message_for_tenant
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -241,6 +242,52 @@ def list_compromise_events(
     return rows
 
 
+def get_latest_attestation_resignature(
+    *,
+    tenant_id: str,
+    attestation_id: str,
+) -> Optional[Dict[str, Any]]:
+    init_db()
+    _ensure_compromise_tables()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    row = storage.fetchone(
+        """
+        SELECT tenant_id, resign_id, attestation_id, decision_id, new_key_id, supersedes_attestation_id,
+               attestation_json, created_by, created_at
+        FROM attestation_resignatures
+        WHERE tenant_id = ? AND supersedes_attestation_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (effective_tenant, str(attestation_id)),
+    )
+    if not row:
+        return None
+    payload_raw = row.get("attestation_json")
+    attestation: Dict[str, Any] = {}
+    if isinstance(payload_raw, str):
+        try:
+            parsed = json.loads(payload_raw)
+            if isinstance(parsed, dict):
+                attestation = parsed
+        except Exception:
+            attestation = {}
+    elif isinstance(payload_raw, dict):
+        attestation = dict(payload_raw)
+    return {
+        "tenant_id": effective_tenant,
+        "resign_id": row.get("resign_id"),
+        "attestation_id": row.get("attestation_id"),
+        "decision_id": row.get("decision_id"),
+        "new_key_id": row.get("new_key_id"),
+        "supersedes_attestation_id": row.get("supersedes_attestation_id"),
+        "created_by": row.get("created_by"),
+        "created_at": row.get("created_at"),
+        "attestation": attestation,
+    }
+
+
 def is_attestation_compromised(*, tenant_id: str, attestation_id: str) -> Dict[str, Any]:
     init_db()
     _ensure_compromise_tables()
@@ -301,9 +348,6 @@ def bulk_resign_compromised_attestations(
     if not active:
         raise ValueError("active tenant signing key not found")
     new_key_id = str(active.get("key_id") or "").strip()
-    private_key, loaded_key_id = load_private_key_for_tenant(effective_tenant)
-    if loaded_key_id != new_key_id:
-        new_key_id = loaded_key_id
 
     rows = storage.fetchall(
         """
@@ -338,12 +382,24 @@ def bulk_resign_compromised_attestations(
             issuer["key_id"] = new_key_id
             payload["issuer"] = issuer
         payload_hash = canonicalize_attestation_payload(payload)
-        digest = sign_bytes(private_key, hashlib.sha256(payload_hash).hexdigest())
+        payload_digest = hashlib.sha256(payload_hash).hexdigest()
+        signature_bytes, resolved_key_id = sign_message_for_tenant(
+            effective_tenant,
+            bytes.fromhex(payload_digest),
+            purpose="attestation_resign",
+            actor=actor_id,
+        )
+        issuer_after_sign = payload.get("issuer")
+        if isinstance(issuer_after_sign, dict):
+            issuer_after_sign = dict(issuer_after_sign)
+            issuer_after_sign["key_id"] = resolved_key_id
+            payload["issuer"] = issuer_after_sign
+        digest = base64.b64encode(signature_bytes).decode("ascii")
         resigned = {
             **payload,
             "signature": {
                 "algorithm": "ed25519",
-                "signed_payload_hash": f"sha256:{hashlib.sha256(payload_hash).hexdigest()}",
+                "signed_payload_hash": f"sha256:{payload_digest}",
                 "signature_bytes": digest,
             },
         }
@@ -361,7 +417,7 @@ def bulk_resign_compromised_attestations(
                 resign_id,
                 str(row.get("attestation_id") or ""),
                 str(row.get("decision_id") or ""),
-                new_key_id,
+                resolved_key_id,
                 str(row.get("attestation_id") or ""),
                 canonical_json(resigned),
                 actor_id,
@@ -373,7 +429,7 @@ def bulk_resign_compromised_attestations(
                 "resign_id": resign_id,
                 "attestation_id": str(row.get("attestation_id") or ""),
                 "decision_id": str(row.get("decision_id") or ""),
-                "new_key_id": new_key_id,
+                "new_key_id": resolved_key_id,
                 "supersedes_attestation_id": str(row.get("attestation_id") or ""),
                 "created_at": created_at,
             }

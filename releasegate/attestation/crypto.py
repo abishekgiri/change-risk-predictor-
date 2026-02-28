@@ -128,6 +128,63 @@ def parse_public_key(value: str) -> Ed25519PublicKey:
     return _load_public_key_from_raw(value)
 
 
+def sign_message_for_tenant(
+    tenant_id: Optional[str],
+    message: bytes,
+    *,
+    purpose: str = "attestation_signing",
+    actor: str = "system:attestation",
+) -> Tuple[bytes, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    payload = bytes(message or b"")
+    if effective_tenant:
+        from releasegate.tenants.keys import get_active_tenant_signing_key_record
+
+        record = get_active_tenant_signing_key_record(
+            effective_tenant,
+            actor=actor,
+            purpose=purpose,
+            access_operation="sign",
+        )
+        if isinstance(record, dict):
+            key_id = str(record.get("key_id") or "").strip()
+            signing_mode = str(record.get("signing_mode") or "envelope").strip().lower()
+            if key_id and signing_mode == "kms_direct":
+                from releasegate.crypto.kms_client import get_kms_client
+                from releasegate.security.key_access import log_key_access
+
+                signature = get_kms_client().sign(key_id=key_id, payload=payload)
+                log_key_access(
+                    tenant_id=effective_tenant,
+                    key_id=key_id,
+                    operation="sign",
+                    actor=actor,
+                    purpose=purpose,
+                    metadata={
+                        "signing_mode": signing_mode,
+                        "encryption_mode": str(record.get("encryption_mode") or ""),
+                        "kms_key_id": str(record.get("kms_key_id") or ""),
+                    },
+                )
+                return signature, key_id
+
+            private_key = str(record.get("private_key") or "").strip()
+            if key_id and private_key:
+                loaded = _load_ed25519_private_key_from_text(
+                    private_key,
+                    env_var_name=f"tenant_signing_keys[{effective_tenant}]",
+                )
+                return loaded.sign(payload), key_id
+            if key_id and not private_key:
+                raise MissingSigningKeyError(
+                    "MISSING_SIGNING_KEY: active tenant signing key has no local private key material "
+                    f"(signing_mode={signing_mode or 'unknown'})."
+                )
+
+    private_key = load_private_key_from_env()
+    return private_key.sign(payload), current_key_id()
+
+
 def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519PrivateKey, str]:
     effective_tenant = str(tenant_id or "").strip()
     if effective_tenant:
@@ -141,6 +198,7 @@ def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519Privat
         )
         if isinstance(record, dict):
             key_id = str(record.get("key_id") or "").strip()
+            signing_mode = str(record.get("signing_mode") or "envelope").strip().lower()
             private_key = str(record.get("private_key") or "").strip()
             if key_id and private_key:
                 loaded = _load_ed25519_private_key_from_text(
@@ -148,6 +206,11 @@ def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519Privat
                     env_var_name=f"tenant_signing_keys[{effective_tenant}]",
                 )
                 return loaded, key_id
+            if key_id and not private_key:
+                raise MissingSigningKeyError(
+                    "MISSING_SIGNING_KEY: active tenant signing key has no local private key material "
+                    f"(signing_mode={signing_mode or 'unknown'}). Use sign_message_for_tenant()."
+                )
     return load_private_key_from_env(), current_key_id()
 
 

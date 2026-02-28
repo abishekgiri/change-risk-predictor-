@@ -281,8 +281,6 @@ class ForceRekeyTenantRequest(BaseModel):
 class ResignCompromisedRequest(BaseModel):
     tenant_id: Optional[str] = None
     limit: int = Field(default=200, ge=1, le=1000)
-
-
 class AnchorTickRequest(BaseModel):
     tenant_id: Optional[str] = None
 
@@ -726,8 +724,9 @@ def list_attestations(
 
 @app.get("/attestations/{attestation_id}.dsse")
 def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None):
-    from releasegate.attestation import build_intoto_statement, wrap_dsse
-    from releasegate.attestation.crypto import MissingSigningKeyError, load_private_key_for_tenant
+    from releasegate.attestation import build_intoto_statement
+    from releasegate.attestation.crypto import MissingSigningKeyError, sign_message_for_tenant
+    from releasegate.attestation.dsse import wrap_dsse_with_signer
     from releasegate.audit.attestations import get_release_attestation_by_id
 
     try:
@@ -743,11 +742,15 @@ def export_attestation_dsse(attestation_id: str, tenant_id: Optional[str] = None
 
     try:
         statement = build_intoto_statement(attestation)
-        signing_key, key_id = load_private_key_for_tenant(str(row.get("tenant_id") or tenant_id or "").strip() or None)
-        envelope = wrap_dsse(
+        signing_tenant = str(row.get("tenant_id") or tenant_id or "").strip() or None
+        envelope = wrap_dsse_with_signer(
             statement,
-            signing_key=signing_key,
-            key_id=key_id,
+            signer=lambda message: sign_message_for_tenant(
+                signing_tenant,
+                message,
+                purpose="attestation_dsse_export",
+                actor="system:attestation",
+            ),
         )
     except MissingSigningKeyError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2008,17 +2011,20 @@ def audit_proof_pack(
         from releasegate.attestation import build_proof_pack_statement
         from releasegate.attestation.crypto import (
             MissingSigningKeyError,
-            load_private_key_for_tenant,
+            sign_message_for_tenant,
         )
-        from releasegate.attestation.dsse import wrap_dsse
+        from releasegate.attestation.dsse import wrap_dsse_with_signer
 
         in_toto_statement = build_proof_pack_statement(bundle, export_checksum=export_checksum)
         try:
-            signing_key, key_id = load_private_key_for_tenant(effective_tenant)
-            dsse_envelope = wrap_dsse(
+            dsse_envelope = wrap_dsse_with_signer(
                 in_toto_statement,
-                signing_key=signing_key,
-                key_id=key_id,
+                signer=lambda message: sign_message_for_tenant(
+                    effective_tenant,
+                    message,
+                    purpose="proof_pack_dsse_signing",
+                    actor="system:proof_pack",
+                ),
             )
         except MissingSigningKeyError as exc:
             dsse_error = {"error_code": "MISSING_SIGNING_KEY", "message": str(exc)}
@@ -3956,7 +3962,7 @@ def verify_release_attestation(
 ):
     from releasegate.attestation.crypto import load_public_keys_map
     from releasegate.attestation.verify import verify_attestation_payload
-    from releasegate.tenants.compromise import is_attestation_compromised
+    from releasegate.tenants.compromise import get_latest_attestation_resignature, is_attestation_compromised
     from releasegate.tenants.keys import KEY_STATUS_REVOKED, get_tenant_signing_public_keys_with_status
 
     attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
@@ -3966,18 +3972,25 @@ def verify_release_attestation(
         attestation,
         public_keys_by_key_id=public_keys,
     )
-    key_id = str(report.get("key_id") or "").strip()
-    key_revoked = False
-    if tenant_hint and key_id:
+    statuses: Dict[str, Dict[str, Any]] = {}
+    if tenant_hint:
         try:
             statuses = get_tenant_signing_public_keys_with_status(
                 tenant_id=tenant_hint,
                 include_verify_only=True,
                 include_revoked=True,
             )
-            key_revoked = str((statuses.get(key_id) or {}).get("status") or "").upper() == KEY_STATUS_REVOKED
         except Exception:
-            key_revoked = False
+            statuses = {}
+
+    def _key_is_revoked(key_id: str) -> bool:
+        normalized = str(key_id or "").strip()
+        if not normalized:
+            return False
+        return str((statuses.get(normalized) or {}).get("status") or "").upper() == KEY_STATUS_REVOKED
+
+    key_id = str(report.get("key_id") or "").strip()
+    key_revoked = _key_is_revoked(key_id)
     compromise = {"compromised": False, "event_id": None}
     attestation_id = str((attestation or {}).get("attestation_id") or "").strip()
     if not attestation_id and isinstance(attestation, dict):
@@ -4005,4 +4018,50 @@ def verify_release_attestation(
         and report.get("valid_signature")
     )
     report["accepted"] = bool(report["ok"] and not report["key_revoked"] and not report["compromised"])
+
+    superseding_resign = None
+    if tenant_hint and attestation_id:
+        try:
+            superseding_resign = get_latest_attestation_resignature(
+                tenant_id=tenant_hint,
+                attestation_id=attestation_id,
+            )
+        except Exception:
+            superseding_resign = None
+    superseding_available = isinstance(superseding_resign, dict) and bool(superseding_resign)
+    superseding_signature_valid = False
+    superseding_key_id = ""
+    superseding_key_revoked = False
+    superseding_accepted = False
+    superseding_attestation_id = ""
+    superseding_report: Dict[str, Any] = {}
+    if superseding_available:
+        superseding_attestation = superseding_resign.get("attestation")
+        if isinstance(superseding_attestation, dict):
+            superseding_report = verify_attestation_payload(
+                superseding_attestation,
+                public_keys_by_key_id=public_keys,
+            )
+            superseding_signature_valid = bool(superseding_report.get("valid_signature"))
+            superseding_key_id = str(superseding_report.get("key_id") or superseding_resign.get("new_key_id") or "").strip()
+            superseding_key_revoked = _key_is_revoked(superseding_key_id)
+            superseding_accepted = bool(
+                superseding_report.get("schema_valid")
+                and superseding_report.get("payload_hash_match")
+                and superseding_report.get("trusted_issuer")
+                and superseding_report.get("valid_signature")
+                and not superseding_key_revoked
+            )
+            superseding_attestation_id = str(superseding_resign.get("attestation_id") or attestation_id or "").strip()
+        else:
+            superseding_available = False
+
+    report["superseded_by_resignature"] = bool(superseding_available)
+    report["superseding_resign_id"] = (superseding_resign or {}).get("resign_id") if superseding_available else None
+    report["superseding_attestation_id"] = superseding_attestation_id or None
+    report["superseding_key_id"] = superseding_key_id or None
+    report["superseding_signature_valid"] = bool(superseding_signature_valid)
+    report["superseding_key_revoked"] = bool(superseding_key_revoked)
+    report["superseding_accepted"] = bool(superseding_accepted)
+    report["accepted_effective"] = bool(report["accepted"] or superseding_accepted)
     return report

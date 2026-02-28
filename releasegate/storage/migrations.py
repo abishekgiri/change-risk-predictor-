@@ -1794,8 +1794,6 @@ def _migration_20260302_026_anchor_jobs(cursor) -> None:
         ON anchor_jobs(tenant_id, confirmed_at DESC)
         """
     )
-
-
 def _migration_20260303_027_kms_custody_and_compromise_playbook(cursor) -> None:
     if not _column_exists(cursor, "tenant_signing_keys", "encrypted_data_key"):
         cursor.execute("ALTER TABLE tenant_signing_keys ADD COLUMN encrypted_data_key TEXT")
