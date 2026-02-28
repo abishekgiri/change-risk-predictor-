@@ -392,6 +392,10 @@ def _init_postgres_schema() -> str:
             algorithm TEXT NOT NULL,
             signed_payload_hash TEXT NOT NULL,
             attestation_json JSONB NOT NULL,
+            compromised BOOLEAN NOT NULL DEFAULT FALSE,
+            compromised_reason TEXT,
+            compromised_at TIMESTAMPTZ,
+            superseded_by_resign_id TEXT,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, attestation_id)
         )
@@ -401,6 +405,12 @@ def _init_postgres_schema() -> str:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
         ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
+        ON audit_attestations(tenant_id, compromised, created_at)
         """
     )
     cur.execute(
@@ -1507,6 +1517,9 @@ def _init_postgres_schema() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             encrypted_key TEXT NOT NULL,
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
             key_hash TEXT NOT NULL,
             created_by TEXT,
             created_at TIMESTAMPTZ NOT NULL,
@@ -1528,7 +1541,11 @@ def _init_postgres_schema() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             public_key TEXT NOT NULL,
-            encrypted_private_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL DEFAULT '',
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
+            signing_mode TEXT NOT NULL DEFAULT 'envelope',
             status TEXT NOT NULL,
             created_by TEXT,
             created_at TIMESTAMPTZ NOT NULL,
@@ -1550,6 +1567,91 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created
         ON tenant_signing_keys(tenant_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_access_log (
+            tenant_id TEXT NOT NULL,
+            access_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            actor TEXT,
+            purpose TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, access_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_key_created
+        ON key_access_log(tenant_id, key_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_operation_created
+        ON key_access_log(tenant_id, operation, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_key_compromise_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            revoked_key_id TEXT NOT NULL,
+            replacement_key_id TEXT NOT NULL,
+            compromise_start TIMESTAMPTZ NOT NULL,
+            compromise_end TIMESTAMPTZ NOT NULL,
+            reason TEXT,
+            actor TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            affected_count INTEGER NOT NULL DEFAULT 0,
+            affected_attestation_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_created
+        ON tenant_key_compromise_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_revoked
+        ON tenant_key_compromise_events(tenant_id, revoked_key_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attestation_resignatures (
+            tenant_id TEXT NOT NULL,
+            resign_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            new_key_id TEXT NOT NULL,
+            supersedes_attestation_id TEXT NOT NULL,
+            attestation_json JSONB NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, resign_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_attestation_created
+        ON attestation_resignatures(tenant_id, attestation_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_decision_created
+        ON attestation_resignatures(tenant_id, decision_id, created_at DESC)
         """
     )
     cur.execute(
@@ -1580,6 +1682,138 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at
         ON idempotency_keys(expires_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_key_access_log_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Key access log is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_key_access_log_update'
+            ) THEN
+                CREATE TRIGGER prevent_key_access_log_update
+                BEFORE UPDATE ON key_access_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_key_access_log_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_key_access_log_delete'
+            ) THEN
+                CREATE TRIGGER prevent_key_access_log_delete
+                BEFORE DELETE ON key_access_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_key_access_log_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Tenant key compromise events are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_tenant_key_compromise_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_key_compromise_events_update
+                BEFORE UPDATE ON tenant_key_compromise_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_tenant_key_compromise_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_key_compromise_events_delete
+                BEFORE DELETE ON tenant_key_compromise_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_attestation_resignature_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Attestation re-signatures are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestation_resignatures_update'
+            ) THEN
+                CREATE TRIGGER prevent_attestation_resignatures_update
+                BEFORE UPDATE ON attestation_resignatures
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_resignature_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestation_resignatures_delete'
+            ) THEN
+                CREATE TRIGGER prevent_attestation_resignatures_delete
+                BEFORE DELETE ON attestation_resignatures
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_resignature_mutation();
+            END IF;
+        END $$;
         """
     )
     # Ensure existing Postgres deployments are hardened to tenant-scoped PKs.
@@ -1645,6 +1879,35 @@ def _init_postgres_schema() -> str:
     cur.execute("UPDATE webhook_nonces SET key_id = COALESCE(NULLIF(btrim(key_id), ''), 'legacy')")
     cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN integration_id SET NOT NULL")
     cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN key_id SET NOT NULL")
+    cur.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS encrypted_data_key TEXT")
+    cur.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS kms_key_id TEXT")
+    cur.execute(
+        "ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS encryption_mode TEXT DEFAULT 'legacy_fernet'"
+    )
+    cur.execute(
+        "UPDATE checkpoint_signing_keys SET encryption_mode = COALESCE(NULLIF(btrim(encryption_mode), ''), 'legacy_fernet')"
+    )
+    cur.execute("ALTER TABLE checkpoint_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
+    cur.execute("ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS encrypted_data_key TEXT")
+    cur.execute("ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS kms_key_id TEXT")
+    cur.execute(
+        "ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS encryption_mode TEXT DEFAULT 'legacy_fernet'"
+    )
+    cur.execute(
+        "ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS signing_mode TEXT DEFAULT 'envelope'"
+    )
+    cur.execute(
+        "UPDATE tenant_signing_keys SET encryption_mode = COALESCE(NULLIF(btrim(encryption_mode), ''), 'legacy_fernet')"
+    )
+    cur.execute("UPDATE tenant_signing_keys SET signing_mode = COALESCE(NULLIF(btrim(signing_mode), ''), 'envelope')")
+    cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
+    cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN signing_mode SET NOT NULL")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
+    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
+    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
     cur.execute(
         """
         DO $$
@@ -2160,6 +2423,9 @@ def init_db() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             encrypted_key TEXT NOT NULL,
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
             key_hash TEXT NOT NULL,
             created_by TEXT,
             created_at TEXT NOT NULL,
@@ -2175,7 +2441,11 @@ def init_db() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             public_key TEXT NOT NULL,
-            encrypted_private_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL DEFAULT '',
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
+            signing_mode TEXT NOT NULL DEFAULT 'envelope',
             status TEXT NOT NULL,
             created_by TEXT,
             created_at TEXT NOT NULL,

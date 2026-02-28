@@ -69,6 +69,21 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
   - Source of truth: `/.well-known/releasegate-keys.json` (signed by `/.well-known/releasegate-keys.sig`).
   - Revoked keys remain verifiable cryptographically, but are marked untrusted by verifier policy.
 
+## KMS Custody (Phase 7)
+
+- Tenant and checkpoint signing keys are stored with envelope encryption:
+  - Private material ciphertext
+  - KMS-encrypted data key
+  - `kms_key_id`
+- `RELEASEGATE_STRICT_KMS=true` enforces boot-time guardrails:
+  - service refuses to start unless `RELEASEGATE_KMS_MODE` is a cloud mode (`aws|gcp|azure`)
+  - local/mock modes are rejected when strict mode is enabled
+- Current implementation status:
+  - `local|mock` KMS adapter implemented for development/testing
+  - cloud adapters (`aws|gcp|azure`) are reserved but not yet implemented in code
+- Legacy encrypted records can still be read for migration compatibility unless strict mode is enabled.
+- Key material access is audit logged (`decrypt`/`sign`) in append-only `key_access_log`.
+
 ## Request Signatures (Webhook Security)
 
 - HMAC signature check for webhook endpoints using key lookup by `X-Key-Id`.

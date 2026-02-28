@@ -154,6 +154,8 @@ def _checkpoint_signing_material(
     signing_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
     preferred_key_id: Optional[str] = None,
+    operation: str = "decrypt",
+    purpose: Optional[str] = None,
 ) -> Dict[str, str]:
     if signing_key:
         return {"key": signing_key, "key_id": "manual"}
@@ -176,9 +178,20 @@ def _checkpoint_signing_material(
 
             record = None
             if preferred:
-                record = get_checkpoint_signing_key_record(tenant_id, preferred)
+                record = get_checkpoint_signing_key_record(
+                    tenant_id,
+                    preferred,
+                    operation=operation,
+                    actor="system:checkpoint",
+                    purpose=purpose or "checkpoint_signing_material",
+                )
             if not record:
-                record = get_active_checkpoint_signing_key_record(tenant_id)
+                record = get_active_checkpoint_signing_key_record(
+                    tenant_id,
+                    operation=operation,
+                    actor="system:checkpoint",
+                    purpose=purpose or "checkpoint_signing_material",
+                )
             if record and record.get("key"):
                 return {
                     "key": str(record["key"]),
@@ -360,12 +373,15 @@ def _sign_payload(
     signing_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
     preferred_key_id: Optional[str] = None,
+    operation: str = "sign",
 ) -> Dict[str, str]:
     effective_tenant = tenant_id or payload.get("tenant_id")
     material = _checkpoint_signing_material(
         signing_key,
         tenant_id=effective_tenant,
         preferred_key_id=preferred_key_id,
+        operation=operation,
+        purpose="checkpoint_sign_payload",
     )
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
@@ -392,6 +408,7 @@ def verify_checkpoint_signature(checkpoint: Dict[str, Any], signing_key: Optiona
         signing_key=signing_key,
         tenant_id=payload.get("tenant_id"),
         preferred_key_id=signature_obj.get("key_id"),
+        operation="verify",
     ).get("value")
     return hmac.compare_digest(expected, signature)
 

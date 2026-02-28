@@ -43,6 +43,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260228_024_external_root_anchors" in migration_ids
         assert "20260301_025_tenant_signing_key_lifecycle" in migration_ids
         assert "20260302_026_anchor_jobs" in migration_ids
+        assert "20260303_027_kms_custody_and_compromise_playbook" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -94,7 +95,9 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
 
         cur.execute("PRAGMA table_info(checkpoint_signing_keys)")
         checkpoint_keys_info = cur.fetchall()
+        checkpoint_keys_cols = {row[1] for row in checkpoint_keys_info}
         checkpoint_keys_pk = [row[1] for row in sorted((r for r in checkpoint_keys_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"encrypted_data_key", "kms_key_id", "encryption_mode"} <= checkpoint_keys_cols
         assert checkpoint_keys_pk == ["tenant_id", "key_id"]
 
         cur.execute("PRAGMA table_info(tenant_signing_keys)")
@@ -108,6 +111,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "key_id",
             "public_key",
             "encrypted_private_key",
+            "encrypted_data_key",
+            "kms_key_id",
+            "encryption_mode",
+            "signing_mode",
             "status",
             "created_by",
             "created_at",
@@ -139,8 +146,57 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
 
         cur.execute("PRAGMA table_info(audit_attestations)")
         attestation_info = cur.fetchall()
+        attestation_cols = {row[1] for row in attestation_info}
         attestation_pk = [row[1] for row in sorted((r for r in attestation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"compromised", "compromised_reason", "compromised_at", "superseded_by_resign_id"} <= attestation_cols
         assert attestation_pk == ["tenant_id", "attestation_id"]
+
+        cur.execute("PRAGMA table_info(key_access_log)")
+        key_access_info = cur.fetchall()
+        key_access_cols = {row[1] for row in key_access_info}
+        key_access_pk = [row[1] for row in sorted((r for r in key_access_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "access_id",
+            "key_id",
+            "operation",
+            "actor",
+            "purpose",
+            "metadata_json",
+            "created_at",
+        } <= key_access_cols
+        assert key_access_pk == ["tenant_id", "access_id"]
+
+        cur.execute("PRAGMA table_info(tenant_key_compromise_events)")
+        compromise_info = cur.fetchall()
+        compromise_cols = {row[1] for row in compromise_info}
+        compromise_pk = [row[1] for row in sorted((r for r in compromise_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "event_id",
+            "revoked_key_id",
+            "replacement_key_id",
+            "compromise_start",
+            "compromise_end",
+            "affected_count",
+            "affected_attestation_ids_json",
+        } <= compromise_cols
+        assert compromise_pk == ["tenant_id", "event_id"]
+
+        cur.execute("PRAGMA table_info(attestation_resignatures)")
+        resign_info = cur.fetchall()
+        resign_cols = {row[1] for row in resign_info}
+        resign_pk = [row[1] for row in sorted((r for r in resign_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "resign_id",
+            "attestation_id",
+            "decision_id",
+            "new_key_id",
+            "supersedes_attestation_id",
+            "attestation_json",
+        } <= resign_cols
+        assert resign_pk == ["tenant_id", "resign_id"]
 
         cur.execute("PRAGMA table_info(audit_transparency_log)")
         transparency_info = cur.fetchall()

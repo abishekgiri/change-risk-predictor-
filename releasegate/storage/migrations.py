@@ -1794,6 +1794,224 @@ def _migration_20260302_026_anchor_jobs(cursor) -> None:
         ON anchor_jobs(tenant_id, confirmed_at DESC)
         """
     )
+def _migration_20260303_027_kms_custody_and_compromise_playbook(cursor) -> None:
+    if not _column_exists(cursor, "tenant_signing_keys", "encrypted_data_key"):
+        cursor.execute("ALTER TABLE tenant_signing_keys ADD COLUMN encrypted_data_key TEXT")
+    if not _column_exists(cursor, "tenant_signing_keys", "kms_key_id"):
+        cursor.execute("ALTER TABLE tenant_signing_keys ADD COLUMN kms_key_id TEXT")
+    if not _column_exists(cursor, "tenant_signing_keys", "encryption_mode"):
+        cursor.execute(
+            "ALTER TABLE tenant_signing_keys ADD COLUMN encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet'"
+        )
+    if not _column_exists(cursor, "tenant_signing_keys", "signing_mode"):
+        cursor.execute(
+            "ALTER TABLE tenant_signing_keys ADD COLUMN signing_mode TEXT NOT NULL DEFAULT 'envelope'"
+        )
+    cursor.execute(
+        """
+        UPDATE tenant_signing_keys
+        SET encryption_mode = COALESCE(NULLIF(TRIM(encryption_mode), ''), 'legacy_fernet'),
+            signing_mode = COALESCE(NULLIF(TRIM(signing_mode), ''), 'envelope')
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_signing_keys_key_material_mutation")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_signing_keys_key_material_mutation
+        BEFORE UPDATE ON tenant_signing_keys
+        WHEN
+            COALESCE(NEW.public_key, '') != COALESCE(OLD.public_key, '')
+            OR COALESCE(NEW.encrypted_private_key, '') != COALESCE(OLD.encrypted_private_key, '')
+            OR COALESCE(NEW.encrypted_data_key, '') != COALESCE(OLD.encrypted_data_key, '')
+            OR COALESCE(NEW.kms_key_id, '') != COALESCE(OLD.kms_key_id, '')
+            OR COALESCE(NEW.encryption_mode, '') != COALESCE(OLD.encryption_mode, '')
+            OR COALESCE(NEW.signing_mode, '') != COALESCE(OLD.signing_mode, '')
+            OR COALESCE(NEW.created_at, '') != COALESCE(OLD.created_at, '')
+            OR COALESCE(NEW.created_by, '') != COALESCE(OLD.created_by, '')
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant signing key material is immutable');
+        END;
+        """
+    )
+
+    if not _column_exists(cursor, "checkpoint_signing_keys", "encrypted_data_key"):
+        cursor.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN encrypted_data_key TEXT")
+    if not _column_exists(cursor, "checkpoint_signing_keys", "kms_key_id"):
+        cursor.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN kms_key_id TEXT")
+    if not _column_exists(cursor, "checkpoint_signing_keys", "encryption_mode"):
+        cursor.execute(
+            "ALTER TABLE checkpoint_signing_keys ADD COLUMN encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet'"
+        )
+    cursor.execute(
+        """
+        UPDATE checkpoint_signing_keys
+        SET encryption_mode = COALESCE(NULLIF(TRIM(encryption_mode), ''), 'legacy_fernet')
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_access_log (
+            tenant_id TEXT NOT NULL,
+            access_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            actor TEXT,
+            purpose TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, access_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_key_created
+        ON key_access_log(tenant_id, key_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_operation_created
+        ON key_access_log(tenant_id, operation, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_key_access_log_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_key_access_log_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_key_access_log_update
+        BEFORE UPDATE ON key_access_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Key access log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_key_access_log_delete
+        BEFORE DELETE ON key_access_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Key access log is append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_key_compromise_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            revoked_key_id TEXT NOT NULL,
+            replacement_key_id TEXT NOT NULL,
+            compromise_start TEXT NOT NULL,
+            compromise_end TEXT NOT NULL,
+            reason TEXT,
+            actor TEXT,
+            created_at TEXT NOT NULL,
+            affected_count INTEGER NOT NULL DEFAULT 0,
+            affected_attestation_ids_json TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_created
+        ON tenant_key_compromise_events(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_revoked
+        ON tenant_key_compromise_events(tenant_id, revoked_key_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_key_compromise_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_key_compromise_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_key_compromise_events_update
+        BEFORE UPDATE ON tenant_key_compromise_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant key compromise events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_key_compromise_events_delete
+        BEFORE DELETE ON tenant_key_compromise_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant key compromise events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    if not _column_exists(cursor, "audit_attestations", "compromised"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised INTEGER NOT NULL DEFAULT 0")
+    if not _column_exists(cursor, "audit_attestations", "compromised_reason"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised_reason TEXT")
+    if not _column_exists(cursor, "audit_attestations", "compromised_at"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised_at TEXT")
+    if not _column_exists(cursor, "audit_attestations", "superseded_by_resign_id"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN superseded_by_resign_id TEXT")
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
+        ON audit_attestations(tenant_id, compromised, created_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attestation_resignatures (
+            tenant_id TEXT NOT NULL,
+            resign_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            new_key_id TEXT NOT NULL,
+            supersedes_attestation_id TEXT NOT NULL,
+            attestation_json TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, resign_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_attestation_created
+        ON attestation_resignatures(tenant_id, attestation_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_decision_created
+        ON attestation_resignatures(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_attestation_resignatures_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_attestation_resignatures_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_resignatures_update
+        BEFORE UPDATE ON attestation_resignatures
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation re-signatures are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_resignatures_delete
+        BEFORE DELETE ON attestation_resignatures
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation re-signatures are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1924,6 +2142,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260302_026_anchor_jobs",
         description="Add anchor job lifecycle table for scheduled external root anchoring and retries.",
         apply=_migration_20260302_026_anchor_jobs,
+    ),
+    Migration(
+        migration_id="20260303_027_kms_custody_and_compromise_playbook",
+        description="Add KMS envelope key custody fields, key access audit trail, and emergency compromise response tables.",
+        apply=_migration_20260303_027_kms_custody_and_compromise_playbook,
     ),
 ]
 
