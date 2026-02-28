@@ -298,12 +298,13 @@ def bulk_resign_compromised_attestations(
         purpose="attestation_resign_active_key_lookup",
         access_operation="sign",
     )
-    if not active:
-        raise ValueError("active tenant signing key not found")
-    new_key_id = str(active.get("key_id") or "").strip()
-    private_key, loaded_key_id = load_private_key_for_tenant(effective_tenant)
-    if loaded_key_id != new_key_id:
-        new_key_id = loaded_key_id
+    if not active or not active.get("private_key"):
+        raise ValueError("active tenant signing key with private key material not found")
+
+    new_key_id = str(active["key_id"])
+    from releasegate.tenants.keys import _parse_private_key
+
+    private_key = _parse_private_key(active["private_key"])
 
     rows = storage.fetchall(
         """
