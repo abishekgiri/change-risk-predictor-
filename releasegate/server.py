@@ -3976,8 +3976,9 @@ def verify_release_attestation(
                 include_revoked=True,
             )
             key_revoked = str((statuses.get(key_id) or {}).get("status") or "").upper() == KEY_STATUS_REVOKED
-        except Exception:
-            key_revoked = False
+        except Exception as exc:
+            logger.warning("Failed to check key revocation status for key_id=%s: %s", key_id, exc)
+            raise HTTPException(status_code=503, detail="Failed to verify key status.") from exc
     compromise = {"compromised": False, "event_id": None}
     attestation_id = str((attestation or {}).get("attestation_id") or "").strip()
     if not attestation_id and isinstance(attestation, dict):
