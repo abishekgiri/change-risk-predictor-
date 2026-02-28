@@ -1014,7 +1014,6 @@ def build_decision_compliance_graph(
             edge_type=EDGE_ANCHORED_BY,
             metadata={"provider": anchors["external_anchor_provider"]},
         )
-
     graph_payload = {
         "schema_name": "decision_evidence_graph",
         "schema_version": "v2",

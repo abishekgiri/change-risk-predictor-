@@ -1647,7 +1647,6 @@ def _migration_20260226_023_policy_lifecycle_state_machine(cursor) -> None:
         """
     )
 
-
 def _migration_20260228_024_external_root_anchors(cursor) -> None:
     cursor.execute(
         """
@@ -1694,8 +1693,6 @@ def _migration_20260228_024_external_root_anchors(cursor) -> None:
         END;
         """
     )
-
-
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
