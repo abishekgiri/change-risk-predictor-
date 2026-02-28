@@ -247,6 +247,7 @@ class CreateApiKeyRequest(BaseModel):
 
 class RotateCheckpointSigningKeyRequest(BaseModel):
     key: str = Field(min_length=16)
+    kms_key_id: Optional[str] = None
     tenant_id: Optional[str] = None
 
 
@@ -254,12 +255,32 @@ class RotateTenantSigningKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
     key_id: Optional[str] = None
     private_key: Optional[str] = None
+    kms_key_id: Optional[str] = None
+    signing_mode: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RevokeTenantSigningKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
     reason: Optional[str] = None
+
+
+class EmergencyRotateTenantKeyRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    reason: Optional[str] = None
+    compromise_start: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ForceRekeyTenantRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    reason: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResignCompromisedRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    limit: int = Field(default=200, ge=1, le=1000)
 
 
 class AnchorTickRequest(BaseModel):
@@ -1034,8 +1055,10 @@ def anchor_tick(
 @app.on_event("startup")
 def verify_ledger_on_startup():
     from releasegate.anchoring.anchor_scheduler import scheduler_status, start_anchor_scheduler
+    from releasegate.crypto.kms_client import ensure_kms_runtime_policy
     from releasegate.storage.schema import init_db
 
+    ensure_kms_runtime_policy()
     init_db()
     app.state.anchor_scheduler = start_anchor_scheduler()
     app.state.anchor_scheduler_status = scheduler_status()
@@ -2213,6 +2236,11 @@ def create_manual_override(
         },
     )
     if claim.state == "replay" and claim.response is not None:
+        if isinstance(claim.response, dict) and claim.response.get("_error_status_code"):
+            raise HTTPException(
+                status_code=int(claim.response.get("_error_status_code") or 400),
+                detail=claim.response.get("detail"),
+            )
         return claim.response
     if claim.state == "in_progress":
         replayed = wait_for_idempotency_response(
@@ -2997,6 +3025,7 @@ def rotate_checkpoint_key(
     rotated = rotate_checkpoint_signing_key(
         tenant_id=effective_tenant,
         raw_key=payload.key,
+        kms_key_id=payload.kms_key_id,
         created_by=auth.principal_id,
     )
     log_security_event(
@@ -3044,6 +3073,8 @@ def rotate_tenant_attestation_key(
             created_by=auth.principal_id,
             raw_private_key=payload.private_key,
             key_id=payload.key_id,
+            kms_key_id=payload.kms_key_id,
+            signing_mode=payload.signing_mode,
             metadata=payload.metadata,
         )
     except ValueError as exc:
@@ -3107,6 +3138,239 @@ def revoke_tenant_attestation_key(
         metadata={"reason": payload.reason or ""},
     )
     return revoked
+
+
+@app.get("/tenants/{tenant_id}/key-access-log")
+def list_tenant_key_access_log(
+    tenant_id: str,
+    key_id: Optional[str] = None,
+    operation: Optional[str] = None,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.security.key_access import list_key_access_logs
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    items = list_key_access_logs(
+        tenant_id=effective_tenant,
+        key_id=key_id,
+        operation=operation,
+        limit=limit,
+    )
+    return {
+        "tenant_id": effective_tenant,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@app.post("/tenants/{tenant_id}/emergency-rotate")
+def emergency_rotate_tenant_key_endpoint(
+    tenant_id: str,
+    payload: EmergencyRotateTenantKeyRequest,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.tenants.compromise import emergency_rotate_tenant_signing_key
+
+    requested_tenant = payload.tenant_id or tenant_id
+    if payload.tenant_id and str(payload.tenant_id).strip() != str(tenant_id).strip():
+        raise HTTPException(status_code=400, detail="tenant_id mismatch between path and payload")
+    effective_tenant = _effective_tenant(auth, requested_tenant)
+    operation = "tenant_emergency_rotate"
+    idem_key = (
+        str(idempotency_key or "").strip()
+        or derive_system_idempotency_key(
+            tenant_id=effective_tenant,
+            operation=operation,
+            identity={
+                "tenant_id": effective_tenant,
+                "reason": payload.reason,
+                "compromise_start": payload.compromise_start,
+                "principal_id": auth.principal_id,
+            },
+        )
+    )
+    claim = claim_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idem_key,
+        request_payload={
+            **payload.model_dump(mode="json"),
+            "tenant_id": effective_tenant,
+        },
+    )
+    def _replay_or_raise(replayed: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if replayed is None:
+            return None
+        if isinstance(replayed, dict) and replayed.get("_error_status_code"):
+            raise HTTPException(
+                status_code=int(replayed.get("_error_status_code") or 400),
+                detail=str(replayed.get("detail") or "Emergency rotate request failed"),
+            )
+        return replayed
+
+    if claim.state == "replay":
+        replayed = _replay_or_raise(claim.response)
+        if replayed is not None:
+            return replayed
+    if claim.state == "in_progress":
+        replayed = wait_for_idempotency_response(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        replayed = _replay_or_raise(replayed)
+        if replayed is not None:
+            return replayed
+        raise HTTPException(status_code=409, detail="Emergency rotate request is already in progress")
+    try:
+        report = emergency_rotate_tenant_signing_key(
+            tenant_id=effective_tenant,
+            actor_id=auth.principal_id,
+            reason=payload.reason,
+            compromise_start=payload.compromise_start,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        error_payload = {
+            "_error_status_code": 400,
+            "detail": str(exc),
+            "idempotency_key": idem_key,
+        }
+        complete_idempotency(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idem_key,
+            response_payload=error_payload,
+            resource_type="tenant_key_compromise_event",
+            resource_id="",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_signing_key_emergency_rotate",
+        target_type="tenant_signing_key",
+        target_id=str(report.get("replacement_key_id") or ""),
+        metadata={
+            "revoked_key_id": report.get("revoked_key_id"),
+            "event_id": report.get("event_id"),
+            "affected_count": report.get("affected_count"),
+        },
+    )
+    report = {
+        **report,
+        "idempotency_key": idem_key,
+    }
+    complete_idempotency(
+        tenant_id=effective_tenant,
+        operation=operation,
+        idem_key=idem_key,
+        response_payload=report,
+        resource_type="tenant_key_compromise_event",
+        resource_id=str(report.get("event_id") or ""),
+    )
+    return report
+
+
+@app.get("/tenants/{tenant_id}/compromise-report")
+def tenant_compromise_report_endpoint(
+    tenant_id: str,
+    limit: int = 20,
+    auth: AuthContext = require_access(
+        roles=["admin", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.tenants.compromise import build_compromise_report
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return build_compromise_report(
+        tenant_id=effective_tenant,
+        limit=max(1, min(limit, 500)),
+    )
+
+
+@app.post("/tenants/{tenant_id}/re-sign")
+def tenant_bulk_resign_endpoint(
+    tenant_id: str,
+    payload: Optional[ResignCompromisedRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.tenants.compromise import bulk_resign_compromised_attestations
+
+    req = payload or ResignCompromisedRequest()
+    requested_tenant = req.tenant_id or tenant_id
+    if req.tenant_id and str(req.tenant_id).strip() != str(tenant_id).strip():
+        raise HTTPException(status_code=400, detail="tenant_id mismatch between path and payload")
+    effective_tenant = _effective_tenant(auth, requested_tenant)
+    try:
+        result = bulk_resign_compromised_attestations(
+            tenant_id=effective_tenant,
+            actor_id=auth.principal_id,
+            limit=req.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_attestation_bulk_resign",
+        target_type="tenant",
+        target_id=effective_tenant,
+        metadata={"resigned_count": result.get("resigned_count")},
+    )
+    return result
+
+
+@app.post("/tenants/{tenant_id}/force-rekey")
+def force_rekey_tenant_endpoint(
+    tenant_id: str,
+    payload: Optional[ForceRekeyTenantRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.tenants.compromise import force_rekey_tenant
+
+    req = payload or ForceRekeyTenantRequest()
+    requested_tenant = req.tenant_id or tenant_id
+    if req.tenant_id and str(req.tenant_id).strip() != str(tenant_id).strip():
+        raise HTTPException(status_code=400, detail="tenant_id mismatch between path and payload")
+    effective_tenant = _effective_tenant(auth, requested_tenant)
+    rotated = force_rekey_tenant(
+        tenant_id=effective_tenant,
+        actor_id=auth.principal_id,
+        reason=req.reason,
+        metadata=req.metadata,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_signing_key_force_rekey",
+        target_type="tenant_signing_key",
+        target_id=str(rotated.get("key_id") or ""),
+    )
+    return rotated
 
 
 @app.post("/decisions/{decision_id}/replay")
@@ -3692,17 +3956,53 @@ def verify_release_attestation(
 ):
     from releasegate.attestation.crypto import load_public_keys_map
     from releasegate.attestation.verify import verify_attestation_payload
+    from releasegate.tenants.compromise import is_attestation_compromised
+    from releasegate.tenants.keys import KEY_STATUS_REVOKED, get_tenant_signing_public_keys_with_status
 
     attestation = payload.get("attestation") if isinstance(payload.get("attestation"), dict) else payload
     tenant_hint = str((attestation or {}).get("tenant_id") or payload.get("tenant_id") or "").strip() or None
+    public_keys = load_public_keys_map(tenant_id=tenant_hint, include_revoked=True)
     report = verify_attestation_payload(
         attestation,
-        public_keys_by_key_id=load_public_keys_map(tenant_id=tenant_hint),
+        public_keys_by_key_id=public_keys,
     )
+    key_id = str(report.get("key_id") or "").strip()
+    key_revoked = False
+    if tenant_hint and key_id:
+        try:
+            statuses = get_tenant_signing_public_keys_with_status(
+                tenant_id=tenant_hint,
+                include_verify_only=True,
+                include_revoked=True,
+            )
+            key_revoked = str((statuses.get(key_id) or {}).get("status") or "").upper() == KEY_STATUS_REVOKED
+        except Exception:
+            key_revoked = False
+    compromise = {"compromised": False, "event_id": None}
+    attestation_id = str((attestation or {}).get("attestation_id") or "").strip()
+    if not attestation_id and isinstance(attestation, dict):
+        signature_obj = attestation.get("signature") or {}
+        signed_payload_hash = str(signature_obj.get("signed_payload_hash") or "").strip().lower()
+        if ":" in signed_payload_hash:
+            algo, digest = signed_payload_hash.split(":", 1)
+            if algo.strip() == "sha256":
+                signed_payload_hash = digest.strip()
+        if len(signed_payload_hash) == 64 and all(ch in "0123456789abcdef" for ch in signed_payload_hash):
+            attestation_id = signed_payload_hash
+    if tenant_hint and attestation_id:
+        try:
+            compromise = is_attestation_compromised(tenant_id=tenant_hint, attestation_id=attestation_id)
+        except Exception:
+            compromise = {"compromised": False, "event_id": None}
+    report["key_revoked"] = bool(key_revoked)
+    report["compromised"] = bool(compromise.get("compromised"))
+    report["compromise_event_id"] = compromise.get("event_id")
+    report["signature_valid"] = bool(report.get("valid_signature"))
     report["ok"] = bool(
         report.get("schema_valid")
         and report.get("payload_hash_match")
         and report.get("trusted_issuer")
         and report.get("valid_signature")
     )
+    report["accepted"] = bool(report["ok"] and not report["key_revoked"] and not report["compromised"])
     return report

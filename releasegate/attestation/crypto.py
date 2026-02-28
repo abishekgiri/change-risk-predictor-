@@ -131,12 +131,14 @@ def parse_public_key(value: str) -> Ed25519PublicKey:
 def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519PrivateKey, str]:
     effective_tenant = str(tenant_id or "").strip()
     if effective_tenant:
-        try:
-            from releasegate.tenants.keys import get_active_tenant_signing_key_record
+        from releasegate.tenants.keys import get_active_tenant_signing_key_record
 
-            record = get_active_tenant_signing_key_record(effective_tenant)
-        except Exception:
-            record = None
+        record = get_active_tenant_signing_key_record(
+            effective_tenant,
+            actor="system:attestation",
+            purpose="attestation_signing",
+            access_operation="sign",
+        )
         if isinstance(record, dict):
             key_id = str(record.get("key_id") or "").strip()
             private_key = str(record.get("private_key") or "").strip()
