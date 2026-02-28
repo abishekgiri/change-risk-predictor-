@@ -991,6 +991,26 @@ def metrics_for_tenant(
     }
 
 
+@app.get("/internal/metrics/anchor")
+def anchor_metrics(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.metrics import get_anchor_health
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    report = get_anchor_health(tenant_id=effective_tenant)
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "anchor": report,
+    }
+
+
 @app.post("/internal/anchor/tick")
 def anchor_tick(
     payload: AnchorTickRequest,

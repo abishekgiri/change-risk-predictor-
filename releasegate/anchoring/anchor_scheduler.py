@@ -7,11 +7,13 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
+from releasegate.anchoring.alerts import send_anchor_alert
 from releasegate.anchoring.anchor_service import (
     ensure_due_anchor_job,
     list_scheduler_tenants,
     process_retryable_anchor_jobs,
 )
+from releasegate.anchoring.metrics import get_anchor_health
 from releasegate.config import is_anchoring_enabled
 from releasegate.storage import get_storage_backend
 
@@ -101,11 +103,26 @@ def tick(*, tenant_id: Optional[str] = None) -> Dict[str, Any]:
         for tenant in tenants:
             enqueue = ensure_due_anchor_job(tenant_id=tenant)
             processing = process_retryable_anchor_jobs(tenant_id=tenant, limit=job_batch_size)
+            health = get_anchor_health(tenant_id=tenant)
+            if not bool(health.get("is_healthy")):
+                reasons = list(health.get("reasons") or [])
+                send_anchor_alert(
+                    tenant_id=tenant,
+                    title="Anchor health check failed",
+                    body=", ".join(reasons) if reasons else "anchor health is unhealthy",
+                    metadata={
+                        "tenant_id": tenant,
+                        "enqueue_reason": enqueue.get("reason"),
+                        "processed_jobs": processing.get("processed"),
+                        "health": health,
+                    },
+                )
             report["tenants"].append(
                 {
                     "tenant_id": tenant,
                     "enqueue": enqueue,
                     "processing": processing,
+                    "health": health,
                 }
             )
         return report

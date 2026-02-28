@@ -22,6 +22,10 @@ from releasegate.anchoring.anchor_scheduler import (
     stop_anchor_scheduler,
     tick,
 )
+from releasegate.anchoring.metrics import (
+    get_anchor_health,
+    get_anchor_health_all,
+)
 
 __all__ = [
     "AnchorProvider",
@@ -42,4 +46,6 @@ __all__ = [
     "start_anchor_scheduler",
     "stop_anchor_scheduler",
     "scheduler_status",
+    "get_anchor_health",
+    "get_anchor_health_all",
 ]
