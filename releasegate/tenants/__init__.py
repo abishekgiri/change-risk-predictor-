@@ -15,6 +15,7 @@ from releasegate.tenants.compromise import (
     bulk_resign_compromised_attestations,
     emergency_rotate_tenant_signing_key,
     force_rekey_tenant,
+    get_latest_attestation_resignature,
     is_attestation_compromised,
     list_compromise_events,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "emergency_rotate_tenant_signing_key",
     "build_compromise_report",
     "list_compromise_events",
+    "get_latest_attestation_resignature",
     "bulk_resign_compromised_attestations",
     "force_rekey_tenant",
     "is_attestation_compromised",
