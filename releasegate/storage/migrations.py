@@ -2274,6 +2274,45 @@ def _migration_20260305_029_policy_rollout_and_simulation(cursor) -> None:
         """
     )
 
+
+def _migration_20260306_030_decision_transition_authority(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_transition_links (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            jira_issue_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            target_status TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            context_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed INTEGER NOT NULL DEFAULT 0,
+            consumed_at TEXT,
+            consumed_by_request_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_issue_transition
+        ON decision_transition_links(tenant_id, jira_issue_id, transition_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_expires
+        ON decision_transition_links(tenant_id, expires_at)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2419,6 +2458,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260305_029_policy_rollout_and_simulation",
         description="Add policy rollout control-plane records and policy simulation audit events.",
         apply=_migration_20260305_029_policy_rollout_and_simulation,
+    ),
+    Migration(
+        migration_id="20260306_030_decision_transition_authority",
+        description="Add decision linkage authority table for protected Jira transition authorization.",
+        apply=_migration_20260306_030_decision_transition_authority,
     ),
 ]
 

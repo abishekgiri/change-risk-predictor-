@@ -51,3 +51,45 @@ class TransitionCheckResponse(BaseModel):
     unlock_conditions: List[str] = Field(default_factory=list, description="Human readable unlock instructions")
     
     model_config = ConfigDict(extra="ignore")
+
+
+class TransitionAuthorizeRequest(BaseModel):
+    """
+    Authorization payload used by Jira protected-state validators.
+    """
+    issue_key: str = Field(..., description="Jira Issue Key e.g. PROJ-123")
+    transition_id: str = Field(
+        ...,
+        validation_alias=AliasChoices("transition_id", "transitionId"),
+        description="ID of the transition being attempted",
+    )
+    source_status: str = Field(..., description="Current status of the issue")
+    target_status: str = Field(..., description="Destination status of the issue")
+    actor_account_id: str = Field(..., description="Jira Account ID of the user initiating transition")
+    environment: Optional[str] = Field(None, description="Target environment (PRODUCTION, STAGING, etc.)")
+    project_key: Optional[str] = Field(None, description="Project Key e.g. PROJ")
+    tenant_id: Optional[str] = Field(None, description="Tenant/organization identity for multi-tenant isolation")
+    releasegate_decision_id: Optional[str] = Field(
+        None,
+        min_length=1,
+        description="Decision ID returned by /integrations/jira/transition/check",
+    )
+    request_id: Optional[str] = Field(
+        None,
+        description="Stable request identifier to make decision consumption idempotent",
+    )
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class TransitionAuthorizeResponse(BaseModel):
+    """
+    Authorization response consumed by Jira validators.
+    """
+    allow: bool = Field(..., description="Whether to allow the transition")
+    decision_id: Optional[str] = Field(None, description="Decision ID used for authorization")
+    reason_code: Optional[str] = Field(None, description="Machine-readable reason code")
+    message: Optional[str] = Field(None, description="Human-readable reason")
+    tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
+
+    model_config = ConfigDict(extra="ignore")
