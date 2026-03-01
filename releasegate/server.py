@@ -259,6 +259,32 @@ class PolicySimulateRequest(BaseModel):
     status_filter: str = "ACTIVE"
 
 
+class PolicySimulateHistoricalRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor: Optional[str] = None
+    policy_id: Optional[str] = None
+    policy_version: Optional[int] = None
+    policy_json: Optional[Dict[str, Any]] = None
+    time_window_days: int = 30
+    transition_id: Optional[str] = None
+    project_key: Optional[str] = None
+    workflow_id: Optional[str] = None
+    environment: Optional[str] = None
+    only_protected: bool = False
+    max_events: Optional[int] = None
+    top_n: int = 10
+
+
+class PolicyDiffImpactRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    current_policy_id: Optional[str] = None
+    current_policy_version: Optional[int] = None
+    current_policy_json: Optional[Dict[str, Any]] = None
+    candidate_policy_id: Optional[str] = None
+    candidate_policy_version: Optional[int] = None
+    candidate_policy_json: Optional[Dict[str, Any]] = None
+
+
 class PolicyConflictAnalyzeRequest(BaseModel):
     tenant_id: Optional[str] = None
     policy_id: Optional[str] = None
@@ -1875,6 +1901,98 @@ def simulate_policy_endpoint(
             "status": result.get("status"),
             "allow": result.get("allow"),
             "policy_version": payload.policy_version,
+        },
+    )
+    return result
+
+
+@app.post("/policies/simulate-historical")
+def simulate_historical_policy_endpoint(
+    payload: PolicySimulateHistoricalRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.policy.historical_simulation import simulate_historical_policy_impact
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = simulate_historical_policy_impact(
+            tenant_id=effective_tenant,
+            actor=payload.actor or auth.principal_id,
+            policy_id=payload.policy_id,
+            policy_version=payload.policy_version,
+            policy_json=payload.policy_json,
+            time_window_days=payload.time_window_days,
+            transition_id=payload.transition_id,
+            project_key=payload.project_key,
+            workflow_id=payload.workflow_id,
+            environment=payload.environment,
+            only_protected=payload.only_protected,
+            max_events=payload.max_events,
+            top_n=payload.top_n,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_simulate_historical",
+        target_type="policy_registry",
+        target_id=str(payload.policy_id or "candidate"),
+        metadata={
+            "simulation_id": result.get("simulation_id"),
+            "policy_version": payload.policy_version,
+            "time_window_days": payload.time_window_days,
+            "scanned_events": result.get("scanned_events"),
+            "simulated_events": result.get("simulated_events"),
+            "would_block_count": result.get("would_block_count"),
+            "override_delta": result.get("override_delta"),
+            "truncated": result.get("truncated"),
+        },
+    )
+    return result
+
+
+@app.post("/policies/diff-impact")
+def policy_diff_impact_endpoint(
+    payload: PolicyDiffImpactRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.diff_impact import build_policy_impact_diff
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = build_policy_impact_diff(
+            tenant_id=effective_tenant,
+            current_policy_id=payload.current_policy_id,
+            current_policy_version=payload.current_policy_version,
+            current_policy_json=payload.current_policy_json,
+            candidate_policy_id=payload.candidate_policy_id,
+            candidate_policy_version=payload.candidate_policy_version,
+            candidate_policy_json=payload.candidate_policy_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_diff_impact",
+        target_type="policy_registry",
+        target_id=str(payload.candidate_policy_id or "candidate"),
+        metadata={
+            "report_id": result.get("report_id"),
+            "overall": result.get("overall"),
+            "warning_count": ((result.get("summary") or {}).get("warning_count")),
+            "strengthening_count": ((result.get("summary") or {}).get("strengthening_count")),
         },
     )
     return result

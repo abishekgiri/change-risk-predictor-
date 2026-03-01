@@ -1,5 +1,8 @@
+import json
 import os
 import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -23,6 +26,66 @@ def _table_count(table_name: str) -> int:
     try:
         row = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
         return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+def _seed_historical_decision(
+    *,
+    tenant_id: str,
+    decision_id: str,
+    transition_id: str,
+    target_status: str,
+    release_status: str,
+    created_at: datetime,
+    policy_hash: str = "sha256:seed-policy",
+) -> None:
+    payload = {
+        "release_status": release_status,
+        "reason_code": "POLICY_ALLOWED" if release_status == "ALLOWED" else "POLICY_DENIED",
+        "input_snapshot": {
+            "request": {
+                "issue_key": f"{tenant_id}-ISSUE",
+                "transition_id": transition_id,
+                "actor_account_id": f"{tenant_id}-actor",
+                "source_status": "In Progress",
+                "target_status": target_status,
+                "environment": "prod",
+                "project_key": "PROJ",
+                "context_overrides": {"workflow_id": "wf-release"},
+            },
+            "signal_map": {"risk": {"score": 0.85}},
+        },
+    }
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO audit_decisions (
+                tenant_id, decision_id, context_id, repo, pr_number, release_status,
+                policy_bundle_hash, engine_version, decision_hash, input_hash, policy_hash,
+                replay_hash, full_decision_json, created_at, evaluation_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                decision_id,
+                f"ctx-{decision_id}",
+                "org/repo",
+                1,
+                release_status,
+                "bundle-1",
+                "engine-v1",
+                f"decision-{decision_id}",
+                f"input-{decision_id}",
+                policy_hash,
+                f"replay-{decision_id}",
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                created_at.isoformat(),
+                f"eval-{decision_id}",
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -562,3 +625,115 @@ def test_policy_conflict_analysis_endpoint_reports_contradictions():
     analysis = resp.json()["analysis"]
     assert analysis["summary"]["contradiction_count"] >= 1
     assert analysis["ok"] is False
+
+
+def test_policy_simulate_historical_endpoint_returns_impact_summary():
+    _reset_db()
+    tenant_id = "tenant-registry-api"
+    headers = jwt_headers(tenant_id=tenant_id, roles=["admin", "operator"], scopes=["policy:read"])
+    now = datetime.now(timezone.utc)
+
+    _seed_historical_decision(
+        tenant_id=tenant_id,
+        decision_id=f"dec-{uuid.uuid4()}",
+        transition_id="31",
+        target_status="Done",
+        release_status="ALLOWED",
+        created_at=now - timedelta(days=2),
+    )
+    _seed_historical_decision(
+        tenant_id=tenant_id,
+        decision_id=f"dec-{uuid.uuid4()}",
+        transition_id="31",
+        target_status="Done",
+        release_status="ALLOWED",
+        created_at=now - timedelta(days=3),
+    )
+    _seed_historical_decision(
+        tenant_id=tenant_id,
+        decision_id=f"dec-{uuid.uuid4()}",
+        transition_id="31",
+        target_status="Done",
+        release_status="BLOCKED",
+        created_at=now - timedelta(days=5),
+    )
+
+    resp = client.post(
+        "/policies/simulate-historical",
+        headers=headers,
+        json={
+            "tenant_id": tenant_id,
+            "time_window_days": 30,
+            "policy_json": {
+                "strict_fail_closed": True,
+                "transition_rules": [
+                    {
+                        "transition_id": "31",
+                        "environment": "prod",
+                        "result": "BLOCK",
+                        "priority": 100,
+                    }
+                ],
+            },
+            "transition_id": "31",
+            "project_key": "PROJ",
+            "workflow_id": "wf-release",
+            "environment": "prod",
+            "only_protected": True,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["enforced"] is False
+    assert payload["time_window_days"] == 30
+    assert payload["simulated_events"] == 3
+    assert payload["would_block_count"] == 2
+    assert payload["would_allow_count"] == 0
+    assert payload["override_delta"] == 2
+    assert payload["delta_breakdown"]["allow_to_deny"] == 2
+    assert payload["impacted_workflows"][0]["transition_id"] == "31"
+    assert payload["high_risk_clusters"][0]["count"] == 2
+
+
+def test_policy_diff_impact_endpoint_reports_weakening_changes():
+    _reset_db()
+    tenant_id = "tenant-registry-api"
+    headers = jwt_headers(tenant_id=tenant_id, roles=["admin", "operator"], scopes=["policy:read"])
+
+    current_policy = {
+        "strict_fail_closed": True,
+        "approval_requirements": {"min_approvals": 2, "required_roles": ["security", "em"]},
+        "protected_statuses": ["Done", "Released"],
+        "transition_rules": [
+            {"rule_id": "prod-block", "transition_id": "31", "environment": "prod", "result": "BLOCK", "priority": 100}
+        ],
+        "risk_thresholds": {"prod": {"max_score": 0.7}},
+    }
+    candidate_policy = {
+        "strict_fail_closed": False,
+        "approval_requirements": {"min_approvals": 1, "required_roles": ["security"]},
+        "protected_statuses": ["Released"],
+        "transition_rules": [
+            {"rule_id": "prod-block", "transition_id": "31", "environment": "prod", "result": "ALLOW", "priority": 100}
+        ],
+        "risk_thresholds": {"prod": {"max_score": 0.85}},
+    }
+
+    resp = client.post(
+        "/policies/diff-impact",
+        headers=headers,
+        json={
+            "tenant_id": tenant_id,
+            "current_policy_json": current_policy,
+            "candidate_policy_json": candidate_policy,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["overall"] == "WEAKENING"
+    warning_codes = {str(item.get("code")) for item in payload["warnings"]}
+    assert "WEAKEN_STRICT_FAIL_CLOSED" in warning_codes
+    assert "WEAKEN_APPROVAL_REQUIREMENT" in warning_codes
+    assert "WEAKEN_PROTECTED_STATUSES" in warning_codes
+    assert "WEAKEN_RISK_THRESHOLD" in warning_codes
+    assert "WEAKEN_RULE_RESULT" in warning_codes
