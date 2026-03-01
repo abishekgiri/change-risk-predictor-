@@ -45,6 +45,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260302_026_anchor_jobs" in migration_ids
         assert "20260303_027_kms_custody_and_compromise_playbook" in migration_ids
         assert "20260304_028_saas_operational_controls" in migration_ids
+        assert "20260305_029_policy_rollout_and_simulation" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -376,6 +377,65 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         pointers_pk = [row[1] for row in sorted((r for r in pointers_info if r[5] > 0), key=lambda r: r[5])]
         assert {"tenant_id", "policy_id", "target_env", "active_release_id"} <= pointers_cols
         assert pointers_pk == ["tenant_id", "policy_id", "target_env"]
+
+        cur.execute("PRAGMA table_info(policy_rollouts)")
+        rollouts_info = cur.fetchall()
+        rollouts_cols = {row[1] for row in rollouts_info}
+        rollouts_pk = [row[1] for row in sorted((r for r in rollouts_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "rollout_id",
+            "policy_id",
+            "target_env",
+            "from_release_id",
+            "to_release_id",
+            "mode",
+            "canary_percent",
+            "state",
+            "rollback_to_release_id",
+            "created_by",
+            "started_at",
+            "completed_at",
+            "updated_at",
+            "metadata_json",
+        } <= rollouts_cols
+        assert rollouts_pk == ["tenant_id", "rollout_id"]
+
+        cur.execute("PRAGMA table_info(policy_rollout_events)")
+        rollout_events_info = cur.fetchall()
+        rollout_events_cols = {row[1] for row in rollout_events_info}
+        rollout_events_pk = [row[1] for row in sorted((r for r in rollout_events_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "event_id",
+            "rollout_id",
+            "event_type",
+            "actor_id",
+            "metadata_json",
+            "created_at",
+        } <= rollout_events_cols
+        assert rollout_events_pk == ["tenant_id", "event_id"]
+
+        cur.execute("PRAGMA table_info(policy_simulation_events)")
+        simulation_info = cur.fetchall()
+        simulation_cols = {row[1] for row in simulation_info}
+        simulation_pk = [row[1] for row in sorted((r for r in simulation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "simulation_id",
+            "actor_id",
+            "policy_id",
+            "policy_version",
+            "policy_hash",
+            "environment",
+            "input_hash",
+            "result_status",
+            "allow",
+            "reason_codes_json",
+            "summary_json",
+            "created_at",
+        } <= simulation_cols
+        assert simulation_pk == ["tenant_id", "simulation_id"]
 
         cur.execute("PRAGMA table_info(audit_lock_checkpoints)")
         lock_cp_info = cur.fetchall()

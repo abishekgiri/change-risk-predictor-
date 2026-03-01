@@ -184,6 +184,27 @@ class PolicyReleaseRollbackRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class PolicyRolloutCreateRequest(BaseModel):
+    policy_id: str
+    target_env: str
+    to_release_id: str
+    mode: str = "full"
+    canary_percent: Optional[int] = None
+    tenant_id: Optional[str] = None
+    created_by: Optional[str] = None
+
+
+class PolicyRolloutPromoteRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+
+
+class PolicyRolloutRollbackRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+    rollback_to_release_id: Optional[str] = None
+
+
 class PolicyRegistryCreateRequest(BaseModel):
     scope_type: str
     scope_id: str
@@ -221,6 +242,27 @@ class SimulateDecisionRequest(BaseModel):
     policy_id: Optional[str] = None
     status_filter: str = "ACTIVE"
     tenant_id: Optional[str] = None
+
+
+class PolicySimulateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor: Optional[str] = None
+    issue_key: Optional[str] = None
+    transition_id: str
+    project_id: Optional[str] = None
+    workflow_id: Optional[str] = None
+    environment: Optional[str] = None
+    context: Dict[str, Any] = Field(default_factory=dict)
+    policy_id: Optional[str] = None
+    policy_version: Optional[int] = None
+    policy_json: Optional[Dict[str, Any]] = None
+    status_filter: str = "ACTIVE"
+
+
+class PolicyConflictAnalyzeRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    policy_id: Optional[str] = None
+    policy_json: Optional[Dict[str, Any]] = None
 
 
 class DeployGateCheckRequest(BaseModel):
@@ -1792,6 +1834,52 @@ def simulate_policy_impact(
         raise HTTPException(status_code=400, detail=f"Policy simulation failed: {exc}") from exc
 
 
+@app.post("/policies/simulate")
+def simulate_policy_endpoint(
+    payload: PolicySimulateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.policy.simulate_service import simulate_policy_decision
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = simulate_policy_decision(
+            tenant_id=effective_tenant,
+            actor=payload.actor or auth.principal_id,
+            issue_key=payload.issue_key,
+            transition_id=payload.transition_id,
+            project_id=payload.project_id,
+            workflow_id=payload.workflow_id,
+            environment=payload.environment,
+            context=payload.context,
+            policy_id=payload.policy_id,
+            policy_version=payload.policy_version,
+            policy_json=payload.policy_json,
+            status_filter=payload.status_filter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_simulate",
+        target_type="policy_registry",
+        target_id=str(payload.policy_id or "resolved"),
+        metadata={
+            "simulation_id": result.get("simulation_id"),
+            "status": result.get("status"),
+            "allow": result.get("allow"),
+            "policy_version": payload.policy_version,
+        },
+    )
+    return result
+
+
 @app.post("/simulate-decision")
 def simulate_decision_endpoint(
     payload: SimulateDecisionRequest,
@@ -2639,6 +2727,68 @@ def get_registry_policy_endpoint(
     return policy
 
 
+@app.get("/policies/{policy_id}/conflicts")
+def analyze_registry_policy_conflicts_endpoint(
+    policy_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.conflict_engine import analyze_policy_conflicts
+    from releasegate.policy.registry import get_registry_policy
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    policy = get_registry_policy(tenant_id=effective_tenant, policy_id=policy_id)
+    if not policy:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    policy_json = policy.get("policy_json") if isinstance(policy.get("policy_json"), dict) else {}
+    analysis = analyze_policy_conflicts(policy_json)
+    return {
+        "tenant_id": effective_tenant,
+        "policy_id": policy_id,
+        "policy_hash": policy.get("policy_hash"),
+        "analysis": analysis,
+    }
+
+
+@app.post("/policies/conflicts/analyze")
+def analyze_policy_conflicts_endpoint(
+    payload: PolicyConflictAnalyzeRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.conflict_engine import analyze_policy_conflicts
+    from releasegate.policy.registry import get_registry_policy
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    policy_json = payload.policy_json if isinstance(payload.policy_json, dict) else None
+    policy_hash = None
+    policy_id = payload.policy_id
+
+    if policy_json is None:
+        if not policy_id:
+            raise HTTPException(status_code=400, detail="policy_id or policy_json is required")
+        policy = get_registry_policy(tenant_id=effective_tenant, policy_id=policy_id)
+        if not policy:
+            raise HTTPException(status_code=404, detail="Policy not found")
+        policy_json = policy.get("policy_json") if isinstance(policy.get("policy_json"), dict) else {}
+        policy_hash = policy.get("policy_hash")
+
+    analysis = analyze_policy_conflicts(policy_json)
+    return {
+        "tenant_id": effective_tenant,
+        "policy_id": policy_id,
+        "policy_hash": policy_hash,
+        "analysis": analysis,
+    }
+
+
 @app.get("/policies/{policy_id}/events")
 def list_registry_policy_events_endpoint(
     policy_id: str,
@@ -3034,6 +3184,7 @@ def run_policy_release_scheduler_endpoint(
 def get_active_policy_release_endpoint(
     policy_id: str,
     target_env: str,
+    rollout_key: Optional[str] = None,
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -3041,17 +3192,184 @@ def get_active_policy_release_endpoint(
         rate_profile="default",
     ),
 ):
-    from releasegate.policy.releases import get_active_policy_release
+    from releasegate.rollout.rollout_service import resolve_effective_policy_release
 
     effective_tenant = _effective_tenant(auth, tenant_id)
-    payload = get_active_policy_release(
+    payload = resolve_effective_policy_release(
         tenant_id=effective_tenant,
         policy_id=policy_id,
         target_env=target_env,
+        rollout_key=rollout_key,
     )
     if not payload:
         raise HTTPException(status_code=404, detail="Active policy release not found")
     return payload
+
+
+@app.post("/policy/rollouts")
+def create_policy_rollout_endpoint(
+    payload: PolicyRolloutCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.rollout.rollout_service import create_policy_rollout
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        created = create_policy_rollout(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+            target_env=payload.target_env,
+            to_release_id=payload.to_release_id,
+            mode=payload.mode,
+            canary_percent=payload.canary_percent,
+            created_by=payload.created_by or auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_rollout_create",
+        target_type="policy_rollout",
+        target_id=created.get("rollout_id"),
+        metadata={
+            "policy_id": created.get("policy_id"),
+            "target_env": created.get("target_env"),
+            "mode": created.get("mode"),
+            "state": created.get("state"),
+            "canary_percent": created.get("canary_percent"),
+        },
+    )
+    return created
+
+
+@app.post("/policy/rollouts/{rollout_id}/promote")
+def promote_policy_rollout_endpoint(
+    rollout_id: str,
+    payload: Optional[PolicyRolloutPromoteRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.rollout.rollout_service import promote_policy_rollout
+
+    promote_payload = payload or PolicyRolloutPromoteRequest()
+    effective_tenant = _effective_tenant(auth, promote_payload.tenant_id)
+    try:
+        promoted = promote_policy_rollout(
+            tenant_id=effective_tenant,
+            rollout_id=rollout_id,
+            actor_id=promote_payload.actor_id or auth.principal_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_rollout_promote",
+        target_type="policy_rollout",
+        target_id=rollout_id,
+        metadata={"policy_id": promoted.get("policy_id"), "target_env": promoted.get("target_env")},
+    )
+    return promoted
+
+
+@app.post("/policy/rollouts/{rollout_id}/rollback")
+def rollback_policy_rollout_control_endpoint(
+    rollout_id: str,
+    payload: Optional[PolicyRolloutRollbackRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.rollout.rollout_service import rollback_policy_rollout
+
+    rollback_payload = payload or PolicyRolloutRollbackRequest()
+    effective_tenant = _effective_tenant(auth, rollback_payload.tenant_id)
+    try:
+        rolled_back = rollback_policy_rollout(
+            tenant_id=effective_tenant,
+            rollout_id=rollout_id,
+            actor_id=rollback_payload.actor_id or auth.principal_id,
+            rollback_to_release_id=rollback_payload.rollback_to_release_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status_code, detail=message) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_rollout_rollback",
+        target_type="policy_rollout",
+        target_id=rollout_id,
+        metadata={
+            "policy_id": rolled_back.get("policy_id"),
+            "target_env": rolled_back.get("target_env"),
+            "rollback_to_release_id": rolled_back.get("rollback_to_release_id"),
+        },
+    )
+    return rolled_back
+
+
+@app.get("/policy/rollouts/{rollout_id}")
+def get_policy_rollout_endpoint(
+    rollout_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.rollout.rollout_service import get_policy_rollout
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_policy_rollout(tenant_id=effective_tenant, rollout_id=rollout_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Policy rollout not found")
+    return payload
+
+
+@app.get("/policy/rollouts")
+def list_policy_rollouts_endpoint(
+    policy_id: Optional[str] = None,
+    target_env: Optional[str] = None,
+    state: Optional[str] = None,
+    limit: int = 50,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.rollout.rollout_service import list_policy_rollouts
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "items": list_policy_rollouts(
+            tenant_id=effective_tenant,
+            policy_id=policy_id,
+            target_env=target_env,
+            state=state,
+            limit=max(1, min(limit, 500)),
+        ),
+    }
 
 
 @app.post("/auth/api-keys")

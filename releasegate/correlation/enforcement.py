@@ -22,7 +22,7 @@ from releasegate.governance.signal_freshness import (
 )
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
-from releasegate.policy.releases import get_active_policy_release
+from releasegate.rollout.rollout_service import resolve_effective_policy_release
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.canonical import sha256_json
 
@@ -513,10 +513,11 @@ def evaluate_deploy_gate(
         return denied.to_dict()
 
     try:
-        active_release = get_active_policy_release(
+        active_release = resolve_effective_policy_release(
             tenant_id=effective_tenant,
             policy_id="releasegate.default",
             target_env=normalized_env,
+            rollout_key=str(correlation_id or issue_key or deploy_id or commit_sha or ""),
         )
     except TimeoutError:
         strict_result = apply_strict_fail_closed(

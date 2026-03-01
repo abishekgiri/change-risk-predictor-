@@ -2148,6 +2148,132 @@ def _migration_20260304_028_saas_operational_controls(cursor) -> None:
         """
     )
 
+
+def _migration_20260305_029_policy_rollout_and_simulation(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollouts (
+            tenant_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            from_release_id TEXT,
+            to_release_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'FULL',
+            canary_percent INTEGER NOT NULL DEFAULT 100,
+            state TEXT NOT NULL DEFAULT 'PLANNED',
+            rollback_to_release_id TEXT,
+            created_by TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, rollout_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollouts_tenant_policy_env_state
+        ON policy_rollouts(tenant_id, policy_id, target_env, state, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_rollouts_running_scope
+        ON policy_rollouts(tenant_id, policy_id, target_env)
+        WHERE state = 'RUNNING'
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollout_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_tenant_rollout_created
+        ON policy_rollout_events(tenant_id, rollout_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_rollout_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_rollout_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_rollout_events_update
+        BEFORE UPDATE ON policy_rollout_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy rollout events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_rollout_events_delete
+        BEFORE DELETE ON policy_rollout_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy rollout events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_simulation_events (
+            tenant_id TEXT NOT NULL,
+            simulation_id TEXT NOT NULL,
+            actor_id TEXT,
+            policy_id TEXT,
+            policy_version INTEGER,
+            policy_hash TEXT,
+            environment TEXT,
+            input_hash TEXT,
+            result_status TEXT NOT NULL,
+            allow INTEGER NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, simulation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_simulation_events_tenant_created
+        ON policy_simulation_events(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_simulation_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_simulation_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_simulation_events_update
+        BEFORE UPDATE ON policy_simulation_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy simulation events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_simulation_events_delete
+        BEFORE DELETE ON policy_simulation_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy simulation events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2288,6 +2414,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260304_028_saas_operational_controls",
         description="Add tenant quotas, usage counters, and tenant security state/anomaly append-only ledgers.",
         apply=_migration_20260304_028_saas_operational_controls,
+    ),
+    Migration(
+        migration_id="20260305_029_policy_rollout_and_simulation",
+        description="Add policy rollout control-plane records and policy simulation audit events.",
+        apply=_migration_20260305_029_policy_rollout_and_simulation,
     ),
 ]
 
