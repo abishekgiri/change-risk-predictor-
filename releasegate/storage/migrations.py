@@ -2012,6 +2012,142 @@ def _migration_20260303_027_kms_custody_and_compromise_playbook(cursor) -> None:
         """
     )
 
+
+def _migration_20260304_028_saas_operational_controls(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_governance_settings (
+            tenant_id TEXT PRIMARY KEY,
+            max_decisions_per_month INTEGER,
+            max_anchors_per_day INTEGER,
+            max_overrides_per_month INTEGER,
+            quota_enforcement_mode TEXT NOT NULL DEFAULT 'HARD',
+            security_state TEXT NOT NULL DEFAULT 'normal',
+            security_reason TEXT,
+            security_since TEXT,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_governance_settings_security_state
+        ON tenant_governance_settings(security_state, updated_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_usage_counters (
+            tenant_id TEXT NOT NULL,
+            period_type TEXT NOT NULL,
+            period_start TEXT NOT NULL,
+            decisions_count INTEGER NOT NULL DEFAULT 0,
+            anchors_count INTEGER NOT NULL DEFAULT 0,
+            overrides_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, period_type, period_start)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_tenant_updated
+        ON tenant_usage_counters(tenant_id, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_period
+        ON tenant_usage_counters(period_type, period_start)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_anomaly_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            operation TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_anomaly_events_signal_created
+        ON tenant_security_anomaly_events(tenant_id, signal_type, created_at DESC)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_state_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state TEXT NOT NULL,
+            reason TEXT,
+            source TEXT,
+            actor TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_state_events_created
+        ON tenant_security_state_events(tenant_id, created_at DESC)
+        """
+    )
+
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_anomaly_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_anomaly_events_delete")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_state_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_state_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_anomaly_events_update
+        BEFORE UPDATE ON tenant_security_anomaly_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security anomaly events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_anomaly_events_delete
+        BEFORE DELETE ON tenant_security_anomaly_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security anomaly events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_state_events_update
+        BEFORE UPDATE ON tenant_security_state_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security state events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_state_events_delete
+        BEFORE DELETE ON tenant_security_state_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security state events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2147,6 +2283,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260303_027_kms_custody_and_compromise_playbook",
         description="Add KMS envelope key custody fields, key access audit trail, and emergency compromise response tables.",
         apply=_migration_20260303_027_kms_custody_and_compromise_playbook,
+    ),
+    Migration(
+        migration_id="20260304_028_saas_operational_controls",
+        description="Add tenant quotas, usage counters, and tenant security state/anomaly append-only ledgers.",
+        apply=_migration_20260304_028_saas_operational_controls,
     ),
 ]
 

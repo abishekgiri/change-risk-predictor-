@@ -397,6 +397,67 @@ class WorkflowGate:
                     tenant_id=tenant_id,
                 )
 
+            try:
+                from releasegate.quota import QUOTA_KIND_OVERRIDES, TenantQuotaExceededError, consume_tenant_quota
+
+                consume_tenant_quota(
+                    tenant_id=tenant_id,
+                    quota_kind=QUOTA_KIND_OVERRIDES,
+                    amount=1,
+                )
+            except TenantQuotaExceededError as exc:
+                try:
+                    from releasegate.security.anomaly_detector import record_anomaly_event
+
+                    record_anomaly_event(
+                        tenant_id=tenant_id,
+                        signal_type="quota_bypass_attempt",
+                        operation="jira_override",
+                        details=exc.to_http_detail(),
+                        actor=request.actor_account_id or request.actor_email,
+                    )
+                except Exception:
+                    pass
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: tenant override quota exceeded",
+                    evaluation_key=f"{evaluation_key}:override-quota-exceeded",
+                    unlock_conditions=["Increase tenant override quota or wait for monthly reset."],
+                    reason_code="TENANT_QUOTA_EXCEEDED",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = self._record_with_timeout(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    dependency_context="storage",
+                )
+                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
+                self._log_decision(
+                    event="jira.transition.override.quota_exceeded",
+                    request=request,
+                    decision=final_blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    mode=strict_mode,
+                    gate=self._resolved_gate_hint,
+                )
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
+                )
+
             decision = self._build_decision(
                 request,
                 release_status=DecisionType.ALLOWED,

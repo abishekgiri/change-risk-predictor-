@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from releasegate.anchoring.provider import AnchorProviderError, anchor_root, verify_root_anchor_receipt
 from releasegate.audit.transparency import get_or_compute_transparency_root
 from releasegate.config import get_anchor_provider_name
+from releasegate.quota import QUOTA_KIND_ANCHORS, consume_tenant_quota
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -188,6 +189,12 @@ def record_root_anchor(
     )
     if existing:
         return existing
+
+    consume_tenant_quota(
+        tenant_id=effective_tenant,
+        quota_kind=QUOTA_KIND_ANCHORS,
+        amount=1,
+    )
 
     anchor_id = _anchor_id(
         tenant_id=effective_tenant,

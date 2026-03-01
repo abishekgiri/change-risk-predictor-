@@ -37,6 +37,7 @@ from releasegate.tenants.keys import (
 from releasegate.integrations.jira.routes import router as jira_router
 from releasegate.security.types import AuthContext
 from releasegate.audit.idempotency import (
+    cancel_idempotency_claim,
     claim_idempotency,
     complete_idempotency,
     derive_system_idempotency_key,
@@ -50,6 +51,15 @@ from releasegate.decision.hashing import (
 )
 from releasegate.attestation.engine import AttestationEngine
 from releasegate.attestation.key_manager import AttestationKeyManager
+from releasegate.quota import (
+    QUOTA_KIND_OVERRIDES,
+    TenantQuotaExceededError,
+    consume_tenant_quota,
+    get_tenant_governance_metrics,
+    get_tenant_governance_settings,
+    update_tenant_governance_settings,
+)
+from releasegate.security.anomaly_detector import record_anomaly_event
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
@@ -281,6 +291,19 @@ class ForceRekeyTenantRequest(BaseModel):
 class ResignCompromisedRequest(BaseModel):
     tenant_id: Optional[str] = None
     limit: int = Field(default=200, ge=1, le=1000)
+
+
+class TenantGovernanceSettingsRequest(BaseModel):
+    max_decisions_per_month: Optional[int] = Field(default=None, ge=0)
+    max_anchors_per_day: Optional[int] = Field(default=None, ge=0)
+    max_overrides_per_month: Optional[int] = Field(default=None, ge=0)
+    quota_enforcement_mode: str = "HARD"
+
+
+class TenantUnlockRequest(BaseModel):
+    reason: Optional[str] = None
+
+
 class AnchorTickRequest(BaseModel):
     tenant_id: Optional[str] = None
 
@@ -842,6 +865,18 @@ def anchor_transparency_root_endpoint(
             tenant_id=effective_tenant,
             provider_name=provider,
         )
+    except TenantQuotaExceededError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="quota_bypass_attempt",
+                operation="anchor_transparency_root",
+                details=exc.to_http_detail(),
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=429, detail=exc.to_http_detail()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -2184,6 +2219,19 @@ def create_manual_override(
     )
     if not validation.allowed:
         status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="failed_override_attempt",
+                operation="manual_override_create",
+                details={
+                    "reason_code": validation.reason_code,
+                    "status_code": status_code,
+                },
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status_code,
             detail={
@@ -2219,6 +2267,20 @@ def create_manual_override(
     if sod_violation:
         reason_code = str(sod_violation.get("reason_code") or "SOD_CONFLICT")
         message = str(sod_violation.get("message") or "separation-of-duties violation")
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="failed_override_attempt",
+                operation="manual_override_create",
+                details={
+                    "reason_code": reason_code,
+                    "status_code": 403,
+                    "sod_rule": sod_violation.get("rule"),
+                },
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=403,
             detail={
@@ -2274,6 +2336,20 @@ def create_manual_override(
             and str(existing.get("decision_id") or "") == str(payload.decision_id or "")
         )
         if not same_payload:
+            try:
+                record_anomaly_event(
+                    tenant_id=effective_tenant,
+                    signal_type="failed_override_attempt",
+                    operation="manual_override_create",
+                    details={
+                        "reason_code": "ACTIVE_OVERRIDE_EXISTS",
+                        "status_code": 409,
+                        "target_type": effective_target_type,
+                    },
+                    actor=auth.principal_id,
+                )
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=409,
                 detail="Active override already exists for this target",
@@ -2297,6 +2373,30 @@ def create_manual_override(
             resource_id=str(response_payload.get("override_id") or ""),
         )
         return response_payload
+
+    try:
+        consume_tenant_quota(
+            tenant_id=effective_tenant,
+            quota_kind=QUOTA_KIND_OVERRIDES,
+            amount=1,
+        )
+    except TenantQuotaExceededError as exc:
+        cancel_idempotency_claim(
+            tenant_id=effective_tenant,
+            operation=operation,
+            idem_key=idempotency_key,
+        )
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="quota_bypass_attempt",
+                operation=operation,
+                details=exc.to_http_detail(),
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=429, detail=exc.to_http_detail()) from exc
 
     override = record_override(
         repo=payload.repo,
@@ -2436,6 +2536,21 @@ def create_registry_policy_endpoint(
             created_by=payload.created_by or auth.principal_id,
         )
     except PolicyConflictError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_create",
+                details={
+                    "error_code": exc.code,
+                    "scope_type": exc.scope_type,
+                    "scope_id": exc.scope_id,
+                    "stage": exc.stage,
+                },
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=400,
             detail={
@@ -2447,6 +2562,16 @@ def create_registry_policy_endpoint(
             },
         ) from exc
     except ValueError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_create",
+                details={"error": str(exc)},
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log_security_event(
         tenant_id=effective_tenant,
@@ -2560,6 +2685,21 @@ def activate_registry_policy_endpoint(
             actor_id=activate_payload.actor_id or auth.principal_id,
         )
     except PolicyConflictError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_activate",
+                details={
+                    "error_code": exc.code,
+                    "scope_type": exc.scope_type,
+                    "scope_id": exc.scope_id,
+                    "stage": exc.stage,
+                },
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=400,
             detail={
@@ -2571,6 +2711,16 @@ def activate_registry_policy_endpoint(
             },
         ) from exc
     except ValueError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_activate",
+                details={"error": str(exc)},
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         message = str(exc)
         status_code = 404 if "not found" in message.lower() else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
@@ -2607,6 +2757,21 @@ def stage_registry_policy_endpoint(
             actor_id=stage_payload.actor_id or auth.principal_id,
         )
     except PolicyConflictError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_stage",
+                details={
+                    "error_code": exc.code,
+                    "scope_type": exc.scope_type,
+                    "scope_id": exc.scope_id,
+                    "stage": exc.stage,
+                },
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=400,
             detail={
@@ -2618,6 +2783,16 @@ def stage_registry_policy_endpoint(
             },
         ) from exc
     except ValueError as exc:
+        try:
+            record_anomaly_event(
+                tenant_id=effective_tenant,
+                signal_type="policy_tamper_attempt",
+                operation="policy_registry_stage",
+                details={"error": str(exc)},
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
         message = str(exc)
         status_code = 404 if "not found" in message.lower() else 400
         raise HTTPException(status_code=status_code, detail=message) from exc
@@ -3172,6 +3347,103 @@ def list_tenant_key_access_log(
         "count": len(items),
         "items": items,
     }
+
+
+@app.get("/tenants/{tenant_id}/governance-settings")
+def get_tenant_governance_settings_endpoint(
+    tenant_id: str,
+    auth: AuthContext = require_access(
+        roles=["admin", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return get_tenant_governance_settings(tenant_id=effective_tenant)
+
+
+@app.put("/tenants/{tenant_id}/governance-settings")
+def update_tenant_governance_settings_endpoint(
+    tenant_id: str,
+    payload: TenantGovernanceSettingsRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    updated = update_tenant_governance_settings(
+        tenant_id=effective_tenant,
+        max_decisions_per_month=payload.max_decisions_per_month,
+        max_anchors_per_day=payload.max_anchors_per_day,
+        max_overrides_per_month=payload.max_overrides_per_month,
+        quota_enforcement_mode=payload.quota_enforcement_mode,
+        updated_by=auth.principal_id,
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_governance_settings_update",
+        target_type="tenant_governance_settings",
+        target_id=effective_tenant,
+        metadata={
+            "max_decisions_per_month": updated.get("max_decisions_per_month"),
+            "max_anchors_per_day": updated.get("max_anchors_per_day"),
+            "max_overrides_per_month": updated.get("max_overrides_per_month"),
+            "quota_enforcement_mode": updated.get("quota_enforcement_mode"),
+        },
+    )
+    return updated
+
+
+@app.post("/tenants/{tenant_id}/unlock")
+def unlock_tenant_endpoint(
+    tenant_id: str,
+    payload: Optional[TenantUnlockRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="default",
+        allow_locked=True,
+    ),
+):
+    from releasegate.security.security_state_service import set_tenant_security_state
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    req = payload or TenantUnlockRequest()
+    result = set_tenant_security_state(
+        tenant_id=effective_tenant,
+        to_state="normal",
+        reason=req.reason or "manual_unlock",
+        source="admin_unlock_endpoint",
+        actor=auth.principal_id,
+        metadata={"path": "/tenants/{tenant_id}/unlock"},
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="tenant_unlock",
+        target_type="tenant_security_state",
+        target_id=effective_tenant,
+        metadata={"reason": req.reason or "manual_unlock"},
+    )
+    return result
+
+
+@app.get("/tenants/{tenant_id}/governance-metrics")
+def tenant_governance_metrics_endpoint(
+    tenant_id: str,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return get_tenant_governance_metrics(tenant_id=effective_tenant)
 
 
 @app.post("/tenants/{tenant_id}/emergency-rotate")
@@ -4068,4 +4340,19 @@ def verify_release_attestation(
     report["superseding_key_revoked"] = bool(superseding_key_revoked)
     report["superseding_accepted"] = bool(superseding_accepted)
     report["accepted_effective"] = bool(report["accepted"] or superseding_accepted)
+    if tenant_hint and not report["signature_valid"]:
+        try:
+            record_anomaly_event(
+                tenant_id=tenant_hint,
+                signal_type="signature_verification_failed",
+                operation="verify_attestation",
+                details={
+                    "key_id": report.get("key_id"),
+                    "schema_valid": bool(report.get("schema_valid")),
+                    "payload_hash_match": bool(report.get("payload_hash_match")),
+                    "trusted_issuer": bool(report.get("trusted_issuer")),
+                },
+            )
+        except Exception:
+            pass
     return report

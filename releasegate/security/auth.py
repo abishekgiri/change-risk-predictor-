@@ -309,6 +309,21 @@ def _consume_nonce(
             ),
         )
     except Exception as exc:
+        try:
+            from releasegate.security.anomaly_detector import record_anomaly_event
+
+            record_anomaly_event(
+                tenant_id=tenant_id,
+                signal_type="replay_nonce_abuse",
+                operation="webhook_nonce_replay",
+                details={
+                    "integration_id": integration_id,
+                    "key_id": key_id,
+                    "nonce_prefix": nonce[:8],
+                },
+            )
+        except Exception:
+            pass
         raise _auth_error(401, "AUTH_SIGNATURE_REPLAY", "Webhook signature replay detected") from exc
 
 
@@ -513,6 +528,7 @@ def require_access(
     allow_signature: bool = False,
     allow_internal_service: bool = False,
     rate_profile: str = "default",
+    allow_locked: bool = False,
 ):
     async def _dependency(request: Request) -> AuthContext:
         ip = _request_ip(request)
@@ -533,6 +549,14 @@ def require_access(
 
         if not getattr(request.state, "pre_tenant_rate_limited", False):
             enforce_tenant_rate_limit(tenant_id=auth.tenant_id, profile=rate_profile)
+
+        if not allow_locked and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            from releasegate.security.security_state_service import enforce_tenant_operation_allowed
+
+            enforce_tenant_operation_allowed(
+                tenant_id=auth.tenant_id,
+                operation=f"{request.method.upper()} {request.url.path}",
+            )
 
         request.state.auth_context = auth
         return auth

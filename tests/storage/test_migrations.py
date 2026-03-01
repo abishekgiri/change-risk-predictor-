@@ -44,6 +44,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260301_025_tenant_signing_key_lifecycle" in migration_ids
         assert "20260302_026_anchor_jobs" in migration_ids
         assert "20260303_027_kms_custody_and_compromise_playbook" in migration_ids
+        assert "20260304_028_saas_operational_controls" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -166,6 +167,63 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= key_access_cols
         assert key_access_pk == ["tenant_id", "access_id"]
+
+        cur.execute("PRAGMA table_info(tenant_governance_settings)")
+        governance_info = cur.fetchall()
+        governance_cols = {row[1] for row in governance_info}
+        governance_pk = [row[1] for row in sorted((r for r in governance_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "max_decisions_per_month",
+            "max_anchors_per_day",
+            "max_overrides_per_month",
+            "quota_enforcement_mode",
+            "security_state",
+            "security_reason",
+            "security_since",
+            "updated_at",
+            "updated_by",
+        } <= governance_cols
+        assert governance_pk == ["tenant_id"]
+
+        cur.execute("PRAGMA table_info(tenant_usage_counters)")
+        usage_info = cur.fetchall()
+        usage_cols = {row[1] for row in usage_info}
+        usage_pk = [row[1] for row in sorted((r for r in usage_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "period_type",
+            "period_start",
+            "decisions_count",
+            "anchors_count",
+            "overrides_count",
+            "updated_at",
+        } <= usage_cols
+        assert usage_pk == ["tenant_id", "period_type", "period_start"]
+
+        cur.execute("PRAGMA table_info(tenant_security_anomaly_events)")
+        anomaly_info = cur.fetchall()
+        anomaly_cols = {row[1] for row in anomaly_info}
+        anomaly_pk = [row[1] for row in sorted((r for r in anomaly_info if r[5] > 0), key=lambda r: r[5])]
+        assert {"tenant_id", "event_id", "signal_type", "operation", "details_json", "created_at"} <= anomaly_cols
+        assert anomaly_pk == ["tenant_id", "event_id"]
+
+        cur.execute("PRAGMA table_info(tenant_security_state_events)")
+        state_event_info = cur.fetchall()
+        state_event_cols = {row[1] for row in state_event_info}
+        state_event_pk = [row[1] for row in sorted((r for r in state_event_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "event_id",
+            "from_state",
+            "to_state",
+            "reason",
+            "source",
+            "actor",
+            "metadata_json",
+            "created_at",
+        } <= state_event_cols
+        assert state_event_pk == ["tenant_id", "event_id"]
 
         cur.execute("PRAGMA table_info(tenant_key_compromise_events)")
         compromise_info = cur.fetchall()
