@@ -10,6 +10,7 @@ from releasegate.integrations.jira.lock_store import (
     expire_override_if_needed,
 )
 from releasegate.audit.idempotency import (
+    cancel_idempotency_claim,
     claim_idempotency,
     complete_idempotency,
     derive_system_idempotency_key,
@@ -23,7 +24,9 @@ from releasegate.integrations.jira.override_validation import (
     validate_override_request,
 )
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
+from releasegate.quota import QUOTA_KIND_DECISIONS, TenantQuotaExceededError, consume_tenant_quota
 from releasegate.security.auth import require_access
+from releasegate.security.anomaly_detector import record_anomaly_event
 from releasegate.security.rate_limit import enforce_issue_rate_limit
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
@@ -122,6 +125,20 @@ async def check_transition(
         )
         if not validation.allowed:
             status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+            try:
+                record_anomaly_event(
+                    tenant_id=tenant_id,
+                    signal_type="failed_override_attempt",
+                    operation="jira_transition_check",
+                    details={
+                        "reason_code": validation.reason_code,
+                        "status_code": status_code,
+                        "issue_key": request.issue_key,
+                    },
+                    actor=auth.principal_id,
+                )
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=status_code,
                 detail={
@@ -199,6 +216,30 @@ async def check_transition(
             _apply_jira_lock_best_effort(request, modeled, tenant_id=tenant_id)
             return modeled
         raise HTTPException(status_code=409, detail="Idempotent request is still in progress")
+
+    try:
+        consume_tenant_quota(
+            tenant_id=tenant_id,
+            quota_kind=QUOTA_KIND_DECISIONS,
+            amount=1,
+        )
+    except TenantQuotaExceededError as exc:
+        cancel_idempotency_claim(
+            tenant_id=tenant_id,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        try:
+            record_anomaly_event(
+                tenant_id=tenant_id,
+                signal_type="quota_bypass_attempt",
+                operation=operation,
+                details=exc.to_http_detail(),
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=429, detail=exc.to_http_detail()) from exc
 
     gate = WorkflowGate()
     response = gate.check_transition(request)

@@ -136,6 +136,24 @@ def _enforce_windows(*, key_prefix: str, windows: List[Tuple[int, int]], error_c
 
 def enforce_tenant_rate_limit(*, tenant_id: str, profile: str = "default") -> None:
     windows = _profile_windows(profile, "tenant")
+    try:
+        from releasegate.security.security_state_service import (
+            SECURITY_STATE_THROTTLED,
+            get_tenant_security_state,
+        )
+
+        state = get_tenant_security_state(tenant_id=tenant_id)
+        if str(state.get("security_state") or "").strip().lower() == SECURITY_STATE_THROTTLED:
+            raw_factor = os.getenv("RELEASEGATE_THROTTLED_RATE_FACTOR", "0.25")
+            try:
+                factor = float(raw_factor)
+            except Exception:
+                factor = 0.25
+            factor = min(max(factor, 0.05), 1.0)
+            windows = [(max(1, int(limit * factor)), window) for limit, window in windows]
+    except Exception:
+        # Fail-open for state lookup; base rate limiting still applies.
+        pass
     _enforce_windows(
         key_prefix=f"tenant:{profile}:{tenant_id}",
         windows=windows,
