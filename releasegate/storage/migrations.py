@@ -2273,8 +2273,6 @@ def _migration_20260305_029_policy_rollout_and_simulation(cursor) -> None:
         END;
         """
     )
-
-
 def _migration_20260306_030_decision_transition_authority(cursor) -> None:
     cursor.execute(
         """
@@ -2311,8 +2309,6 @@ def _migration_20260306_030_decision_transition_authority(cursor) -> None:
         ON decision_transition_links(tenant_id, expires_at)
         """
     )
-
-
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
