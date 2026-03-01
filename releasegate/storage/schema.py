@@ -1018,6 +1018,87 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS policy_rollouts (
+            tenant_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            from_release_id TEXT,
+            to_release_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'FULL',
+            canary_percent INTEGER NOT NULL DEFAULT 100,
+            state TEXT NOT NULL DEFAULT 'PLANNED',
+            rollback_to_release_id TEXT,
+            created_by TEXT,
+            started_at TIMESTAMPTZ NOT NULL,
+            completed_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, rollout_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollouts_tenant_policy_env_state
+        ON policy_rollouts(tenant_id, policy_id, target_env, state, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_rollouts_running_scope
+        ON policy_rollouts(tenant_id, policy_id, target_env)
+        WHERE state = 'RUNNING'
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollout_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_tenant_rollout_created
+        ON policy_rollout_events(tenant_id, rollout_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_simulation_events (
+            tenant_id TEXT NOT NULL,
+            simulation_id TEXT NOT NULL,
+            actor_id TEXT,
+            policy_id TEXT,
+            policy_version INTEGER,
+            policy_hash TEXT,
+            environment TEXT,
+            input_hash TEXT,
+            result_status TEXT NOT NULL,
+            allow INTEGER NOT NULL,
+            reason_codes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, simulation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_simulation_events_tenant_created
+        ON policy_simulation_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS policy_registry_entries (
             tenant_id TEXT NOT NULL,
             policy_id TEXT NOT NULL,
@@ -1123,6 +1204,26 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_rollout_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy rollout events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_simulation_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy simulation events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -1154,6 +1255,46 @@ def _init_postgres_schema() -> str:
                 BEFORE DELETE ON policy_registry_events
                 FOR EACH ROW
                 EXECUTE FUNCTION releasegate_prevent_policy_registry_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_rollout_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_rollout_events_update
+                BEFORE UPDATE ON policy_rollout_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_rollout_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_rollout_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_rollout_events_delete
+                BEFORE DELETE ON policy_rollout_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_rollout_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_simulation_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_simulation_events_update
+                BEFORE UPDATE ON policy_simulation_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_simulation_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_simulation_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_simulation_events_delete
+                BEFORE DELETE ON policy_simulation_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_simulation_events_mutation();
             END IF;
         END $$;
         """

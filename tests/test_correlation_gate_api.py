@@ -113,7 +113,7 @@ def test_deploy_gate_allows_when_decision_and_correlation_match(monkeypatch):
     decision = _seed_allowed_decision(repo, 28, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -152,7 +152,7 @@ def test_deploy_gate_blocks_when_correlation_id_missing_by_default(monkeypatch):
     decision = _seed_allowed_decision(repo, 31, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -183,7 +183,7 @@ def test_deploy_gate_can_derive_correlation_when_policy_override_enabled(monkeyp
     decision = _seed_allowed_decision(repo, 32, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -215,7 +215,7 @@ def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
     decision = _seed_allowed_decision(repo, 29, issue_key, "1111111111111111111111111111111111111111")
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -254,7 +254,7 @@ def test_deploy_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -326,7 +326,7 @@ def test_incident_close_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -365,7 +365,7 @@ def test_incident_close_gate_allows_with_valid_deploy_history(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -444,7 +444,7 @@ def test_deploy_gate_idempotency_replays_same_response(monkeypatch):
         env="prod",
     )
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -540,7 +540,7 @@ def test_deploy_gate_idempotency_key_conflict_returns_409(monkeypatch):
         env="prod",
     )
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -596,7 +596,7 @@ def test_deploy_gate_strict_fail_closed_on_policy_lookup_timeout(monkeypatch):
     def _timeout(**kwargs):
         raise TimeoutError("policy lookup timeout")
 
-    monkeypatch.setattr("releasegate.correlation.enforcement.get_active_policy_release", _timeout)
+    monkeypatch.setattr("releasegate.correlation.enforcement.resolve_effective_policy_release", _timeout)
 
     resp = client.post(
         "/gate/deploy/check",

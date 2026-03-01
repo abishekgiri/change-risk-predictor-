@@ -489,3 +489,76 @@ def test_policy_registry_api_simulate_decision_status_filter_supports_staged_sha
     )
     assert staged_sim.status_code == 200, staged_sim.text
     assert staged_sim.json()["status"] == "BLOCKED"
+
+
+def test_policies_simulate_endpoint_writes_simulation_audit_only():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api", roles=["admin", "operator"], scopes=["policy:read"])
+
+    create_resp = client.post(
+        "/policies",
+        headers=jwt_headers(tenant_id="tenant-registry-api"),
+        json={
+            "tenant_id": "tenant-registry-api",
+            "scope_type": "transition",
+            "scope_id": "71",
+            "status": "ACTIVE",
+            "policy_json": {
+                "strict_fail_closed": True,
+                "transition_rules": [{"transition_id": "71", "result": "ALLOW"}],
+            },
+        },
+    )
+    assert create_resp.status_code == 200, create_resp.text
+
+    before_decisions = _table_count("audit_decisions")
+    before_idempotency = _table_count("idempotency_keys")
+    before_security = _table_count("security_audit_events")
+    before_sim = _table_count("policy_simulation_events")
+
+    resp = client.post(
+        "/policies/simulate",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "issue_key": "RG-71",
+            "transition_id": "71",
+            "project_id": "PROJ",
+            "workflow_id": "wf-release",
+            "environment": "prod",
+            "context": {"org_id": "tenant-registry-api"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["enforced"] is False
+    assert payload["trace_id"]
+    assert _table_count("policy_simulation_events") == before_sim + 1
+    assert _table_count("audit_decisions") == before_decisions
+    assert _table_count("idempotency_keys") == before_idempotency
+    assert _table_count("security_audit_events") == before_security + 1
+
+
+def test_policy_conflict_analysis_endpoint_reports_contradictions():
+    _reset_db()
+    headers = jwt_headers(tenant_id="tenant-registry-api", roles=["admin", "operator"], scopes=["policy:read"])
+
+    resp = client.post(
+        "/policies/conflicts/analyze",
+        headers=headers,
+        json={
+            "tenant_id": "tenant-registry-api",
+            "policy_json": {
+                "strict_fail_closed": True,
+                "required_transitions": ["99"],
+                "transition_rules": [
+                    {"transition_id": "99", "result": "ALLOW", "priority": 100},
+                    {"transition_id": "99", "result": "BLOCK", "priority": 100},
+                ],
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    analysis = resp.json()["analysis"]
+    assert analysis["summary"]["contradiction_count"] >= 1
+    assert analysis["ok"] is False
