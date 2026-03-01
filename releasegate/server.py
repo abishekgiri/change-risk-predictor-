@@ -3986,11 +3986,36 @@ def replay_stored_decision(
     from releasegate.decision.types import Decision
     from releasegate.replay.decision_replay import replay_decision
     from releasegate.replay.events import record_replay_event
+    from releasegate.integrations.jira.decision_linkage import get_decision_linkage, is_protected_status
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
+
+    def _linkage_snapshot() -> Optional[Dict[str, Any]]:
+        try:
+            link = get_decision_linkage(tenant_id=effective_tenant, decision_id=decision_id)
+        except Exception:
+            return None
+        if not link:
+            return None
+        target_status = str(link.get("target_status") or "")
+        return {
+            "protected": bool(is_protected_status(target_status)),
+            "context_hash": str(link.get("context_hash") or ""),
+            "expires_at": link.get("expires_at"),
+            "consumed": bool(link.get("consumed")),
+            "consumed_at": link.get("consumed_at"),
+            "consumed_by_request_id": link.get("consumed_by_request_id"),
+            "bound_fields": {
+                "jira_issue_id": link.get("jira_issue_id"),
+                "transition_id": link.get("transition_id"),
+                "actor": link.get("actor"),
+                "source_status": link.get("source_status"),
+                "target_status": target_status,
+            },
+        }
 
     def _build_deterministic_block(report_payload: Dict[str, Any]) -> Dict[str, Any]:
         old = report_payload.get("old") or {}
@@ -4087,6 +4112,7 @@ def replay_stored_decision(
             "repo": row.get("repo"),
             "pr_number": row.get("pr_number"),
             "attestation_id": None,
+            "linkage": _linkage_snapshot(),
         }
         replay_event = record_replay_event(
             tenant_id=effective_tenant,
@@ -4191,6 +4217,7 @@ def replay_stored_decision(
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
     report["attestation_id"] = decision.attestation_id
+    report["linkage"] = _linkage_snapshot()
     report["replay_id"] = replay_event.get("replay_id")
     report["deterministic"] = _build_deterministic_block(report)
     report["meta"] = {

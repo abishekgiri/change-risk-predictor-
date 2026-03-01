@@ -46,6 +46,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260303_027_kms_custody_and_compromise_playbook" in migration_ids
         assert "20260304_028_saas_operational_controls" in migration_ids
         assert "20260305_029_policy_rollout_and_simulation" in migration_ids
+        assert "20260306_030_decision_transition_authority" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -349,6 +350,30 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         ref_pk = [row[1] for row in sorted((r for r in ref_info if r[5] > 0), key=lambda r: r[5])]
         assert {"tenant_id", "decision_id", "repo", "ref_type", "ref_value"} <= ref_cols
         assert ref_pk == ["tenant_id", "decision_id", "ref_type", "ref_value"]
+
+        cur.execute("PRAGMA table_info(decision_transition_links)")
+        linkage_info = cur.fetchall()
+        linkage_cols = {row[1] for row in linkage_info}
+        linkage_pk = [row[1] for row in sorted((r for r in linkage_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "decision_id",
+            "jira_issue_id",
+            "transition_id",
+            "actor",
+            "source_status",
+            "target_status",
+            "policy_id",
+            "policy_version",
+            "policy_hash",
+            "context_hash",
+            "expires_at",
+            "consumed",
+            "consumed_at",
+            "consumed_by_request_id",
+            "created_at",
+        } <= linkage_cols
+        assert linkage_pk == ["tenant_id", "decision_id"]
 
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()

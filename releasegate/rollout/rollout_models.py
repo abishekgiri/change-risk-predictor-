@@ -34,7 +34,7 @@ def normalize_canary_percent(mode: str, value: Optional[int]) -> int:
         return 100
     try:
         percent = int(value if value is not None else 0)
-    except Exception as exc:
+    except (ValueError, TypeError) as exc:
         raise ValueError("canary_percent must be an integer") from exc
     if percent <= 0 or percent >= 100:
         raise ValueError("canary_percent must be between 1 and 99 for canary rollouts")
