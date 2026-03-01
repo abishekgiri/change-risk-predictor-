@@ -109,7 +109,7 @@ def _extract_policy_ref(decision_row: Dict[str, Any]) -> tuple[str, str, str]:
             parsed = json.loads(raw_full)
             if isinstance(parsed, dict):
                 payload = parsed
-        except Exception:
+        except json.JSONDecodeError:
             payload = {}
 
     bindings = payload.get("policy_bindings")
