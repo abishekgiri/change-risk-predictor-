@@ -65,7 +65,7 @@ def compute_expires_at() -> str:
     ttl_raw = str(os.getenv("RELEASEGATE_DECISION_LINK_TTL_SECONDS", str(DEFAULT_DECISION_LINK_TTL_SECONDS)) or "")
     try:
         ttl_seconds = max(1, int(ttl_raw))
-    except Exception:
+    except ValueError:
         ttl_seconds = DEFAULT_DECISION_LINK_TTL_SECONDS
     return (_utc_now() + timedelta(seconds=ttl_seconds)).isoformat()
 
@@ -109,7 +109,7 @@ def _extract_policy_ref(decision_row: Dict[str, Any]) -> tuple[str, str, str]:
             parsed = json.loads(raw_full)
             if isinstance(parsed, dict):
                 payload = parsed
-        except Exception:
+        except json.JSONDecodeError:
             payload = {}
 
     bindings = payload.get("policy_bindings")
