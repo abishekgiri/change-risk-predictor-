@@ -27,7 +27,7 @@ def _parse_json_field(raw: Any, fallback: Any) -> Any:
             parsed = json.loads(raw)
             if isinstance(parsed, type(fallback)):
                 return parsed
-        except Exception:
+        except json.JSONDecodeError:
             return fallback
     return fallback
 
