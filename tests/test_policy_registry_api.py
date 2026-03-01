@@ -691,6 +691,8 @@ def test_policy_simulate_historical_endpoint_returns_impact_summary():
     assert payload["would_allow_count"] == 0
     assert payload["override_delta"] == 2
     assert payload["delta_breakdown"]["allow_to_deny"] == 2
+    assert payload["skipped_ratio"] == 0.0
+    assert payload["missing_context_ratio"] == 0.0
     assert payload["impacted_workflows"][0]["transition_id"] == "31"
     assert payload["high_risk_clusters"][0]["count"] == 2
 
@@ -737,3 +739,37 @@ def test_policy_diff_impact_endpoint_reports_weakening_changes():
     assert "WEAKEN_PROTECTED_STATUSES" in warning_codes
     assert "WEAKEN_RISK_THRESHOLD" in warning_codes
     assert "WEAKEN_RULE_RESULT" in warning_codes
+
+
+def test_policy_diff_impact_missing_candidate_risk_threshold_is_weakening():
+    _reset_db()
+    tenant_id = "tenant-registry-api"
+    headers = jwt_headers(tenant_id=tenant_id, roles=["admin", "operator"], scopes=["policy:read"])
+
+    resp = client.post(
+        "/policies/diff-impact",
+        headers=headers,
+        json={
+            "tenant_id": tenant_id,
+            "current_policy_json": {
+                "risk_thresholds": {
+                    "prod": {
+                        "max_score": 0.7,
+                    }
+                }
+            },
+            "candidate_policy_json": {
+                "risk_thresholds": {},
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["overall"] == "WEAKENING"
+    warning_codes = {str(item.get("code")) for item in payload["warnings"]}
+    assert "WEAKEN_RISK_THRESHOLD" in warning_codes
+    threshold_changes = payload["strictness_delta"]["risk_threshold_changes"]
+    assert threshold_changes
+    assert threshold_changes[0]["comparison_mode"] == "missing_default"
+    assert threshold_changes[0]["from"] == 0.7
+    assert threshold_changes[0]["to"] is None

@@ -388,29 +388,44 @@ def build_policy_impact_diff(
     candidate_risk = _extract_risk_thresholds(candidate_json)
     risk_changes: List[Dict[str, Any]] = []
     for path in sorted(set(current_risk.keys()) | set(candidate_risk.keys())):
-        if path not in current_risk or path not in candidate_risk:
-            continue
-        current_value = float(current_risk[path])
-        candidate_value = float(candidate_risk[path])
-        if candidate_value == current_value:
-            continue
-        direction = "NEUTRAL"
+        has_current = path in current_risk
+        has_candidate = path in candidate_risk
         lower_path = path.lower()
-        if "min" in lower_path:
-            if candidate_value < current_value:
-                direction = "WEAKENING"
+        is_min_threshold = "min" in lower_path
+
+        direction = "NEUTRAL"
+        comparison_mode = "direct"
+        current_value_raw: Optional[float] = float(current_risk[path]) if has_current else None
+        candidate_value_raw: Optional[float] = float(candidate_risk[path]) if has_candidate else None
+
+        if has_current and has_candidate:
+            if candidate_value_raw == current_value_raw:
+                continue
+            assert current_value_raw is not None
+            assert candidate_value_raw is not None
+            if is_min_threshold:
+                direction = "WEAKENING" if candidate_value_raw < current_value_raw else "STRENGTHENING"
             else:
-                direction = "STRENGTHENING"
+                direction = "WEAKENING" if candidate_value_raw > current_value_raw else "STRENGTHENING"
+        elif has_current and (not has_candidate):
+            # Missing candidate threshold defaults to weakest bound:
+            # min-threshold -> 0, max-threshold -> unbounded.
+            comparison_mode = "missing_default"
+            direction = "WEAKENING"
+        elif has_candidate and (not has_current):
+            # Missing current threshold defaults to weakest bound:
+            # min-threshold -> 0, max-threshold -> unbounded.
+            comparison_mode = "missing_default"
+            direction = "STRENGTHENING"
         else:
-            if candidate_value > current_value:
-                direction = "WEAKENING"
-            else:
-                direction = "STRENGTHENING"
+            continue
+
         change_item = {
             "path": path,
-            "from": current_value,
-            "to": candidate_value,
+            "from": current_value_raw,
+            "to": candidate_value_raw,
             "direction": direction,
+            "comparison_mode": comparison_mode,
         }
         risk_changes.append(change_item)
         if direction == "WEAKENING":

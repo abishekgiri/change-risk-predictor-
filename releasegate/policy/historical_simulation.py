@@ -482,6 +482,10 @@ def simulate_historical_policy_impact(
         else:
             unchanged_count += 1
 
+    skipped_events = skipped_missing_context + skipped_filtered
+    skipped_ratio = (float(skipped_events) / float(scanned_events)) if scanned_events > 0 else 0.0
+    missing_context_ratio = (float(skipped_missing_context) / float(scanned_events)) if scanned_events > 0 else 0.0
+
     simulation_id = str(uuid.uuid4())
     return {
         "simulation_id": simulation_id,
@@ -500,9 +504,11 @@ def simulate_historical_policy_impact(
         },
         "scanned_events": scanned_events,
         "simulated_events": simulated_events,
-        "skipped_events": skipped_missing_context + skipped_filtered,
+        "skipped_events": skipped_events,
         "skipped_missing_context": skipped_missing_context,
         "skipped_filtered": skipped_filtered,
+        "skipped_ratio": skipped_ratio,
+        "missing_context_ratio": missing_context_ratio,
         "truncated": truncated,
         "max_events": resolved_max_events,
         "would_block_count": would_block_count,
