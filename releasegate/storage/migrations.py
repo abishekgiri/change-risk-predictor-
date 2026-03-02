@@ -2309,6 +2309,81 @@ def _migration_20260306_030_decision_transition_authority(cursor) -> None:
         ON decision_transition_links(tenant_id, expires_at)
         """
     )
+
+
+def _migration_20260307_031_cross_system_correlation_fabric(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deployment_decision_links (
+            tenant_id TEXT NOT NULL,
+            deployment_event_id TEXT NOT NULL,
+            decision_id TEXT,
+            jira_issue_id TEXT,
+            correlation_id TEXT,
+            environment TEXT NOT NULL,
+            service TEXT NOT NULL,
+            artifact_digest TEXT,
+            risk_eval_id TEXT,
+            risk_evaluated_at TEXT,
+            override_state_at_deploy TEXT NOT NULL DEFAULT 'NONE',
+            override_id TEXT,
+            deployed_at TEXT NOT NULL,
+            source TEXT,
+            contract_mode TEXT NOT NULL DEFAULT 'AUDIT',
+            contract_verdict TEXT NOT NULL,
+            violation_codes_json TEXT NOT NULL DEFAULT '[]',
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, deployment_event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_decision
+        ON deployment_decision_links(tenant_id, decision_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_issue
+        ON deployment_decision_links(tenant_id, jira_issue_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_deployed_at
+        ON deployment_decision_links(tenant_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_service_env_deployed
+        ON deployment_decision_links(tenant_id, service, environment, deployed_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_update
+        BEFORE UPDATE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_delete
+        BEFORE DELETE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2459,6 +2534,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260306_030_decision_transition_authority",
         description="Add decision linkage authority table for protected Jira transition authorization.",
         apply=_migration_20260306_030_decision_transition_authority,
+    ),
+    Migration(
+        migration_id="20260307_031_cross_system_correlation_fabric",
+        description="Add append-only deployment-to-decision linkage records for cross-system correlation contracts.",
+        apply=_migration_20260307_031_cross_system_correlation_fabric,
     ),
 ]
 

@@ -47,6 +47,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260304_028_saas_operational_controls" in migration_ids
         assert "20260305_029_policy_rollout_and_simulation" in migration_ids
         assert "20260306_030_decision_transition_authority" in migration_ids
+        assert "20260307_031_cross_system_correlation_fabric" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -374,6 +375,33 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= linkage_cols
         assert linkage_pk == ["tenant_id", "decision_id"]
+
+        cur.execute("PRAGMA table_info(deployment_decision_links)")
+        deploy_link_info = cur.fetchall()
+        deploy_link_cols = {row[1] for row in deploy_link_info}
+        deploy_link_pk = [row[1] for row in sorted((r for r in deploy_link_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "deployment_event_id",
+            "decision_id",
+            "jira_issue_id",
+            "correlation_id",
+            "environment",
+            "service",
+            "artifact_digest",
+            "risk_eval_id",
+            "risk_evaluated_at",
+            "override_state_at_deploy",
+            "override_id",
+            "deployed_at",
+            "source",
+            "contract_mode",
+            "contract_verdict",
+            "violation_codes_json",
+            "reason",
+            "created_at",
+        } <= deploy_link_cols
+        assert deploy_link_pk == ["tenant_id", "deployment_event_id"]
 
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()

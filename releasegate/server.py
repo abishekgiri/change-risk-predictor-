@@ -304,6 +304,26 @@ class DeployGateCheckRequest(BaseModel):
     policy_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CorrelationDeploymentRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    deployment_event_id: str
+    repo: str
+    environment: str
+    service: str
+    decision_id: Optional[str] = None
+    jira_issue_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    commit_sha: Optional[str] = None
+    artifact_digest: Optional[str] = None
+    risk_eval_id: Optional[str] = None
+    risk_evaluated_at: Optional[str] = None
+    deployed_at: Optional[str] = None
+    source: Optional[str] = None
+    jira_ticket_approved: Optional[bool] = None
+    jira_ticket_status: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
 class IncidentCloseCheckRequest(BaseModel):
     tenant_id: Optional[str] = None
     incident_id: str
@@ -4466,6 +4486,142 @@ def explain_decision_endpoint(
     )
     if not payload:
         raise HTTPException(status_code=404, detail="Decision evidence explanation not found")
+    return payload
+
+
+@app.post("/correlation/deployments/authorize")
+def authorize_correlation_deployment_endpoint(
+    payload: CorrelationDeploymentRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import evaluate_and_record_deployment_correlation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = evaluate_and_record_deployment_correlation(
+            tenant_id=effective_tenant,
+            deployment_event_id=payload.deployment_event_id,
+            repo=payload.repo,
+            environment=payload.environment,
+            service=payload.service,
+            decision_id=payload.decision_id,
+            jira_issue_id=payload.jira_issue_id,
+            correlation_id=payload.correlation_id,
+            commit_sha=payload.commit_sha,
+            artifact_digest=payload.artifact_digest,
+            risk_eval_id=payload.risk_eval_id,
+            risk_evaluated_at=payload.risk_evaluated_at,
+            deployed_at=payload.deployed_at,
+            source=payload.source,
+            jira_ticket_approved=payload.jira_ticket_approved,
+            jira_ticket_status=payload.jira_ticket_status,
+            policy_overrides=payload.policy_overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_deployment_authorize",
+        target_type="deployment",
+        target_id=payload.deployment_event_id,
+        metadata={
+            "verdict": result.get("contract_verdict"),
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "jira_issue_id": result.get("jira_issue_id"),
+            "environment": result.get("environment"),
+            "service": result.get("service"),
+            "violations": result.get("violations"),
+            "strict": result.get("strict"),
+        },
+    )
+    return result
+
+
+@app.post("/correlation/deployments/ingest")
+def ingest_correlation_deployment_endpoint(
+    payload: CorrelationDeploymentRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import evaluate_and_record_deployment_correlation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = evaluate_and_record_deployment_correlation(
+            tenant_id=effective_tenant,
+            deployment_event_id=payload.deployment_event_id,
+            repo=payload.repo,
+            environment=payload.environment,
+            service=payload.service,
+            decision_id=payload.decision_id,
+            jira_issue_id=payload.jira_issue_id,
+            correlation_id=payload.correlation_id,
+            commit_sha=payload.commit_sha,
+            artifact_digest=payload.artifact_digest,
+            risk_eval_id=payload.risk_eval_id,
+            risk_evaluated_at=payload.risk_evaluated_at,
+            deployed_at=payload.deployed_at,
+            source=payload.source,
+            jira_ticket_approved=payload.jira_ticket_approved,
+            jira_ticket_status=payload.jira_ticket_status,
+            policy_overrides=payload.policy_overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_deployment_ingest",
+        target_type="deployment",
+        target_id=payload.deployment_event_id,
+        metadata={
+            "verdict": result.get("contract_verdict"),
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "jira_issue_id": result.get("jira_issue_id"),
+            "environment": result.get("environment"),
+            "service": result.get("service"),
+            "violations": result.get("violations"),
+            "strict": result.get("strict"),
+        },
+    )
+    return result
+
+
+@app.get("/correlation/deployments/{deployment_event_id}")
+def get_correlation_deployment_endpoint(
+    deployment_event_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import get_deployment_correlation_link
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_deployment_correlation_link(
+        tenant_id=effective_tenant,
+        deployment_event_id=deployment_event_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Deployment correlation link not found")
     return payload
 
 
