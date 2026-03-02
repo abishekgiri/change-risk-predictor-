@@ -396,6 +396,12 @@ class AnchorTickRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class DailyIndependentCheckpointPublishRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    provider: Optional[str] = None
+    publish_anchor: bool = True
+
+
 class RotateApiKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
 
@@ -999,6 +1005,100 @@ def transparency_root_anchors_by_date(
         "count": len(items),
         "items": items,
     }
+
+
+@app.post("/anchors/checkpoints/daily/{date_utc}/publish")
+def publish_independent_daily_checkpoint(
+    date_utc: str,
+    payload: Optional[DailyIndependentCheckpointPublishRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import create_independent_daily_checkpoint
+
+    body = payload or DailyIndependentCheckpointPublishRequest()
+    effective_tenant = _effective_tenant(auth, body.tenant_id)
+    try:
+        checkpoint = create_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+            publish_anchor=bool(body.publish_anchor),
+            provider_name=body.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"failed to publish independent checkpoint: {exc}") from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="independent_checkpoint_publish",
+        target_type="checkpoint",
+        target_id=str((checkpoint.get("ids") or {}).get("checkpoint_id") or date_utc),
+        metadata={
+            "date_utc": date_utc,
+            "created": bool(checkpoint.get("created")),
+            "provider": str(((checkpoint.get("external_anchor") or {}).get("provider") or "")),
+        },
+    )
+    return checkpoint
+
+
+@app.get("/anchors/checkpoints/daily/{date_utc}")
+def get_independent_daily_checkpoint_endpoint(
+    date_utc: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import get_independent_daily_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        payload = get_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(status_code=404, detail="independent daily checkpoint not found")
+    return payload
+
+
+@app.get("/anchors/checkpoints/daily/{date_utc}/verify")
+def verify_independent_daily_checkpoint_endpoint(
+    date_utc: str,
+    require_anchor: bool = True,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import verify_independent_daily_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        report = verify_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+            require_anchor=require_anchor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not report.get("exists"):
+        raise HTTPException(status_code=404, detail="independent daily checkpoint not found")
+    return report
 
 
 @app.get("/transparency/proof/{attestation_id}")
@@ -2126,9 +2226,13 @@ def audit_proof_pack(
     chain_proof = None
     checkpoint_proof = None
     checkpoint_snapshot = None
+    independent_checkpoint = None
+    transparency_merkle_proof = None
+    approvals_snapshot: Dict[str, Any] = {}
     ledger_segment = []
     period_id = None
     external_anchor = None
+    anchor_date = ""
 
     if repo:
         overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=effective_tenant)
@@ -2158,14 +2262,43 @@ def audit_proof_pack(
         except Exception as exc:
             checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
 
+    raw_approvals = decision_snapshot.get("approvals")
+    if isinstance(raw_approvals, dict):
+        approvals_snapshot = dict(raw_approvals)
+    elif isinstance(raw_approvals, list):
+        approvals_snapshot = {"items": raw_approvals}
+    else:
+        input_snapshot = decision_snapshot.get("input_snapshot")
+        if isinstance(input_snapshot, dict):
+            for key in ("approvals", "approval_snapshot", "approval_events"):
+                value = input_snapshot.get(key)
+                if isinstance(value, dict):
+                    approvals_snapshot = dict(value)
+                    break
+                if isinstance(value, list):
+                    approvals_snapshot = {"items": value}
+                    break
+
+    attestation_id = str(decision_snapshot.get("attestation_id") or "").strip()
+    if attestation_id:
+        try:
+            from releasegate.audit.transparency import get_transparency_inclusion_proof
+
+            transparency_merkle_proof = get_transparency_inclusion_proof(
+                attestation_id=attestation_id,
+                tenant_id=effective_tenant,
+            )
+        except Exception:
+            transparency_merkle_proof = None
+
+    if isinstance(created_at, str):
+        anchor_date = created_at[:10]
+    elif isinstance(created_at, datetime):
+        anchor_date = created_at.astimezone(timezone.utc).date().isoformat()
+
     try:
         from releasegate.anchoring.roots import get_root_anchor_for_date
 
-        anchor_date = ""
-        if isinstance(created_at, str):
-            anchor_date = created_at[:10]
-        elif isinstance(created_at, datetime):
-            anchor_date = created_at.astimezone(timezone.utc).date().isoformat()
         if anchor_date:
             external_anchor = get_root_anchor_for_date(
                 date_utc=anchor_date,
@@ -2173,6 +2306,37 @@ def audit_proof_pack(
             )
     except Exception:
         external_anchor = None
+
+    if anchor_date:
+        try:
+            from releasegate.anchoring.independent_checkpoints import get_independent_daily_checkpoint
+
+            independent_checkpoint = get_independent_daily_checkpoint(
+                date_utc=anchor_date,
+                tenant_id=effective_tenant,
+            )
+        except Exception:
+            independent_checkpoint = None
+
+    external_anchor_reference = {}
+    if isinstance(independent_checkpoint, dict):
+        anchor_payload = independent_checkpoint.get("external_anchor")
+        if isinstance(anchor_payload, dict):
+            external_anchor_reference = {
+                "provider": str(anchor_payload.get("provider") or ""),
+                "external_ref": str(anchor_payload.get("external_ref") or ""),
+                "date_utc": anchor_date,
+            }
+    if not external_anchor_reference and isinstance(external_anchor, dict):
+        external_anchor_reference = {
+            "provider": str(external_anchor.get("provider") or ""),
+            "external_ref": str(
+                external_anchor.get("external_ref")
+                or external_anchor.get("anchor_id")
+                or ""
+            ),
+            "date_utc": str(external_anchor.get("date_utc") or anchor_date or ""),
+        }
 
     proof_pack_id = record_proof_pack_generation(
         decision_id=decision_id,
@@ -2220,7 +2384,7 @@ def audit_proof_pack(
         chain_proof=chain_proof,
         replay_request=replay_request,
         proof_pack_id=proof_pack_id,
-        external_anchor_snapshot=external_anchor,
+        external_anchor_snapshot=external_anchor if external_anchor else external_anchor_reference,
     )
     graph_hash = str(evidence_graph.get("graph_hash") or "")
 
@@ -2254,13 +2418,18 @@ def audit_proof_pack(
         "pr_number": pr_number,
         "decision_snapshot": decision_snapshot,
         "policy_snapshot": decision_snapshot.get("policy_bindings", []),
+        "approvals_snapshot": approvals_snapshot,
         "input_snapshot": decision_snapshot.get("input_snapshot", {}),
         "override_snapshot": override_snapshot,
+        "override_history": ledger_segment,
         "ledger_segment": ledger_segment,
         "checkpoint_snapshot": checkpoint_snapshot,
+        "independent_checkpoint": independent_checkpoint,
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
+        "merkle_proof": transparency_merkle_proof,
         "external_anchor": external_anchor,
+        "external_anchor_ref": external_anchor_reference,
         "evidence_graph": evidence_graph,
         "replay_request": replay_request,
     }
@@ -2345,15 +2514,20 @@ def audit_proof_pack(
     zip_entries = {
         "bundle.json": bundle,
         "integrity.json": bundle["integrity"],
+        "approvals.json": bundle["approvals_snapshot"],
         "chain_proof.json": bundle["chain_proof"],
         "checkpoint_proof.json": bundle["checkpoint_proof"],
         "checkpoint_snapshot.json": bundle["checkpoint_snapshot"],
+        "independent_checkpoint.json": bundle["independent_checkpoint"],
         "decision_snapshot.json": bundle["decision_snapshot"],
         "input_snapshot.json": bundle["input_snapshot"],
         "ledger_segment.json": bundle["ledger_segment"],
+        "override_history.json": bundle["override_history"],
+        "merkle_proof.json": bundle["merkle_proof"],
         "override_snapshot.json": bundle["override_snapshot"],
         "policy_snapshot.json": bundle["policy_snapshot"],
         "external_anchor.json": bundle["external_anchor"],
+        "external_anchor_ref.json": bundle["external_anchor_ref"],
         "evidence_graph.json": bundle["evidence_graph"],
         "replay_request.json": bundle["replay_request"],
     }
@@ -2363,6 +2537,19 @@ def audit_proof_pack(
         zip_entries["dsse_envelope.json"] = dsse_envelope
     if isinstance(dsse_error, dict):
         zip_entries["dsse_error.json"] = dsse_error
+    independent_sig = (
+        (bundle.get("independent_checkpoint") or {}).get("signature")
+        if isinstance(bundle.get("independent_checkpoint"), dict)
+        else {}
+    )
+    if isinstance(independent_sig, dict):
+        public_key = str(independent_sig.get("public_key") or "").strip()
+        if public_key:
+            zip_entries["checkpoint_public_key.json"] = {
+                "algorithm": str(independent_sig.get("algorithm") or "").strip().lower(),
+                "key_id": str(independent_sig.get("key_id") or "").strip(),
+                "public_key": public_key,
+            }
     zip_entries["manifest.json"] = _proof_bundle_manifest(
         decision_id=decision_id,
         proof_pack_id=proof_pack_id,
@@ -2410,6 +2597,26 @@ def export_decision_proof_bundle(
     ),
 ):
     # Reuse the hardened proof-pack exporter and return a deterministic zip bundle.
+    return audit_proof_pack(
+        decision_id=decision_id,
+        format="zip",
+        checkpoint_cadence=checkpoint_cadence,
+        tenant_id=tenant_id,
+        auth=auth,
+    )
+
+
+@app.get("/decisions/{decision_id}/proof-bundle")
+def export_decision_proof_bundle_alias(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    checkpoint_cadence: str = "daily",
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["proofpack:read", "checkpoint:read", "policy:read"],
+        rate_profile="heavy",
+    ),
+):
     return audit_proof_pack(
         decision_id=decision_id,
         format="zip",
