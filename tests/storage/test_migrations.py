@@ -50,6 +50,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260307_031_cross_system_correlation_fabric" in migration_ids
         assert "20260308_032_independent_daily_checkpoints" in migration_ids
         assert "20260309_033_approval_orchestration" in migration_ids
+        assert "20260310_034_signal_attestations" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -450,6 +451,27 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         } <= decision_approvals_cols
         assert decision_approvals_pk == ["tenant_id", "approval_id"]
 
+        cur.execute("PRAGMA table_info(signal_attestations)")
+        signal_attest_info = cur.fetchall()
+        signal_attest_cols = {row[1] for row in signal_attest_info}
+        signal_attest_pk = [row[1] for row in sorted((r for r in signal_attest_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "signal_id",
+            "signal_type",
+            "signal_source",
+            "subject_type",
+            "subject_id",
+            "computed_at",
+            "expires_at",
+            "payload_json",
+            "signal_hash",
+            "sig_alg",
+            "signature",
+            "key_id",
+            "created_at",
+        } <= signal_attest_cols
+        assert signal_attest_pk == ["tenant_id", "signal_id"]
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()
         snap_cols = {row[1] for row in snap_info}

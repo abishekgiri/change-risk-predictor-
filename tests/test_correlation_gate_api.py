@@ -792,6 +792,48 @@ def test_deploy_gate_strict_fail_closed_on_policy_lookup_timeout(monkeypatch):
     assert body["reason_code"] == "PROVIDER_TIMEOUT"
 
 
+def test_deploy_gate_blocks_when_signal_attestation_required(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-516"
+    commit_sha = "cccccccccccccccccccccccccccccccccccccccc"
+    decision = _seed_allowed_decision(repo, 40, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-signal-required",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+            "policy_overrides": {
+                "strict_fail_closed": True,
+                "signals": {"require_attestation_record": True},
+            },
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "MISSING_SIGNAL"
+
+
 def test_incident_gate_strict_fail_closed_on_evidence_lookup_timeout(monkeypatch):
     repo = f"corr-{uuid.uuid4().hex[:8]}"
     issue_key = "RG-512"
