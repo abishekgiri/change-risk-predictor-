@@ -23,7 +23,12 @@ from releasegate.integrations.jira.decision_linkage import (
     register_transition_decision_link,
     validate_and_consume_decision_link,
 )
+from releasegate.integrations.jira.approvals_orchestration import (
+    create_decision_approval,
+)
 from releasegate.integrations.jira.types import (
+    DecisionApprovalRequest,
+    DecisionApprovalResponse,
     TransitionAuthorizeRequest,
     TransitionAuthorizeResponse,
     TransitionCheckRequest,
@@ -423,6 +428,78 @@ async def authorize_transition(
         reason_code=reason,
         message="Protected transition authorized.",
         tenant_id=tenant_id,
+    )
+
+
+@router.post("/decisions/{decision_id}/approvals", response_model=DecisionApprovalResponse)
+async def submit_decision_approval(
+    decision_id: str,
+    payload: DecisionApprovalRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    x_idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        allow_signature=True,
+        rate_profile="default",
+    ),
+):
+    tenant_id = resolve_tenant_id(payload.tenant_id or auth.tenant_id)
+    actor = str(payload.approver_actor_id or auth.principal_id or "").strip()
+    request_id = (
+        str(payload.request_id or "").strip()
+        or str(x_request_id or "").strip()
+        or str(x_idempotency_key or "").strip()
+        or None
+    )
+
+    try:
+        created = create_decision_approval(
+            tenant_id=tenant_id,
+            decision_id=decision_id,
+            approver_actor=actor,
+            approver_role=payload.approver_role,
+            approval_group=payload.approval_group,
+            justification=payload.justification,
+            request_id=request_id,
+        )
+    except ValueError as exc:
+        error_code = str(exc)
+        if error_code == "DECISION_NOT_FOUND":
+            raise HTTPException(status_code=404, detail={"error_code": error_code, "message": "Decision not found"}) from exc
+        if error_code == "APPROVAL_SCOPE_UNAVAILABLE":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": error_code,
+                    "message": "Decision approval scope is unavailable. Re-run transition check to mint a current scope.",
+                },
+            ) from exc
+        if error_code in {
+            "JUSTIFICATION_INVALID",
+            "JUSTIFICATION_MISSING",
+            "JUSTIFICATION_TOO_SHORT",
+            "JUSTIFICATION_FIELD_REQUIRED",
+            "APPROVER_REQUIRED",
+        }:
+            raise HTTPException(status_code=400, detail={"error_code": error_code, "message": error_code}) from exc
+        raise HTTPException(status_code=400, detail={"error_code": "APPROVAL_INVALID", "message": error_code}) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "APPROVAL_SUBMISSION_FAILED", "message": "Approval submission failed"},
+        ) from exc
+
+    return DecisionApprovalResponse(
+        ok=True,
+        tenant_id=tenant_id,
+        decision_id=str(created.get("decision_id") or decision_id),
+        approval_id=str(created.get("approval_id") or ""),
+        approval_scope_hash=str(created.get("approval_scope_hash") or ""),
+        approver_actor=str(created.get("approver_actor") or actor),
+        approver_role=str(created.get("approver_role") or "").strip() or None,
+        approval_group=str(created.get("approval_group") or "").strip() or None,
+        created_at=str(created.get("created_at") or ""),
     )
 
 

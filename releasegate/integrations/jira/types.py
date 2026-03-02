@@ -93,3 +93,36 @@ class TransitionAuthorizeResponse(BaseModel):
     tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
 
     model_config = ConfigDict(extra="ignore")
+
+
+class DecisionApprovalRequest(BaseModel):
+    """
+    Submit an approval against the current decision approval scope.
+    """
+
+    tenant_id: Optional[str] = Field(None, description="Tenant/organization identity")
+    approver_actor_id: Optional[str] = Field(None, description="Approver identity (defaults to authenticated principal)")
+    approver_role: Optional[str] = Field(None, description="Approver role (e.g., security, em, ops)")
+    approval_group: Optional[str] = Field(None, description="CAB group name this approval should satisfy")
+    justification: Dict[str, Any] = Field(default_factory=dict, description="Structured approval justification payload")
+    request_id: Optional[str] = Field(None, description="Idempotency token for approval submission")
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class DecisionApprovalResponse(BaseModel):
+    """
+    Approval submission response.
+    """
+
+    ok: bool = Field(..., description="Whether the approval was accepted")
+    tenant_id: str = Field(..., description="Tenant identity")
+    decision_id: str = Field(..., description="Decision being approved")
+    approval_id: str = Field(..., description="Stored approval identifier")
+    approval_scope_hash: str = Field(..., description="Scope hash this approval is bound to")
+    approver_actor: str = Field(..., description="Approver identity")
+    approver_role: Optional[str] = Field(None, description="Normalized approver role")
+    approval_group: Optional[str] = Field(None, description="Normalized approval group")
+    created_at: str = Field(..., description="Approval timestamp")
+
+    model_config = ConfigDict(extra="ignore")

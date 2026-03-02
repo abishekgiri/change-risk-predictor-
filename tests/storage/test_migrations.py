@@ -49,6 +49,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260306_030_decision_transition_authority" in migration_ids
         assert "20260307_031_cross_system_correlation_fabric" in migration_ids
         assert "20260308_032_independent_daily_checkpoints" in migration_ids
+        assert "20260309_033_approval_orchestration" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -426,6 +427,28 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= daily_cp_cols
         assert daily_cp_pk == ["tenant_id", "checkpoint_id"]
+
+        cur.execute("PRAGMA table_info(decision_approvals)")
+        decision_approvals_info = cur.fetchall()
+        decision_approvals_cols = {row[1] for row in decision_approvals_info}
+        decision_approvals_pk = [row[1] for row in sorted((r for r in decision_approvals_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "approval_id",
+            "decision_id",
+            "approval_scope_hash",
+            "approval_scope_json",
+            "approval_group",
+            "approver_actor",
+            "approver_role",
+            "justification_json",
+            "justification_hash",
+            "request_id",
+            "created_at",
+            "revoked_at",
+            "revoked_reason",
+        } <= decision_approvals_cols
+        assert decision_approvals_pk == ["tenant_id", "approval_id"]
 
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()
