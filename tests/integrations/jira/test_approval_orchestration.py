@@ -168,6 +168,9 @@ def test_create_decision_approval_enforces_structured_justification():
     assert created["decision_id"] == "decision-approval-1"
     assert created["approver_actor"] == "security-1"
     assert created["approval_scope_hash"] == compute_approval_scope_hash(scope_payload)
+    stored_justification = json.loads(created["justification_json"])
+    assert stored_justification["reason"] == "Emergency fix reviewed with rollback and blast-radius analysis."
+    assert created["justification_hash"] == hashlib.sha256(created["justification_json"].encode("utf-8")).hexdigest()
 
 
 def test_scope_invalidation_excludes_prior_scope_approvals():
@@ -230,6 +233,52 @@ def test_scope_invalidation_excludes_prior_scope_approvals():
     )
     assert len(approvals_a) == 1
     assert approvals_b == []
+
+
+def test_duplicate_approvals_from_same_actor_do_not_increment_scope_count():
+    _reset_db()
+    tenant_id = "tenant-approval-dedupe"
+    scope_payload = build_approval_scope_payload(
+        tenant_id=tenant_id,
+        issue_key="RG-24",
+        transition_id="31",
+        source_status="In Progress",
+        target_status="Done",
+        environment="PRODUCTION",
+        project_key="RG",
+        policy_hash="policy-hash-15",
+        actor_account_id="submitter-1",
+        risk_level="HIGH",
+        risk_score=91,
+    )
+    decision_id = "decision-dedupe-1"
+    scope_hash = _seed_decision_with_scope(
+        tenant_id=tenant_id,
+        decision_id=decision_id,
+        scope_payload=scope_payload,
+    )
+
+    first = create_decision_approval(
+        tenant_id=tenant_id,
+        decision_id=decision_id,
+        approver_actor="security-1",
+        approver_role="security",
+        approval_group="cab",
+        justification={"reason": "First approval after CAB review and rollback validation completed."},
+        request_id="dedupe-1",
+    )
+    second = create_decision_approval(
+        tenant_id=tenant_id,
+        decision_id=decision_id,
+        approver_actor="security-1",
+        approver_role="security",
+        approval_group="cab",
+        justification={"reason": "Second submission should not add another approval row."},
+        request_id="dedupe-2",
+    )
+    assert first["approval_id"] == second["approval_id"]
+    approvals = list_active_scope_approvals(tenant_id=tenant_id, approval_scope_hash=scope_hash)
+    assert len(approvals) == 1
 
 
 def test_cab_group_evaluation_enforces_unique_roles_and_submitter_exclusion():
