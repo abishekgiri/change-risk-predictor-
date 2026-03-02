@@ -1367,7 +1367,8 @@ class WorkflowGate:
                     approval_scope_hash=approval_scope_hash,
                     limit=1000,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning("Failed to list active scope approvals: %s", e)
                 persisted_scope_approvals = []
             for approval in persisted_scope_approvals:
                 actor_id = str(approval.get("approver_actor") or "").strip()
