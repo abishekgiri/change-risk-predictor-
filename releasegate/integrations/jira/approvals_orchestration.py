@@ -289,7 +289,7 @@ def create_decision_approval(
             normalized_group or None,
         ),
     )
-    if existing and str(existing.get("justification_hash") or "") == justification_hash:
+    if existing:
         return existing
 
     storage.execute(
@@ -474,4 +474,3 @@ def evaluate_cab_groups(
         "group_results": group_results,
         "missing_requirements": missing,
     }
-
