@@ -2384,6 +2384,69 @@ def _migration_20260307_031_cross_system_correlation_fabric(cursor) -> None:
     )
 
 
+def _migration_20260308_032_independent_daily_checkpoints(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_independent_daily_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            as_of_utc TEXT NOT NULL,
+            ledger_root TEXT NOT NULL,
+            ledger_size INTEGER NOT NULL,
+            prev_checkpoint_hash TEXT,
+            checkpoint_hash TEXT NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            signing_key_id TEXT,
+            anchor_provider TEXT,
+            anchor_ref TEXT,
+            anchor_receipt_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_independent_daily_checkpoint_date
+        ON audit_independent_daily_checkpoints(tenant_id, date_utc)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_created
+        ON audit_independent_daily_checkpoints(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_anchor
+        ON audit_independent_daily_checkpoints(tenant_id, anchor_provider, date_utc)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_update
+        BEFORE UPDATE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_delete
+        BEFORE DELETE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2539,6 +2602,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260307_031_cross_system_correlation_fabric",
         description="Add append-only deployment-to-decision linkage records for cross-system correlation contracts.",
         apply=_migration_20260307_031_cross_system_correlation_fabric,
+    ),
+    Migration(
+        migration_id="20260308_032_independent_daily_checkpoints",
+        description="Add append-only independent daily signed checkpoint records with external anchor references.",
+        apply=_migration_20260308_032_independent_daily_checkpoints,
     ),
 ]
 

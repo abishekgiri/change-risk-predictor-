@@ -48,6 +48,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260305_029_policy_rollout_and_simulation" in migration_ids
         assert "20260306_030_decision_transition_authority" in migration_ids
         assert "20260307_031_cross_system_correlation_fabric" in migration_ids
+        assert "20260308_032_independent_daily_checkpoints" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -402,6 +403,29 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= deploy_link_cols
         assert deploy_link_pk == ["tenant_id", "deployment_event_id"]
+
+        cur.execute("PRAGMA table_info(audit_independent_daily_checkpoints)")
+        daily_cp_info = cur.fetchall()
+        daily_cp_cols = {row[1] for row in daily_cp_info}
+        daily_cp_pk = [row[1] for row in sorted((r for r in daily_cp_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "checkpoint_id",
+            "date_utc",
+            "as_of_utc",
+            "ledger_root",
+            "ledger_size",
+            "prev_checkpoint_hash",
+            "checkpoint_hash",
+            "signature_algorithm",
+            "signature_value",
+            "signing_key_id",
+            "anchor_provider",
+            "anchor_ref",
+            "anchor_receipt_json",
+            "created_at",
+        } <= daily_cp_cols
+        assert daily_cp_pk == ["tenant_id", "checkpoint_id"]
 
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()
