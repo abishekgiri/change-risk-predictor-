@@ -2570,7 +2570,6 @@ def _migration_20260310_034_signal_attestations(cursor) -> None:
         """
     )
 
-
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",

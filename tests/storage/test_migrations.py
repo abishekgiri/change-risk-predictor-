@@ -472,7 +472,6 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= signal_attest_cols
         assert signal_attest_pk == ["tenant_id", "signal_id"]
-
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()
         snap_cols = {row[1] for row in snap_info}
