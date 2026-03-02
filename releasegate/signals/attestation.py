@@ -59,7 +59,7 @@ def resolve_signal_attestation_policy(
     )
     try:
         max_age_seconds = max(1, int(max_age_raw))
-    except Exception:
+    except ValueError:
         max_age_seconds = 86400
 
     require_record_raw = overrides.get("require_attestation_record")
