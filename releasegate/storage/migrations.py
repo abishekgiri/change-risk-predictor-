@@ -2447,6 +2447,74 @@ def _migration_20260308_032_independent_daily_checkpoints(cursor) -> None:
     )
 
 
+def _migration_20260309_033_approval_orchestration(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_approvals (
+            tenant_id TEXT NOT NULL,
+            approval_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            approval_scope_hash TEXT NOT NULL,
+            approval_scope_json TEXT NOT NULL,
+            approval_group TEXT,
+            approver_actor TEXT NOT NULL,
+            approver_role TEXT,
+            justification_json TEXT NOT NULL,
+            justification_hash TEXT NOT NULL,
+            request_id TEXT,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            PRIMARY KEY (tenant_id, approval_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_scope
+        ON decision_approvals(tenant_id, approval_scope_hash, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_decision
+        ON decision_approvals(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_actor
+        ON decision_approvals(tenant_id, approver_actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_approvals_request
+        ON decision_approvals(tenant_id, request_id)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_update
+        BEFORE UPDATE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_delete
+        BEFORE DELETE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2607,6 +2675,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260308_032_independent_daily_checkpoints",
         description="Add append-only independent daily signed checkpoint records with external anchor references.",
         apply=_migration_20260308_032_independent_daily_checkpoints,
+    ),
+    Migration(
+        migration_id="20260309_033_approval_orchestration",
+        description="Add append-only approval records bound to deterministic approval scope hashes.",
+        apply=_migration_20260309_033_approval_orchestration,
     ),
 ]
 

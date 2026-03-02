@@ -26,6 +26,13 @@ from releasegate.integrations.jira.config import (
     load_transition_map,
     resolve_gate_policy_ids,
 )
+from releasegate.integrations.jira.approvals_orchestration import (
+    build_approval_scope_payload,
+    compute_approval_scope_hash,
+    evaluate_cab_groups,
+    list_active_scope_approvals,
+    normalize_cab_groups,
+)
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets, DecisionType, PolicyBinding
 from releasegate.policy.loader import PolicyLoader
@@ -1257,6 +1264,32 @@ class WorkflowGate:
                 )
                 for result in relevant_results
             )
+
+            approval_scope_payload = build_approval_scope_payload(
+                tenant_id=tenant_id,
+                issue_key=request.issue_key,
+                transition_id=request.transition_id,
+                source_status=request.source_status,
+                target_status=request.target_status,
+                environment=request.environment,
+                project_key=request.project_key,
+                policy_hash=policy_hash,
+                actor_account_id=request.actor_account_id,
+                commit_sha=str(request.context_overrides.get("commit_sha") or request.context_overrides.get("head_sha") or ""),
+                artifact_digest=str(request.context_overrides.get("artifact_digest") or ""),
+                risk_level=str(risk_level or ""),
+                risk_score=(float(risk_score) if isinstance(risk_score, (int, float)) else None),
+                risk_reason_codes=[
+                    str(code)
+                    for code in (
+                        (risk_meta.get("reason_codes") if isinstance(risk_meta.get("reason_codes"), list) else [])
+                        or ([str(run_result.reason)] if getattr(run_result, "reason", None) else [])
+                    )
+                    if str(code or "").strip()
+                ],
+            )
+            approval_scope_hash = compute_approval_scope_hash(approval_scope_payload)
+
             raw_approvals = request.context_overrides.get("approvals")
             core_approvals: List[CoreApprovalRecord] = []
             seen_approvals: set[tuple[str, str]] = set()
@@ -1278,6 +1311,26 @@ class WorkflowGate:
                         continue
                     seen_approvals.add(fingerprint)
                     core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
+
+            persisted_scope_approvals: List[Dict[str, Any]] = []
+            try:
+                persisted_scope_approvals = list_active_scope_approvals(
+                    tenant_id=tenant_id,
+                    approval_scope_hash=approval_scope_hash,
+                    limit=1000,
+                )
+            except Exception:
+                persisted_scope_approvals = []
+            for approval in persisted_scope_approvals:
+                actor_id = str(approval.get("approver_actor") or "").strip()
+                role = str(approval.get("approver_role") or "").strip()
+                if not actor_id:
+                    continue
+                fingerprint = (actor_id.lower(), role.lower())
+                if fingerprint in seen_approvals:
+                    continue
+                seen_approvals.add(fingerprint)
+                core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
 
             raw_override_approvers = request.context_overrides.get("override_approvers")
             override_approvers: List[str] = []
@@ -1382,8 +1435,22 @@ class WorkflowGate:
                 )
             )
             status = DecisionType(core_decision.status)
+            decision_reason_code = str(core_decision.reason_code or "")
             blocking_policies = list(core_decision.blocking_policy_ids)
             requirements = list(core_decision.requirements)
+
+            cab_group_policy = normalize_cab_groups(registry_effective_policy)
+            cab_result = evaluate_cab_groups(
+                groups=cab_group_policy,
+                approvals=persisted_scope_approvals,
+                submitter_actor=request.actor_account_id,
+            )
+            if cab_result.get("required") and not cab_result.get("satisfied"):
+                if status == DecisionType.ALLOWED:
+                    status = DecisionType.CONDITIONAL
+                if not decision_reason_code or decision_reason_code == "POLICY_ALLOWED":
+                    decision_reason_code = "CAB_APPROVALS_REQUIRED"
+                requirements.extend([str(item) for item in (cab_result.get("missing_requirements") or []) if str(item).strip()])
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
@@ -1393,7 +1460,7 @@ class WorkflowGate:
                 evaluation_key=f"{evaluation_key}:evaluated",
                 unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                reason_code=core_decision.reason_code,
+                reason_code=decision_reason_code or core_decision.reason_code,
                 inputs_present={"releasegate_risk": True},
                 policy_hash=policy_hash,
                 policy_bindings=policy_bindings,
@@ -1413,6 +1480,12 @@ class WorkflowGate:
                     },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
+                    "approval_scope": {
+                        "hash": approval_scope_hash,
+                        "payload": approval_scope_payload,
+                        "approval_count": len(persisted_scope_approvals),
+                    },
+                    "approval_groups": cab_result,
                     "engine_core": {
                         "status": core_decision.status,
                         "reason_code": core_decision.reason_code,
