@@ -61,10 +61,10 @@ def build_issue_risk_property(
     source: str = "github",
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    max_age_raw = str(os.getenv("RELEASEGATE_MAX_SIGNAL_AGE_SECONDS", "86400") or "86400").strip()
+    max_age_raw = os.getenv("RELEASEGATE_MAX_SIGNAL_AGE_SECONDS", "86400").strip()
     try:
         max_age_seconds = max(1, int(max_age_raw))
-    except Exception:
+    except ValueError:
         max_age_seconds = 86400
     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max_age_seconds)).isoformat().replace("+00:00", "Z")
     risk_level = (risk_level or "LOW").upper()
