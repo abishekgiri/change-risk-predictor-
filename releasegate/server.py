@@ -3882,6 +3882,29 @@ def tenant_governance_metrics_endpoint(
     return get_tenant_governance_metrics(tenant_id=effective_tenant)
 
 
+@app.get("/tenants/{tenant_id}/governance-integrity")
+def tenant_governance_integrity_endpoint(
+    tenant_id: str,
+    window_days: int = 90,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.integrity import get_tenant_governance_integrity
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        payload = get_tenant_governance_integrity(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload
+
+
 @app.post("/tenants/{tenant_id}/emergency-rotate")
 def emergency_rotate_tenant_key_endpoint(
     tenant_id: str,
