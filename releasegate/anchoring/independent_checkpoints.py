@@ -156,8 +156,8 @@ def _verify_payload_signature(
     if algorithm in {"hmac", "hmac-sha256", "hmac_sha256"}:
         try:
             material = _checkpoint_signing_material(tenant_id=tenant_id, signing_key=signing_key)
-        except Exception as exc:
-            return False, f"hmac_material_unavailable:{exc}"
+        except Exception:
+            return False, "hmac_material_unavailable"
         expected = hmac.new(str(material["key"]).encode("utf-8"), canonical, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature_value), "ok"
 
