@@ -2515,6 +2515,62 @@ def _migration_20260309_033_approval_orchestration(cursor) -> None:
     )
 
 
+def _migration_20260310_034_signal_attestations(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_attestations (
+            tenant_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            signal_source TEXT NOT NULL,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            signal_hash TEXT NOT NULL,
+            sig_alg TEXT,
+            signature TEXT,
+            key_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, signal_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_subject
+        ON signal_attestations(tenant_id, signal_type, subject_type, subject_id, computed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_expiry
+        ON signal_attestations(tenant_id, expires_at)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_update
+        BEFORE UPDATE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_delete
+        BEFORE DELETE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2680,6 +2736,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260309_033_approval_orchestration",
         description="Add append-only approval records bound to deterministic approval scope hashes.",
         apply=_migration_20260309_033_approval_orchestration,
+    ),
+    Migration(
+        migration_id="20260310_034_signal_attestations",
+        description="Add append-only signal attestation records with freshness and integrity metadata.",
+        apply=_migration_20260310_034_signal_attestations,
     ),
 ]
 

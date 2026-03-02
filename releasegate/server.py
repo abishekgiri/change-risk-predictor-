@@ -417,6 +417,21 @@ class VerifyAttestationRequest(BaseModel):
     attestation: Dict[str, Any]
 
 
+class SignalAttestRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    signal_type: str = Field(min_length=1)
+    signal_source: str = Field(min_length=1)
+    subject_type: str = Field(min_length=1)
+    subject_id: str = Field(min_length=1)
+    computed_at: str
+    expires_at: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    signal_hash: Optional[str] = None
+    sig_alg: Optional[str] = None
+    signature: Optional[str] = None
+    key_id: Optional[str] = None
+
+
 # --- Config ---
 # Use user's preferred default
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -1236,6 +1251,74 @@ def metrics_for_tenant(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics_snapshot(tenant_id=effective_tenant),
     }
+
+
+@app.post("/signals/attest")
+def attest_signal_endpoint(
+    payload: SignalAttestRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.signals.attestation import attest_signal
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        record = attest_signal(
+            tenant_id=effective_tenant,
+            signal_type=payload.signal_type,
+            signal_source=payload.signal_source,
+            subject_type=payload.subject_type,
+            subject_id=payload.subject_id,
+            computed_at=payload.computed_at,
+            expires_at=payload.expires_at,
+            payload=payload.payload,
+            signal_hash=payload.signal_hash,
+            sig_alg=payload.sig_alg,
+            signature=payload.signature,
+            key_id=payload.key_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "signal_id": record.get("signal_id"),
+        "signal_hash": record.get("signal_hash"),
+        "signal_type": record.get("signal_type"),
+        "subject_type": record.get("subject_type"),
+        "subject_id": record.get("subject_id"),
+        "computed_at": record.get("computed_at"),
+        "expires_at": record.get("expires_at"),
+    }
+
+
+@app.get("/signals/latest")
+def latest_signal_attestation_endpoint(
+    signal_type: str,
+    subject_type: str,
+    subject_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.signals.attestation import get_latest_signal_attestation
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    item = get_latest_signal_attestation(
+        tenant_id=effective_tenant,
+        signal_type=signal_type,
+        subject_type=subject_type,
+        subject_id=subject_id,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Signal attestation not found")
+    return {"ok": True, "tenant_id": effective_tenant, "item": item}
 
 
 @app.get("/internal/metrics/anchor")

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import os
 import re
 from typing import Dict, Any, Set
 
@@ -60,6 +61,12 @@ def build_issue_risk_property(
     source: str = "github",
 ) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    max_age_raw = str(os.getenv("RELEASEGATE_MAX_SIGNAL_AGE_SECONDS", "86400") or "86400").strip()
+    try:
+        max_age_seconds = max(1, int(max_age_raw))
+    except Exception:
+        max_age_seconds = 86400
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max_age_seconds)).isoformat().replace("+00:00", "Z")
     risk_level = (risk_level or "LOW").upper()
     risk_score = score_for_risk_level(risk_level)
     payload = {
@@ -67,9 +74,11 @@ def build_issue_risk_property(
         "risk_level": risk_level,
         "risk_score": risk_score,
         "source": source,
+        "signal_source": source,
         "pr_number": int(pr_number),
         "repo": repo,
         "computed_at": now,
+        "expires_at": expires_at,
         "metrics": {
             "changed_files_count": int(metrics.changed_files or 0),
             "additions": int(metrics.additions or 0),
