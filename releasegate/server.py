@@ -2537,6 +2537,19 @@ def audit_proof_pack(
         zip_entries["dsse_envelope.json"] = dsse_envelope
     if isinstance(dsse_error, dict):
         zip_entries["dsse_error.json"] = dsse_error
+    independent_sig = (
+        (bundle.get("independent_checkpoint") or {}).get("signature")
+        if isinstance(bundle.get("independent_checkpoint"), dict)
+        else {}
+    )
+    if isinstance(independent_sig, dict):
+        public_key = str(independent_sig.get("public_key") or "").strip()
+        if public_key:
+            zip_entries["checkpoint_public_key.json"] = {
+                "algorithm": str(independent_sig.get("algorithm") or "").strip().lower(),
+                "key_id": str(independent_sig.get("key_id") or "").strip(),
+                "public_key": public_key,
+            }
     zip_entries["manifest.json"] = _proof_bundle_manifest(
         decision_id=decision_id,
         proof_pack_id=proof_pack_id,
