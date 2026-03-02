@@ -30,7 +30,7 @@ def _reason_min_length_default() -> int:
     raw = str(os.getenv("RELEASEGATE_APPROVAL_REASON_MIN_LENGTH") or "40").strip()
     try:
         return max(1, int(raw))
-    except Exception:
+    except ValueError:
         return 40
 
 
