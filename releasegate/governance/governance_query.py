@@ -186,6 +186,13 @@ def _normalize_status(status: str) -> str:
 
 
 def _matches_filters(item: Dict[str, Any], filters: DecisionArchiveFilters) -> bool:
+    if filters.decision_status:
+        expected_status = _normalize_status(str(filters.decision_status or ""))
+        if str(item.get("decision_status") or "") != expected_status:
+            return False
+    override_used = _normalize_bool(filters.override_used)
+    if override_used is not None and bool(item.get("override_used")) is not override_used:
+        return False
     if filters.risk_min is not None:
         risk_score = item.get("risk_score")
         if risk_score is None or float(risk_score) < float(filters.risk_min):
@@ -215,17 +222,6 @@ def _matches_filters(item: Dict[str, Any], filters: DecisionArchiveFilters) -> b
     return True
 
 
-def _sql_status_filter(value: Optional[str]) -> Tuple[str, List[Any]]:
-    if not value:
-        return "", []
-    normalized = str(value).strip().upper()
-    if normalized == "ALLOWED":
-        return " AND d.release_status = ?", ["ALLOWED"]
-    if normalized in {"DENIED", "BLOCKED", "ERROR"}:
-        return " AND d.release_status IN ('BLOCKED','ERROR')", []
-    return " AND d.release_status = ?", [normalized]
-
-
 def _normalize_bool(value: Any) -> Optional[bool]:
     if value is None:
         return None
@@ -253,8 +249,8 @@ def search_decisions(
     bounded_limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
     window_start, window_end = _window_bounds(filters.from_ts, filters.to_ts)
     cursor_token = _decode_cursor(cursor)
-
-    override_used = _normalize_bool(filters.override_used)
+    # Validate early so bad values fail once before scanning rows.
+    _normalize_bool(filters.override_used)
 
     base_query = """
         SELECT
@@ -283,15 +279,6 @@ def search_decisions(
     """
     params: List[Any] = [effective_tenant, window_start.isoformat(), window_end.isoformat()]
 
-    status_sql, status_params = _sql_status_filter(filters.decision_status)
-    base_query += status_sql
-    params.extend(status_params)
-
-    if override_used is True:
-        base_query += " AND EXISTS (SELECT 1 FROM audit_overrides o WHERE o.tenant_id = d.tenant_id AND o.decision_id = d.decision_id)"
-    elif override_used is False:
-        base_query += " AND NOT EXISTS (SELECT 1 FROM audit_overrides o WHERE o.tenant_id = d.tenant_id AND o.decision_id = d.decision_id)"
-
     scan_cursor = cursor_token
     batch_size = min(max(bounded_limit * 4, 200), 2000)
     scanned = 0
@@ -299,14 +286,35 @@ def search_decisions(
     next_cursor: Optional[str] = None
 
     while len(results) < bounded_limit and scanned < MAX_SCAN_ROWS:
-        query = base_query
-        query_params = list(params)
-        if scan_cursor is not None:
-            query += " AND (d.created_at < ? OR (d.created_at = ? AND d.decision_id < ?))"
-            query_params.extend([scan_cursor[0], scan_cursor[0], scan_cursor[1]])
-        query += " ORDER BY d.created_at DESC, d.decision_id DESC LIMIT ?"
-        query_params.append(batch_size)
-        rows = storage.fetchall(query, query_params)
+        if scan_cursor is None:
+            rows = storage.fetchall(
+                """
+                SELECT *
+                FROM (
+                    """
+                + base_query
+                + """
+                )
+                ORDER BY created_at DESC, decision_id DESC
+                LIMIT ?
+                """,
+                [*params, batch_size],
+            )
+        else:
+            rows = storage.fetchall(
+                """
+                SELECT *
+                FROM (
+                    """
+                + base_query
+                + """
+                )
+                WHERE (created_at < ? OR (created_at = ? AND decision_id < ?))
+                ORDER BY created_at DESC, decision_id DESC
+                LIMIT ?
+                """,
+                [*params, scan_cursor[0], scan_cursor[0], scan_cursor[1], batch_size],
+            )
         if not rows:
             break
 
