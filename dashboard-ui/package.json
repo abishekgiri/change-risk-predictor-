@@ -7,8 +7,9 @@
     "build": "node ./node_modules/next/dist/bin/next build --webpack",
     "start": "node ./node_modules/next/dist/bin/next start",
     "lint": "node ./node_modules/next/dist/bin/next lint",
-    "e2e": "npx playwright test",
-    "e2e:ui": "npx playwright test --ui"
+    "e2e": "node ./node_modules/@playwright/test/cli.js test",
+    "e2e:ui": "node ./node_modules/@playwright/test/cli.js test --ui",
+    "e2e:install": "node ./node_modules/@playwright/test/cli.js install"
   },
   "dependencies": {
     "next": "16.1.6",
