@@ -17,7 +17,8 @@ import os
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from starlette.background import BackgroundTask
 import csv
 import io
 import zipfile
@@ -430,6 +431,13 @@ class SignalAttestRequest(BaseModel):
     sig_alg: Optional[str] = None
     signature: Optional[str] = None
     key_id: Optional[str] = None
+
+
+class GovernanceExportRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    type: str = Field(min_length=1)
+    year: int
+    quarter: Optional[int] = None
 
 
 # --- Config ---
@@ -2033,6 +2041,138 @@ def governance_override_metrics(
         tenant_id=effective_tenant,
         days=days,
         top_n=top_n,
+    )
+
+
+@app.get("/governance/decisions")
+def governance_decision_archive(
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    decision_status: Optional[str] = None,
+    risk_min: Optional[float] = None,
+    risk_max: Optional[float] = None,
+    risk_band: Optional[str] = None,
+    override_used: Optional[bool] = None,
+    workflow_id: Optional[str] = None,
+    transition_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    environment: Optional[str] = None,
+    project_key: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.governance_query import DecisionArchiveFilters, search_decisions
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    bounded_limit = _bounded_limit(limit, max_allowed=500, field="limit")
+    try:
+        payload = search_decisions(
+            tenant_id=effective_tenant,
+            filters=DecisionArchiveFilters(
+                from_ts=from_ts,
+                to_ts=to_ts,
+                decision_status=decision_status,
+                risk_min=risk_min,
+                risk_max=risk_max,
+                risk_band=risk_band,
+                override_used=override_used,
+                workflow_id=workflow_id,
+                transition_id=transition_id,
+                actor=actor,
+                environment=environment,
+                project_key=project_key,
+            ),
+            limit=bounded_limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tenant_id": effective_tenant,
+        "results": payload.get("results") or [],
+        "next_cursor": payload.get("next_cursor"),
+        "truncated": bool(payload.get("truncated")),
+    }
+
+
+@app.get("/governance/decisions/{decision_id}/graph")
+def governance_decision_graph(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.audit_graph import build_decision_graph
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = build_decision_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Decision graph not found")
+    return payload
+
+
+@app.post("/governance/export")
+def governance_export_bundle(
+    payload: GovernanceExportRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.governance_export import (
+        build_governance_export,
+        cleanup_export_artifact,
+    )
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        artifact = build_governance_export(
+            tenant_id=effective_tenant,
+            export_type=payload.type,
+            year=payload.year,
+            quarter=payload.quarter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="governance_export",
+        target_type="tenant_governance_export",
+        target_id=effective_tenant,
+        metadata={
+            "type": str(payload.type).lower(),
+            "year": payload.year,
+            "quarter": payload.quarter,
+            "archive_name": artifact.archive_name,
+        },
+    )
+
+    return FileResponse(
+        path=artifact.archive_path,
+        media_type="application/zip",
+        filename=artifact.archive_name,
+        background=BackgroundTask(cleanup_export_artifact, artifact.temp_dir),
+        headers={
+            "X-Export-Version": str(artifact.manifest.get("export_version") or ""),
+            "X-Range-Start": str(artifact.manifest.get("range_start") or ""),
+            "X-Range-End-Exclusive": str(artifact.manifest.get("range_end_exclusive") or ""),
+        },
     )
 
 
