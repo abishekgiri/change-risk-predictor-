@@ -123,7 +123,7 @@ def cleanup_export_artifact(temp_dir: str) -> None:
         return
     try:
         shutil.rmtree(temp_dir, ignore_errors=True)
-    except Exception:
+    except OSError:
         pass
 
 
