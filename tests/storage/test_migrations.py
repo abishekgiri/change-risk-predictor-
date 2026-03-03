@@ -51,6 +51,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260308_032_independent_daily_checkpoints" in migration_ids
         assert "20260309_033_approval_orchestration" in migration_ids
         assert "20260310_034_signal_attestations" in migration_ids
+        assert "20260311_035_governance_query_indexes" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -61,6 +62,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "policy_hash" in decision_cols
         assert "replay_hash" in decision_cols
         assert decision_pk == ["tenant_id", "decision_id"]
+        cur.execute("PRAGMA index_list(audit_decisions)")
+        decision_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_audit_decisions_tenant_created_decision" in decision_indexes
+        assert "idx_audit_decisions_tenant_release_created_decision" in decision_indexes
 
         cur.execute("PRAGMA table_info(audit_overrides)")
         override_info = cur.fetchall()
@@ -74,6 +79,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "approved_by",
         } <= override_cols
         assert override_pk == ["tenant_id", "override_id"]
+        cur.execute("PRAGMA index_list(audit_overrides)")
+        override_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_overrides_tenant_decision_created" in override_indexes
+        assert "idx_overrides_tenant_actor_created" in override_indexes
 
         cur.execute("PRAGMA table_info(audit_checkpoints)")
         checkpoint_info = cur.fetchall()
@@ -378,6 +387,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "created_at",
         } <= linkage_cols
         assert linkage_pk == ["tenant_id", "decision_id"]
+        cur.execute("PRAGMA index_list(decision_transition_links)")
+        linkage_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_decision_links_tenant_actor_created" in linkage_indexes
+        assert "idx_decision_links_tenant_transition_created" in linkage_indexes
 
         cur.execute("PRAGMA table_info(deployment_decision_links)")
         deploy_link_info = cur.fetchall()
