@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "scripts": {
     "dev": "node ./node_modules/next/dist/bin/next dev",
-    "build": "node ./node_modules/next/dist/bin/next build",
+    "build": "node ./node_modules/next/dist/bin/next build --webpack",
     "start": "node ./node_modules/next/dist/bin/next start",
     "lint": "node ./node_modules/next/dist/bin/next lint",
     "e2e": "npx playwright test",

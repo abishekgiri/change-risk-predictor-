@@ -1,12 +1,15 @@
 import { PolicyDiffWorkbench } from "@/components/PolicyDiffWorkbench";
 import { resolveTenantId } from "@/lib/tenant";
 
-export default function PolicyDiffPage({
+export const dynamic = "force-dynamic";
+
+export default async function PolicyDiffPage({
   searchParams,
 }: {
-  searchParams: { tenant_id?: string | string[] };
+  searchParams: Promise<{ tenant_id?: string | string[] }>;
 }) {
-  const tenantId = resolveTenantId(searchParams.tenant_id);
+  const resolvedSearchParams = await searchParams;
+  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
 
   return (
     <div className="space-y-6">

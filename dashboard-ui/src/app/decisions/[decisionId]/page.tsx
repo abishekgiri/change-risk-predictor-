@@ -6,16 +6,20 @@ import { backendFetch } from "@/lib/backend";
 import { resolveTenantId } from "@/lib/tenant";
 import type { DecisionExplainer } from "@/lib/types";
 
+export const dynamic = "force-dynamic";
+
 export default async function DecisionPage({
   params,
   searchParams,
 }: {
-  params: { decisionId: string };
-  searchParams: { tenant_id?: string | string[] };
+  params: Promise<{ decisionId: string }>;
+  searchParams: Promise<{ tenant_id?: string | string[] }>;
 }) {
-  const tenantId = resolveTenantId(searchParams.tenant_id);
+  const resolvedParams = await params;
+  const resolvedSearchParams = await searchParams;
+  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
   const explainer = await backendFetch<DecisionExplainer>(
-    `/dashboard/decisions/${encodeURIComponent(params.decisionId)}/explainer`,
+    `/dashboard/decisions/${encodeURIComponent(resolvedParams.decisionId)}/explainer`,
     {
       method: "GET",
       query: { tenant_id: tenantId },

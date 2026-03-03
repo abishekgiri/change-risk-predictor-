@@ -13,12 +13,15 @@ interface BlockedPagePayload {
   next_cursor: string | null;
 }
 
+export const dynamic = "force-dynamic";
+
 export default async function OverviewPage({
   searchParams,
 }: {
-  searchParams: { tenant_id?: string | string[] };
+  searchParams: Promise<{ tenant_id?: string | string[] }>;
 }) {
-  const tenantId = resolveTenantId(searchParams.tenant_id);
+  const resolvedSearchParams = await searchParams;
+  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
 
   const overviewResp = await backendFetch<DashboardOverview>("/dashboard/overview", {
     method: "GET",
