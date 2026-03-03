@@ -84,7 +84,7 @@ def _decode_cursor(cursor: Optional[str]) -> Optional[Tuple[str, str]]:
     try:
         decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         payload = json.loads(decoded)
-    except Exception as exc:
+    except (json.JSONDecodeError, TypeError, base64.binascii.Error) as exc:
         raise ValueError("invalid cursor") from exc
     if not isinstance(payload, dict):
         raise ValueError("invalid cursor")
@@ -110,7 +110,7 @@ def _load_json(value: Any) -> Dict[str, Any]:
             return {}
         try:
             parsed = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
