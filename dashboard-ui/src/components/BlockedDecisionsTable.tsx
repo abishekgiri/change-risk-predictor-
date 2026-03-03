@@ -26,7 +26,7 @@ export function BlockedDecisionsTable({ tenantId, initialItems, initialCursor = 
   const hasMore = useMemo(() => Boolean(cursor), [cursor]);
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm" data-testid="blocked-table">
       <h3 className="text-sm font-semibold text-slate-800">Recent Blocked Decisions</h3>
       <div className="mt-3 overflow-x-auto">
         <table className="min-w-full text-left text-sm">
@@ -49,7 +49,11 @@ export function BlockedDecisionsTable({ tenantId, initialItems, initialCursor = 
                 </td>
                 <td className="py-2 pr-3 text-slate-700">{item.reason_code || "-"}</td>
                 <td className="py-2">
-                  <a className="text-indigo-600 hover:underline" href={`/decisions/${item.decision_id}`}>
+                  <a
+                    className="text-indigo-600 hover:underline"
+                    href={`/decisions/${item.decision_id}`}
+                    data-testid="blocked-row-link"
+                  >
                     View
                   </a>
                 </td>

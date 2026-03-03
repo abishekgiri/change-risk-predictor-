@@ -6,7 +6,9 @@
     "dev": "node ./node_modules/next/dist/bin/next dev",
     "build": "node ./node_modules/next/dist/bin/next build",
     "start": "node ./node_modules/next/dist/bin/next start",
-    "lint": "node ./node_modules/next/dist/bin/next lint"
+    "lint": "node ./node_modules/next/dist/bin/next lint",
+    "e2e": "npx playwright test",
+    "e2e:ui": "npx playwright test --ui"
   },
   "dependencies": {
     "next": "14.2.5",

@@ -29,11 +29,13 @@ export default async function DecisionPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Decision Explorer</h1>
-          <p className="mt-1 text-sm text-slate-600">
+          <p className="mt-1 text-sm text-slate-600" data-testid="decision-outcome">
             {decision.decision_id} • {decision.outcome}
           </p>
           {decision.blocked_because ? (
-            <p className="mt-2 text-sm text-rose-700">{decision.blocked_because}</p>
+            <p className="mt-2 text-sm text-rose-700" data-testid="blocked-because">
+              {decision.blocked_because}
+            </p>
           ) : null}
         </div>
         <TraceInfo traceId={explainer.data.trace_id ?? explainer.traceId} />
@@ -45,7 +47,7 @@ export default async function DecisionPage({
         <KpiCard label="Signals" value={String(explainer.data.signals.length)} />
       </section>
 
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm" data-testid="snapshot-binding">
         <h3 className="text-sm font-semibold text-slate-800">Snapshot Binding</h3>
         <ul className="mt-3 space-y-2 text-sm">
           <li className="flex items-center justify-between gap-3">

@@ -2,3 +2,5 @@ node_modules
 .next
 .next-cache
 .DS_Store
+playwright-report
+test-results
