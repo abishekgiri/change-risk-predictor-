@@ -157,8 +157,18 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
-        ON audit_overrides(tenant_id, expires_at)
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = ANY(current_schemas(false))
+                  AND table_name = 'audit_overrides'
+                  AND column_name = 'expires_at'
+            ) THEN
+                EXECUTE 'CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at ON audit_overrides(tenant_id, expires_at)';
+            END IF;
+        END $$;
         """
     )
     cur.execute(
