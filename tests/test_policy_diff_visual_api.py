@@ -65,9 +65,22 @@ def test_dashboard_policy_diff_returns_visual_sections():
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["overall"] == "WEAKENING"
+    assert body["summary"]["has_changes"] is True
+    assert body["summary"]["change_count"] >= 1
     assert body["summary"]["warning_count"] >= 1
+    assert body["summary"]["severity_counts"]["high"] >= 1
+    assert body["summary"]["summary_bullets"]
     assert len(body["threshold_deltas"]) >= 1
     assert len(body["condition_deltas"]) >= 1
-    assert len(body["role_deltas"]) == 1
+    assert len(body["role_deltas"]) >= 1
+    assert all(delta.get("severity") in {"low", "medium", "high"} for delta in body["threshold_deltas"])
+    assert all(delta.get("severity") in {"low", "medium", "high"} for delta in body["condition_deltas"])
+    assert all(delta.get("severity") in {"low", "medium", "high"} for delta in body["role_deltas"])
+    assert all(delta.get("severity") in {"low", "medium", "high"} for delta in body["sod_deltas"])
+    # deterministic ordering: high severity should appear before low severity in each delta bucket.
+    rank = {"high": 0, "medium": 1, "low": 2}
+    for bucket in ("threshold_deltas", "condition_deltas", "role_deltas", "sod_deltas"):
+        severities = [rank[item["severity"]] for item in body[bucket]]
+        assert severities == sorted(severities)
     assert "active_policy" in body
     assert "staged_policy" in body
