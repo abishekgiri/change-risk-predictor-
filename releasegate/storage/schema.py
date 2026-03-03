@@ -117,6 +117,14 @@ def _init_postgres_schema() -> str:
         )
         """
     )
+    # Existing Postgres deployments may have an older override table shape.
+    # Ensure expires_at exists before creating indexes that depend on it.
+    cur.execute(
+        """
+        ALTER TABLE audit_overrides
+        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+        """
+    )
     cur.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_tenant_idempotency_key
