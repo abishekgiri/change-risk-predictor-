@@ -16,6 +16,11 @@ DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 90
 DEFAULT_BLOCKED_LIMIT = 25
 MAX_BLOCKED_LIMIT = 100
+ALERT_BASELINE_DAYS = 7
+OVERRIDE_SPIKE_MULTIPLIER = 2.0
+DRIFT_SPIKE_MULTIPLIER = 2.0
+OVERRIDE_SPIKE_MIN_RATE = 0.05
+DRIFT_SPIKE_MIN_INDEX = 0.02
 
 
 def _utc_now() -> datetime:
@@ -141,6 +146,194 @@ def _extract_drift_breakdown(details_json: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    raw = str(value or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _severity_rank(value: str) -> int:
+    normalized = str(value or "").strip().lower()
+    if normalized == "high":
+        return 0
+    if normalized == "medium":
+        return 1
+    return 2
+
+
+def _rollup_override_abuse(
+    *,
+    override_count: int,
+    decision_count: int,
+    metrics: Dict[str, Any],
+) -> Dict[str, Any]:
+    override_meta = metrics.get("override_abuse") if isinstance(metrics.get("override_abuse"), dict) else {}
+    override_rate = _override_rate_from_counts(
+        override_count=override_count,
+        decision_count=decision_count,
+    )
+    top_actor_share = _safe_float(override_meta.get("top_actor_share"))
+    if top_actor_share <= 0.0 and override_count > 0:
+        top_actor_share = 1.0
+    actor_concentration = min(1.0, max(0.0, top_actor_share))
+    top_actor_override_count = int(round(float(override_count) * actor_concentration)) if override_count > 0 else 0
+    override_abuse_index = override_rate * actor_concentration
+    return {
+        "override_abuse_index": round(override_abuse_index, 6),
+        "override_abuse": {
+            "override_rate": round(override_rate, 6),
+            "override_count": int(override_count),
+            "decision_count": int(decision_count),
+            "top_actor_override_count": int(top_actor_override_count),
+            "actor_concentration": round(actor_concentration, 6),
+        },
+    }
+
+
+def _fetch_prior_rollup_rows(
+    *,
+    tenant_id: str,
+    day: date,
+    limit: int = ALERT_BASELINE_DAYS,
+) -> List[Dict[str, Any]]:
+    storage = get_storage_backend()
+    return storage.fetchall(
+        """
+        SELECT
+            date_utc,
+            override_rate,
+            drift_index,
+            strict_mode_count,
+            decision_count
+        FROM governance_daily_metrics
+        WHERE tenant_id = ?
+          AND date_utc < ?
+        ORDER BY date_utc DESC
+        LIMIT ?
+        """,
+        (tenant_id, day.isoformat(), int(limit)),
+    )
+
+
+def _mean(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values)) / float(len(values))
+
+
+def _build_daily_alerts(
+    *,
+    tenant_id: str,
+    day: date,
+    override_rate: float,
+    drift_index: float,
+    strict_mode_count: int,
+    decision_count: int,
+    override_count: int,
+    prior_rows: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    recent = list(prior_rows[:ALERT_BASELINE_DAYS])
+    baseline_override = _mean([_safe_float(row.get("override_rate")) for row in recent])
+    baseline_drift = _mean([_safe_float(row.get("drift_index")) for row in recent])
+    alerts: List[Dict[str, Any]] = []
+
+    if (
+        baseline_override > 0.0
+        and override_rate > max(OVERRIDE_SPIKE_MIN_RATE, baseline_override * OVERRIDE_SPIKE_MULTIPLIER)
+    ):
+        alerts.append(
+            {
+                "date_utc": day.isoformat(),
+                "severity": "high",
+                "code": "OVERRIDE_SPIKE",
+                "title": "Override rate spiked vs 7-day baseline",
+                "details": {
+                    "today": round(override_rate, 6),
+                    "baseline_7d": round(baseline_override, 6),
+                    "override_count": int(override_count),
+                    "decision_count": int(decision_count),
+                },
+            }
+        )
+
+    if (
+        baseline_drift > 0.0
+        and drift_index > max(DRIFT_SPIKE_MIN_INDEX, baseline_drift * DRIFT_SPIKE_MULTIPLIER)
+    ):
+        alerts.append(
+            {
+                "date_utc": day.isoformat(),
+                "severity": "medium",
+                "code": "DRIFT_SPIKE",
+                "title": "Drift index spiked vs 7-day baseline",
+                "details": {
+                    "today": round(drift_index, 6),
+                    "baseline_7d": round(baseline_drift, 6),
+                },
+            }
+        )
+
+    yesterday = day - timedelta(days=1)
+    yesterday_row = next(
+        (
+            row
+            for row in recent
+            if _iso_date(row.get("date_utc")) == yesterday.isoformat()
+        ),
+        None,
+    )
+    if yesterday_row is not None:
+        yesterday_strict = int(yesterday_row.get("strict_mode_count") or 0)
+        if strict_mode_count < yesterday_strict:
+            alerts.append(
+                {
+                    "date_utc": day.isoformat(),
+                    "severity": "high",
+                    "code": "STRICT_MODE_DROP",
+                    "title": "Strict mode count dropped from previous day",
+                    "details": {
+                        "today": int(strict_mode_count),
+                        "yesterday": int(yesterday_strict),
+                    },
+                }
+            )
+
+    if decision_count == 0:
+        alerts.append(
+            {
+                "date_utc": day.isoformat(),
+                "severity": "medium",
+                "code": "NO_DATA",
+                "title": "No decisions recorded for this rollup window",
+                "details": {"decision_count": 0},
+            }
+        )
+
+    return sorted(
+        alerts,
+        key=lambda alert: (
+            -int(_iso_date(alert.get("date_utc")).replace("-", "")),
+            _severity_rank(str(alert.get("severity") or "medium")),
+            str(alert.get("code") or ""),
+        ),
+    )
+
+
+def _collect_alert_counts(alerts: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts = {"high": 0, "medium": 0, "low": 0}
+    for alert in alerts:
+        severity = str(alert.get("severity") or "").strip().lower()
+        if severity in counts:
+            counts[severity] += 1
+    return counts
+
+
 def list_integrity_trend(
     *,
     tenant_id: str,
@@ -170,6 +363,7 @@ def list_integrity_trend(
     )
     trend: List[Dict[str, Any]] = []
     for row in rows:
+        details_json = _parse_json(row.get("details_json"))
         override_count = int(row.get("override_count") or 0)
         decision_count = int(row.get("decision_count") or 0)
         trend.append(
@@ -184,7 +378,8 @@ def list_integrity_trend(
                 "override_count": override_count,
                 "decision_count": decision_count,
                 "blocked_count": int(row.get("blocked_count") or 0),
-                "drift_breakdown": _extract_drift_breakdown(row.get("details_json")),
+                "drift_breakdown": _extract_drift_breakdown(details_json),
+                "override_abuse_index": _safe_float(details_json.get("override_abuse_index")),
             }
         )
     return trend
@@ -431,6 +626,100 @@ def get_dashboard_overview(
     }
 
 
+def list_dashboard_alerts(
+    *,
+    tenant_id: str,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+) -> Dict[str, Any]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    bounded_window = _normalize_window_days(window_days)
+    start_date = (_utc_now().date() - timedelta(days=bounded_window - 1)).isoformat()
+    rows = storage.fetchall(
+        """
+        SELECT
+            date_utc,
+            override_rate,
+            drift_index,
+            strict_mode_count,
+            override_count,
+            decision_count,
+            details_json
+        FROM governance_daily_metrics
+        WHERE tenant_id = ? AND date_utc >= ?
+        ORDER BY date_utc ASC
+        """,
+        (effective_tenant, start_date),
+    )
+
+    alerts: List[Dict[str, Any]] = []
+    rolling_previous: List[Dict[str, Any]] = []
+    current_override_abuse_index = 0.0
+    for row in rows:
+        day = _coerce_date_utc(row.get("date_utc") or _utc_now().date().isoformat())
+        override_rate = _safe_float(row.get("override_rate"))
+        drift_index = _safe_float(row.get("drift_index"))
+        strict_mode_count = int(row.get("strict_mode_count") or 0)
+        override_count = int(row.get("override_count") or 0)
+        decision_count = int(row.get("decision_count") or 0)
+        details = _parse_json(row.get("details_json"))
+
+        stored_alerts = details.get("alerts") if isinstance(details.get("alerts"), list) else []
+        for alert in stored_alerts:
+            if not isinstance(alert, dict):
+                continue
+            alerts.append(
+                {
+                    "date_utc": _iso_date(alert.get("date_utc") or day.isoformat()),
+                    "severity": str(alert.get("severity") or "medium").lower(),
+                    "code": str(alert.get("code") or "UNKNOWN"),
+                    "title": str(alert.get("title") or "Governance alert"),
+                    "details": alert.get("details") if isinstance(alert.get("details"), dict) else {},
+                }
+            )
+
+        computed_alerts = _build_daily_alerts(
+            tenant_id=effective_tenant,
+            day=day,
+            override_rate=override_rate,
+            drift_index=drift_index,
+            strict_mode_count=strict_mode_count,
+            decision_count=decision_count,
+            override_count=override_count,
+            prior_rows=rolling_previous,
+        )
+        existing_keys = {(str(item.get("date_utc")), str(item.get("code"))) for item in alerts}
+        for alert in computed_alerts:
+            key = (str(alert.get("date_utc")), str(alert.get("code")))
+            if key not in existing_keys:
+                alerts.append(alert)
+                existing_keys.add(key)
+
+        current_override_abuse_index = _safe_float(
+            details.get("override_abuse_index"),
+            default=override_rate,
+        )
+        rolling_previous.insert(0, row)
+        if len(rolling_previous) > ALERT_BASELINE_DAYS:
+            rolling_previous = rolling_previous[:ALERT_BASELINE_DAYS]
+
+    sorted_alerts = sorted(
+        alerts,
+        key=lambda alert: (
+            -int(_iso_date(alert.get("date_utc")).replace("-", "")),
+            _severity_rank(str(alert.get("severity") or "medium")),
+            str(alert.get("code") or ""),
+        ),
+    )
+    return {
+        "tenant_id": effective_tenant,
+        "window_days": bounded_window,
+        "alerts": sorted_alerts,
+        "current_override_abuse_index": round(current_override_abuse_index, 6),
+    }
+
+
 def compute_and_upsert_governance_daily_metrics(
     *,
     tenant_id: str,
@@ -462,6 +751,30 @@ def compute_and_upsert_daily_rollup(
         override_count=override_count,
         decision_count=decision_count,
     )
+    abuse_payload = _rollup_override_abuse(
+        override_count=override_count,
+        decision_count=decision_count,
+        metrics=metrics,
+    )
+    prior_rows = _fetch_prior_rollup_rows(
+        tenant_id=effective_tenant,
+        day=day,
+        limit=ALERT_BASELINE_DAYS,
+    )
+    alerts = _build_daily_alerts(
+        tenant_id=effective_tenant,
+        day=day,
+        override_rate=override_rate,
+        drift_index=float(metrics.get("drift_index") or 0.0),
+        strict_mode_count=strict_mode_count,
+        decision_count=decision_count,
+        override_count=override_count,
+        prior_rows=prior_rows,
+    )
+    details_payload = dict(metrics)
+    details_payload.update(abuse_payload)
+    details_payload["alerts"] = alerts
+    details_payload["alert_counts"] = _collect_alert_counts(alerts)
     computed_at = _utc_now().isoformat()
     storage.execute(
         """
@@ -491,7 +804,7 @@ def compute_and_upsert_daily_rollup(
             override_count,
             decision_count,
             computed_at,
-            json.dumps(metrics, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            json.dumps(details_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         ),
     )
     return {
@@ -501,6 +814,8 @@ def compute_and_upsert_daily_rollup(
         "integrity_score": float(metrics.get("governance_integrity_score") or 0.0),
         "drift_index": float(metrics.get("drift_index") or 0.0),
         "override_rate": float(override_rate),
+        "override_abuse_index": float(abuse_payload.get("override_abuse_index") or 0.0),
+        "alerts": alerts,
         "blocked_count": int(metrics.get("deny_count") or 0),
     }
 

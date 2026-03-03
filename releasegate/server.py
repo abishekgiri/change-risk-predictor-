@@ -2095,6 +2095,29 @@ def dashboard_integrity_endpoint(
     }
 
 
+@app.get("/dashboard/alerts")
+def dashboard_alerts_endpoint(
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_dashboard_alerts
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        payload = list_dashboard_alerts(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload
+
+
 @app.get("/dashboard/blocked")
 def dashboard_blocked_endpoint(
     tenant_id: Optional[str] = None,
