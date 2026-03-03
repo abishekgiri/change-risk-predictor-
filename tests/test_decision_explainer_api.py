@@ -120,11 +120,22 @@ def test_dashboard_decision_explainer_returns_binding_and_replay_link():
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["decision_id"] == decision_id
-    assert body["why_blocked"] == "RISK_TOO_HIGH"
-    assert body["policy_binding"]["binding_verified"] is True
-    assert body["replay"]["path"] == f"/decisions/{decision_id}/replay"
+    assert body["decision"]["outcome"] == "BLOCK"
+    assert body["decision"]["blocked_because"]
     assert body["decision"]["workflow_id"] == "wf-release"
-    assert body["risk_components"]["risk_score"] == 0.91
+    assert body["snapshot_binding"]["policy_hash"]
+    assert body["snapshot_binding"]["snapshot_hash"]
+    assert body["snapshot_binding"]["decision_hash"] == f"decision-hash-{decision_id}"
+    assert isinstance(body["signals"], list)
+    assert body["signals"][0]["name"] == "risk"
+    assert "source" in body["signals"][0]
+    assert "confidence" in body["signals"][0]
+    assert isinstance(body["risk"]["components"], list)
+    assert body["risk"]["score"] == 0.91
+    assert isinstance(body["evidence_links"], list)
+    assert body["replay"]["path"] == f"/decisions/{decision_id}/replay"
+    assert body["replay"]["token"] == f"replay-hash-{decision_id}"
+    assert "expires_at" in body["replay"]
 
 
 def test_dashboard_decision_explainer_returns_404_for_missing_decision():
