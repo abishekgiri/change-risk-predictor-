@@ -82,6 +82,24 @@ def _iso_date(value: Any) -> str:
     return _utc_now().date().isoformat()
 
 
+def _iso_datetime_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    candidate = raw
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _coerce_date_utc(value: date | datetime | str) -> date:
     if isinstance(value, date) and not isinstance(value, datetime):
         return value
@@ -106,6 +124,23 @@ def _coerce_date_utc(value: date | datetime | str) -> date:
         raise ValueError("date_utc must be an ISO-8601 date") from exc
 
 
+def _override_rate_from_counts(*, override_count: int, decision_count: int) -> float:
+    if int(decision_count or 0) <= 0:
+        return 0.0
+    return float(override_count) / float(decision_count)
+
+
+def _extract_drift_breakdown(details_json: Any) -> Optional[Dict[str, Any]]:
+    details = _parse_json(details_json)
+    if not details:
+        return None
+    if isinstance(details.get("policy_drift"), dict):
+        return details.get("policy_drift")
+    if isinstance(details.get("drift_breakdown"), dict):
+        return details.get("drift_breakdown")
+    return None
+
+
 def list_integrity_trend(
     *,
     tenant_id: str,
@@ -118,23 +153,41 @@ def list_integrity_trend(
     start_date = (_utc_now().date() - timedelta(days=bounded_window - 1)).isoformat()
     rows = storage.fetchall(
         """
-        SELECT date_utc, integrity_score, drift_index, override_rate, blocked_count
+        SELECT
+            date_utc,
+            integrity_score,
+            drift_index,
+            override_rate,
+            blocked_count,
+            override_count,
+            decision_count,
+            details_json
         FROM governance_daily_metrics
         WHERE tenant_id = ? AND date_utc >= ?
         ORDER BY date_utc ASC
         """,
         (effective_tenant, start_date),
     )
-    return [
-        {
-            "date_utc": _iso_date(row.get("date_utc")),
-            "integrity_score": float(row.get("integrity_score") or 0.0),
-            "drift_index": float(row.get("drift_index") or 0.0),
-            "override_rate": float(row.get("override_rate") or 0.0),
-            "blocked_count": int(row.get("blocked_count") or 0),
-        }
-        for row in rows
-    ]
+    trend: List[Dict[str, Any]] = []
+    for row in rows:
+        override_count = int(row.get("override_count") or 0)
+        decision_count = int(row.get("decision_count") or 0)
+        trend.append(
+            {
+                "date_utc": _iso_date(row.get("date_utc")),
+                "integrity_score": float(row.get("integrity_score") or 0.0),
+                "drift_index": float(row.get("drift_index") or 0.0),
+                "override_rate": _override_rate_from_counts(
+                    override_count=override_count,
+                    decision_count=decision_count,
+                ),
+                "override_count": override_count,
+                "decision_count": decision_count,
+                "blocked_count": int(row.get("blocked_count") or 0),
+                "drift_breakdown": _extract_drift_breakdown(row.get("details_json")),
+            }
+        )
+    return trend
 
 
 def list_recent_blocked_decisions(
@@ -178,10 +231,14 @@ def list_recent_blocked_decisions(
                 "jira_issue_id": str(request.get("issue_key") or ""),
                 "workflow_id": workflow_id,
                 "transition_id": str(request.get("transition_id") or ""),
+                "workflow": workflow_id,
+                "transition": str(request.get("transition_id") or ""),
                 "actor": str(request.get("actor_account_id") or request.get("actor_id") or ""),
                 "environment": str(request.get("environment") or ""),
                 "project_key": str(request.get("project_key") or ""),
                 "policy_hash": str(row.get("policy_hash") or ""),
+                "subject_ref": str(request.get("issue_key") or ""),
+                "explainer_path": f"/dashboard/decisions/{str(row.get('decision_id') or '')}/explainer",
             }
         )
     return items
@@ -195,7 +252,16 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
 
     policy_rows = storage.fetchall(
         """
-        SELECT policy_id, scope_type, scope_id, version, policy_json
+        SELECT
+            policy_id,
+            scope_type,
+            scope_id,
+            version,
+            policy_json,
+            created_at,
+            created_by,
+            activated_at,
+            activated_by
         FROM policy_registry_entries
         WHERE tenant_id = ? AND status = 'ACTIVE'
         ORDER BY activated_at DESC, created_at DESC
@@ -214,13 +280,16 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
                     "policy_id": str(row.get("policy_id") or ""),
                     "policy_version": int(row.get("version") or 0),
                     "enabled": True,
+                    "reason": str(policy_json.get("strict_fail_closed_reason") or "").strip() or None,
+                    "last_changed_by": str(row.get("activated_by") or row.get("created_by") or "").strip() or None,
+                    "last_changed_at": _iso_datetime_or_none(row.get("activated_at") or row.get("created_at")),
                     "source": "policy_registry_entries",
                 }
             )
 
     settings = storage.fetchone(
         """
-        SELECT quota_enforcement_mode, security_state, updated_at
+        SELECT quota_enforcement_mode, security_state, security_reason, updated_at, updated_by
         FROM tenant_governance_settings
         WHERE tenant_id = ?
         LIMIT 1
@@ -234,6 +303,9 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
                 "scope_type": "tenant",
                 "scope_id": effective_tenant,
                 "enabled": True,
+                "reason": "tenant quota enforcement mode is HARD",
+                "last_changed_by": str(settings.get("updated_by") or "").strip() or None,
+                "last_changed_at": _iso_datetime_or_none(settings.get("updated_at")),
                 "source": "tenant_governance_settings",
                 "updated_at": settings.get("updated_at"),
             }
@@ -245,19 +317,26 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
                 "scope_type": "tenant",
                 "scope_id": effective_tenant,
                 "enabled": True,
+                "reason": str(settings.get("security_reason") or "").strip() or "tenant security state is locked",
+                "last_changed_by": str(settings.get("updated_by") or "").strip() or None,
+                "last_changed_at": _iso_datetime_or_none(settings.get("updated_at")),
                 "source": "tenant_governance_settings",
                 "updated_at": settings.get("updated_at"),
             }
         )
 
-    strict_env_flags = {
-        "workflow_gate_strict_mode": os.getenv("RELEASEGATE_STRICT_MODE"),
-        "kms_strict_mode": os.getenv("RELEASEGATE_STRICT_KMS"),
-        "correlation_strict_mode": os.getenv("RELEASEGATE_CORRELATION_STRICT") or os.getenv("CORRELATION_STRICT"),
-        "independent_anchor_strict_mode": os.getenv("RELEASEGATE_ANCHOR_STRICT"),
-        "strict_fail_closed": os.getenv("RELEASEGATE_STRICT_FAIL_CLOSED"),
-    }
-    for mode, raw in strict_env_flags.items():
+    strict_env_flags = [
+        ("workflow_gate_strict_mode", "RELEASEGATE_STRICT_MODE", os.getenv("RELEASEGATE_STRICT_MODE")),
+        ("kms_strict_mode", "RELEASEGATE_STRICT_KMS", os.getenv("RELEASEGATE_STRICT_KMS")),
+        (
+            "correlation_strict_mode",
+            "RELEASEGATE_CORRELATION_STRICT",
+            os.getenv("RELEASEGATE_CORRELATION_STRICT") or os.getenv("CORRELATION_STRICT"),
+        ),
+        ("independent_anchor_strict_mode", "RELEASEGATE_ANCHOR_STRICT", os.getenv("RELEASEGATE_ANCHOR_STRICT")),
+        ("strict_fail_closed", "RELEASEGATE_STRICT_FAIL_CLOSED", os.getenv("RELEASEGATE_STRICT_FAIL_CLOSED")),
+    ]
+    for mode, env_var, raw in strict_env_flags:
         if str(raw or "").strip().lower() in {"1", "true", "yes", "on"}:
             active.append(
                 {
@@ -265,6 +344,9 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
                     "scope_type": "system",
                     "scope_id": "global",
                     "enabled": True,
+                    "reason": f"enabled via environment variable {env_var}",
+                    "last_changed_by": None,
+                    "last_changed_at": None,
                     "source": "env",
                 }
             )
@@ -288,22 +370,32 @@ def get_dashboard_overview(
         integrity_score = float(latest.get("integrity_score") or 0.0)
         drift_index = float(latest.get("drift_index") or 0.0)
         override_rate = float(latest.get("override_rate") or 0.0)
+        drift_breakdown = latest.get("drift_breakdown") if isinstance(latest.get("drift_breakdown"), dict) else None
     else:
         integrity_payload = get_tenant_governance_integrity(
             tenant_id=effective_tenant,
             window_days=min(_normalize_window_days(window_days), 90),
         )
         governance_metrics = get_tenant_governance_metrics(tenant_id=effective_tenant)
+        override_count = int((integrity_payload.get("override_abuse") or {}).get("override_count") or 0)
+        decision_count = int(integrity_payload.get("decision_count") or 0)
         integrity_score = float(integrity_payload.get("governance_integrity_score") or 0.0)
         drift_index = float(integrity_payload.get("drift_index") or 0.0)
-        override_rate = float((integrity_payload.get("override_abuse") or {}).get("override_rate") or 0.0)
+        override_rate = _override_rate_from_counts(
+            override_count=override_count,
+            decision_count=decision_count,
+        )
+        drift_breakdown = None
         trend = [
             {
                 "date_utc": _utc_now().date().isoformat(),
                 "integrity_score": integrity_score,
                 "drift_index": drift_index,
                 "override_rate": override_rate,
+                "override_count": override_count,
+                "decision_count": decision_count,
                 "blocked_count": int(governance_metrics.get("denies_month") or 0),
+                "drift_breakdown": drift_breakdown,
             }
         ]
 
@@ -322,9 +414,18 @@ def get_dashboard_overview(
         ],
         "override_rate": round(override_rate, 6),
         "override_rate_trend": [
-            {"date_utc": row["date_utc"], "value": row["override_rate"]}
+            {
+                "date_utc": row["date_utc"],
+                "value": row["override_rate"],
+                "override_count": int(row.get("override_count") or 0),
+                "decision_count": int(row.get("decision_count") or 0),
+            }
             for row in trend
         ],
+        "drift": {
+            "current": round(drift_index, 6),
+            "breakdown": drift_breakdown if isinstance(drift_breakdown, dict) else None,
+        },
         "active_strict_modes": strict_modes,
         "recent_blocked": blocked,
     }
@@ -355,6 +456,12 @@ def compute_and_upsert_daily_rollup(
         now=day_cutoff,
     )
     strict_mode_count = len(list_active_strict_modes(tenant_id=effective_tenant))
+    override_count = int((metrics.get("override_abuse") or {}).get("override_count") or 0)
+    decision_count = int(metrics.get("decision_count") or 0)
+    override_rate = _override_rate_from_counts(
+        override_count=override_count,
+        decision_count=decision_count,
+    )
     computed_at = _utc_now().isoformat()
     storage.execute(
         """
@@ -378,11 +485,11 @@ def compute_and_upsert_daily_rollup(
             day.isoformat(),
             float(metrics.get("governance_integrity_score") or 0.0),
             float(metrics.get("drift_index") or 0.0),
-            float((metrics.get("override_abuse") or {}).get("override_rate") or 0.0),
+            float(override_rate),
             int(metrics.get("deny_count") or 0),
             int(strict_mode_count),
-            int((metrics.get("override_abuse") or {}).get("override_count") or 0),
-            int(metrics.get("decision_count") or 0),
+            override_count,
+            decision_count,
             computed_at,
             json.dumps(metrics, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
         ),
@@ -393,7 +500,7 @@ def compute_and_upsert_daily_rollup(
         "computed_at": computed_at,
         "integrity_score": float(metrics.get("governance_integrity_score") or 0.0),
         "drift_index": float(metrics.get("drift_index") or 0.0),
-        "override_rate": float((metrics.get("override_abuse") or {}).get("override_rate") or 0.0),
+        "override_rate": float(override_rate),
         "blocked_count": int(metrics.get("deny_count") or 0),
     }
 

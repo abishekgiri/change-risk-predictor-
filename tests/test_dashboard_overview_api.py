@@ -30,6 +30,9 @@ def _insert_governance_rollup(
     drift_index: float,
     override_rate: float,
     blocked_count: int,
+    override_count: int = 2,
+    decision_count: int = 10,
+    details_json: str = "{}",
 ) -> None:
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -48,10 +51,10 @@ def _insert_governance_rollup(
                 float(override_rate),
                 int(blocked_count),
                 1,
-                2,
-                10,
+                int(override_count),
+                int(decision_count),
                 datetime.now(timezone.utc).isoformat(),
-                "{}",
+                details_json,
             ),
         )
         conn.commit()
@@ -178,6 +181,18 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
         drift_index=1.2,
         override_rate=0.08,
         blocked_count=2,
+        override_count=8,
+        decision_count=100,
+        details_json=json.dumps(
+            {
+                "policy_drift": {
+                    "signal_totals": {"WEAKEN_RISK_THRESHOLD": 2},
+                    "recent_weakening_events": 1,
+                }
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     )
     _insert_governance_rollup(
         tenant_id=tenant_id,
@@ -186,6 +201,18 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
         drift_index=1.5,
         override_rate=0.09,
         blocked_count=3,
+        override_count=9,
+        decision_count=100,
+        details_json=json.dumps(
+            {
+                "policy_drift": {
+                    "signal_totals": {"WEAKEN_APPROVAL_REQUIREMENT": 3},
+                    "recent_weakening_events": 2,
+                }
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     )
     _insert_blocked_decision(
         tenant_id=tenant_id,
@@ -207,7 +234,25 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     assert body["override_rate"] == 0.09
     assert len(body["integrity_trend"]) == 2
     assert body["recent_blocked"][0]["decision_id"] == "dec-blocked-1"
-    assert any(item["mode"] == "policy_strict_fail_closed" for item in body["active_strict_modes"])
+    assert body["recent_blocked"][0]["subject_ref"] == "RG-900"
+    assert body["recent_blocked"][0]["explainer_path"] == "/dashboard/decisions/dec-blocked-1/explainer"
+    policy_strict = next(item for item in body["active_strict_modes"] if item["mode"] == "policy_strict_fail_closed")
+    assert "reason" in policy_strict
+    assert "last_changed_by" in policy_strict
+    assert "last_changed_at" in policy_strict
+    assert body["drift"]["current"] == 1.5
+    assert body["drift"]["breakdown"]["signal_totals"] == {"WEAKEN_APPROVAL_REQUIREMENT": 3}
+
+    integrity_response = client.get(
+        "/dashboard/integrity",
+        params={"tenant_id": tenant_id, "window_days": 30},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert integrity_response.status_code == 200, integrity_response.text
+    trend = integrity_response.json()["trend"]
+    assert trend[-1]["override_count"] == 9
+    assert trend[-1]["decision_count"] == 100
+    assert trend[-1]["override_rate"] == 0.09
 
 
 def test_dashboard_blocked_limit_validation():
@@ -219,6 +264,19 @@ def test_dashboard_blocked_limit_validation():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 400
+
+
+def test_dashboard_overview_fallback_returns_null_drift_breakdown():
+    _reset_db()
+    tenant_id = "tenant-dashboard-overview-fallback"
+    response = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["drift"]["breakdown"] is None
 
 
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():
