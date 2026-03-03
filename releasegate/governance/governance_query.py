@@ -110,7 +110,7 @@ def _load_json(value: Any) -> Dict[str, Any]:
             return {}
         try:
             parsed = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
