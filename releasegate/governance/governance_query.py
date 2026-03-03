@@ -16,6 +16,63 @@ MAX_LIMIT = 500
 DEFAULT_WINDOW_DAYS = 30
 MAX_SCAN_ROWS = 50000
 
+_SQL_DECISION_ARCHIVE_PAGE = """
+    SELECT
+        d.tenant_id,
+        d.decision_id,
+        d.created_at,
+        d.release_status,
+        d.full_decision_json,
+        d.repo,
+        d.pr_number,
+        dtl.jira_issue_id,
+        dtl.transition_id AS linked_transition_id,
+        dtl.actor AS linked_actor,
+        CASE WHEN EXISTS (
+            SELECT 1
+            FROM audit_overrides o
+            WHERE o.tenant_id = d.tenant_id AND o.decision_id = d.decision_id
+        ) THEN 1 ELSE 0 END AS override_used
+    FROM audit_decisions d
+    LEFT JOIN decision_transition_links dtl
+      ON dtl.tenant_id = d.tenant_id
+     AND dtl.decision_id = d.decision_id
+    WHERE d.tenant_id = ?
+      AND d.created_at >= ?
+      AND d.created_at <= ?
+    ORDER BY d.created_at DESC, d.decision_id DESC
+    LIMIT ?
+"""
+
+_SQL_DECISION_ARCHIVE_PAGE_WITH_CURSOR = """
+    SELECT
+        d.tenant_id,
+        d.decision_id,
+        d.created_at,
+        d.release_status,
+        d.full_decision_json,
+        d.repo,
+        d.pr_number,
+        dtl.jira_issue_id,
+        dtl.transition_id AS linked_transition_id,
+        dtl.actor AS linked_actor,
+        CASE WHEN EXISTS (
+            SELECT 1
+            FROM audit_overrides o
+            WHERE o.tenant_id = d.tenant_id AND o.decision_id = d.decision_id
+        ) THEN 1 ELSE 0 END AS override_used
+    FROM audit_decisions d
+    LEFT JOIN decision_transition_links dtl
+      ON dtl.tenant_id = d.tenant_id
+     AND dtl.decision_id = d.decision_id
+    WHERE d.tenant_id = ?
+      AND d.created_at >= ?
+      AND d.created_at <= ?
+      AND (d.created_at < ? OR (d.created_at = ? AND d.decision_id < ?))
+    ORDER BY d.created_at DESC, d.decision_id DESC
+    LIMIT ?
+"""
+
 
 @dataclass
 class DecisionArchiveFilters:
@@ -252,31 +309,6 @@ def search_decisions(
     # Validate early so bad values fail once before scanning rows.
     _normalize_bool(filters.override_used)
 
-    base_query = """
-        SELECT
-            d.tenant_id,
-            d.decision_id,
-            d.created_at,
-            d.release_status,
-            d.full_decision_json,
-            d.repo,
-            d.pr_number,
-            dtl.jira_issue_id,
-            dtl.transition_id AS linked_transition_id,
-            dtl.actor AS linked_actor,
-            CASE WHEN EXISTS (
-                SELECT 1
-                FROM audit_overrides o
-                WHERE o.tenant_id = d.tenant_id AND o.decision_id = d.decision_id
-            ) THEN 1 ELSE 0 END AS override_used
-        FROM audit_decisions d
-        LEFT JOIN decision_transition_links dtl
-          ON dtl.tenant_id = d.tenant_id
-         AND dtl.decision_id = d.decision_id
-        WHERE d.tenant_id = ?
-          AND d.created_at >= ?
-          AND d.created_at <= ?
-    """
     params: List[Any] = [effective_tenant, window_start.isoformat(), window_end.isoformat()]
 
     scan_cursor = cursor_token
@@ -288,31 +320,12 @@ def search_decisions(
     while len(results) < bounded_limit and scanned < MAX_SCAN_ROWS:
         if scan_cursor is None:
             rows = storage.fetchall(
-                """
-                SELECT *
-                FROM (
-                    """
-                + base_query
-                + """
-                )
-                ORDER BY created_at DESC, decision_id DESC
-                LIMIT ?
-                """,
+                _SQL_DECISION_ARCHIVE_PAGE,
                 [*params, batch_size],
             )
         else:
             rows = storage.fetchall(
-                """
-                SELECT *
-                FROM (
-                    """
-                + base_query
-                + """
-                )
-                WHERE (created_at < ? OR (created_at = ? AND decision_id < ?))
-                ORDER BY created_at DESC, decision_id DESC
-                LIMIT ?
-                """,
+                _SQL_DECISION_ARCHIVE_PAGE_WITH_CURSOR,
                 [*params, scan_cursor[0], scan_cursor[0], scan_cursor[1], batch_size],
             )
         if not rows:

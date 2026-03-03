@@ -18,6 +18,96 @@ from releasegate.storage.schema import init_db
 
 _PAGE_SIZE = 1000
 
+_EXPORT_DATASET_SPECS = [
+    {
+        "dataset_key": "decisions",
+        "filename": "decisions.ndjson",
+        "json_columns": ["full_decision_json"],
+    },
+    {
+        "dataset_key": "policies",
+        "filename": "policies.ndjson",
+        "json_columns": ["policy_json", "lint_errors_json", "lint_warnings_json"],
+    },
+    {
+        "dataset_key": "approvals",
+        "filename": "approvals.ndjson",
+        "json_columns": ["approval_scope_json", "justification_json"],
+    },
+    {
+        "dataset_key": "overrides",
+        "filename": "overrides.ndjson",
+        "json_columns": [],
+    },
+    {
+        "dataset_key": "signals",
+        "filename": "signals.ndjson",
+        "json_columns": ["payload_json"],
+    },
+    {
+        "dataset_key": "deployments",
+        "filename": "deployments.ndjson",
+        "json_columns": ["violation_codes_json"],
+    },
+    {
+        "dataset_key": "anchors",
+        "filename": "anchors.ndjson",
+        "json_columns": ["anchor_receipt_json"],
+    },
+]
+
+_EXPORT_DATASET_SQL = {
+    "decisions": """
+        SELECT *
+        FROM audit_decisions
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, decision_id ASC
+        LIMIT ? OFFSET ?
+    """,
+    "policies": """
+        SELECT *
+        FROM policy_registry_entries
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, policy_id ASC, version ASC
+        LIMIT ? OFFSET ?
+    """,
+    "approvals": """
+        SELECT *
+        FROM decision_approvals
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, approval_id ASC
+        LIMIT ? OFFSET ?
+    """,
+    "overrides": """
+        SELECT *
+        FROM audit_overrides
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, override_id ASC
+        LIMIT ? OFFSET ?
+    """,
+    "signals": """
+        SELECT *
+        FROM signal_attestations
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, signal_id ASC
+        LIMIT ? OFFSET ?
+    """,
+    "deployments": """
+        SELECT *
+        FROM deployment_decision_links
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, deployment_event_id ASC
+        LIMIT ? OFFSET ?
+    """,
+    "anchors": """
+        SELECT *
+        FROM audit_independent_daily_checkpoints
+        WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+        ORDER BY created_at ASC, checkpoint_id ASC
+        LIMIT ? OFFSET ?
+    """,
+}
+
 
 @dataclass
 class GovernanceExportArtifact:
@@ -77,13 +167,22 @@ def _parse_json_column(row: Dict[str, Any], key: str) -> None:
             row[key] = parsed
 
 
-def _iter_paged_rows(query: str, params: Iterable[Any]) -> Iterable[Dict[str, Any]]:
+def _iter_paged_rows(
+    *,
+    dataset_key: str,
+    tenant_id: str,
+    range_start: str,
+    range_end: str,
+) -> Iterable[Dict[str, Any]]:
     storage = get_storage_backend()
+    query = _EXPORT_DATASET_SQL.get(str(dataset_key))
+    if not query:
+        raise ValueError("unknown export dataset")
     offset = 0
     while True:
         rows = storage.fetchall(
-            f"{query} LIMIT ? OFFSET ?",
-            [*list(params), _PAGE_SIZE, offset],
+            query,
+            [tenant_id, range_start, range_end, _PAGE_SIZE, offset],
         )
         if not rows:
             break
@@ -144,89 +243,9 @@ def build_governance_export(
 
     temp_dir = tempfile.mkdtemp(prefix="releasegate-governance-export-")
 
-    dataset_specs = [
-        {
-            "filename": "decisions.ndjson",
-            "query": """
-                SELECT *
-                FROM audit_decisions
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, decision_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["full_decision_json"],
-        },
-        {
-            "filename": "policies.ndjson",
-            "query": """
-                SELECT *
-                FROM policy_registry_entries
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, policy_id ASC, version ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["policy_json", "lint_errors_json", "lint_warnings_json"],
-        },
-        {
-            "filename": "approvals.ndjson",
-            "query": """
-                SELECT *
-                FROM decision_approvals
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, approval_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["approval_scope_json", "justification_json"],
-        },
-        {
-            "filename": "overrides.ndjson",
-            "query": """
-                SELECT *
-                FROM audit_overrides
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, override_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": [],
-        },
-        {
-            "filename": "signals.ndjson",
-            "query": """
-                SELECT *
-                FROM signal_attestations
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, signal_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["payload_json"],
-        },
-        {
-            "filename": "deployments.ndjson",
-            "query": """
-                SELECT *
-                FROM deployment_decision_links
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, deployment_event_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["violation_codes_json"],
-        },
-        {
-            "filename": "anchors.ndjson",
-            "query": """
-                SELECT *
-                FROM audit_independent_daily_checkpoints
-                WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
-                ORDER BY created_at ASC, checkpoint_id ASC
-            """,
-            "params": [effective_tenant, range_start, range_end],
-            "json_columns": ["anchor_receipt_json"],
-        },
-    ]
-
     file_metadata: Dict[str, Dict[str, Any]] = {}
     export_artifact_paths: Dict[str, str] = {}
-    for spec in dataset_specs:
+    for spec in _EXPORT_DATASET_SPECS:
         with tempfile.NamedTemporaryFile(
             mode="wb",
             delete=False,
@@ -236,7 +255,12 @@ def build_governance_export(
         ) as handle:
             stats = _write_ndjson(
                 handle=handle,
-                rows=_iter_paged_rows(spec["query"], spec["params"]),
+                rows=_iter_paged_rows(
+                    dataset_key=str(spec["dataset_key"]),
+                    tenant_id=effective_tenant,
+                    range_start=range_start,
+                    range_end=range_end,
+                ),
                 json_columns=spec.get("json_columns") or [],
             )
             export_artifact_paths[spec["filename"]] = handle.name
