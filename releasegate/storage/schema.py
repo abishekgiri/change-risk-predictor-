@@ -460,6 +460,14 @@ def _init_postgres_schema() -> str:
         ON audit_attestations(tenant_id, decision_id)
         """
     )
+    # Existing Postgres deployments may have an older attestation table shape.
+    # Ensure compromise columns exist before creating indexes that reference them.
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
+    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
+    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
@@ -2096,12 +2104,6 @@ def _init_postgres_schema() -> str:
     cur.execute("UPDATE tenant_signing_keys SET signing_mode = COALESCE(NULLIF(btrim(signing_mode), ''), 'envelope')")
     cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
     cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN signing_mode SET NOT NULL")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
-    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
-    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tenant_governance_settings (
