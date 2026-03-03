@@ -225,14 +225,21 @@ def build_governance_export(
     ]
 
     file_metadata: Dict[str, Dict[str, Any]] = {}
+    export_artifact_paths: Dict[str, str] = {}
     for spec in dataset_specs:
-        file_path = os.path.join(temp_dir, spec["filename"])
-        with open(file_path, "wb") as handle:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            delete=False,
+            dir=temp_dir,
+            prefix="governance-export-",
+            suffix=".ndjson",
+        ) as handle:
             stats = _write_ndjson(
                 handle=handle,
                 rows=_iter_paged_rows(spec["query"], spec["params"]),
                 json_columns=spec.get("json_columns") or [],
             )
+            export_artifact_paths[spec["filename"]] = handle.name
         file_metadata[spec["filename"]] = stats
 
     integrity_summary = get_tenant_governance_integrity(
@@ -243,11 +250,21 @@ def build_governance_export(
         "start": range_start,
         "end_exclusive": range_end,
     }
-    integrity_summary_path = os.path.join(temp_dir, "integrity_summary.json")
-    with open(integrity_summary_path, "w", encoding="utf-8") as handle:
-        json.dump(integrity_summary, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    with open(integrity_summary_path, "rb") as handle:
-        payload = handle.read()
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        delete=False,
+        dir=temp_dir,
+        prefix="governance-export-",
+        suffix=".json",
+    ) as handle:
+        payload = json.dumps(
+            integrity_summary,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        handle.write(payload)
+        export_artifact_paths["integrity_summary.json"] = handle.name
     file_metadata["integrity_summary.json"] = {
         "count": 1,
         "sha256": hashlib.sha256(payload).hexdigest(),
@@ -260,13 +277,20 @@ def build_governance_export(
         "3) Recompute policy/decision integrity checks using recorded hashes where needed.\n"
         "4) Keep this archive immutable once delivered for audit evidence retention.\n"
     )
-    instructions_path = os.path.join(temp_dir, "verification_instructions.txt")
-    with open(instructions_path, "w", encoding="utf-8") as handle:
-        handle.write(instructions)
+    instructions_payload = instructions.encode("utf-8")
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        delete=False,
+        dir=temp_dir,
+        prefix="governance-export-",
+        suffix=".txt",
+    ) as handle:
+        handle.write(instructions_payload)
+        export_artifact_paths["verification_instructions.txt"] = handle.name
     file_metadata["verification_instructions.txt"] = {
         "count": 1,
-        "sha256": hashlib.sha256(instructions.encode("utf-8")).hexdigest(),
-        "size": len(instructions.encode("utf-8")),
+        "sha256": hashlib.sha256(instructions_payload).hexdigest(),
+        "size": len(instructions_payload),
     }
 
     manifest = {
@@ -291,16 +315,19 @@ def build_governance_export(
             for name, meta in sorted(file_metadata.items())
         },
     }
-    manifest_path = os.path.join(temp_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    manifest_payload = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
     archive_name = f"governance_export_{label}.zip"
     archive_path = os.path.join(temp_dir, archive_name)
     with zipfile.ZipFile(archive_path, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        bundle.write(manifest_path, arcname="manifest.json")
+        bundle.writestr("manifest.json", manifest_payload)
         for filename in sorted(file_metadata.keys()):
-            bundle.write(os.path.join(temp_dir, filename), arcname=filename)
+            bundle.write(export_artifact_paths[filename], arcname=filename)
 
     return GovernanceExportArtifact(
         tenant_id=effective_tenant,
