@@ -999,6 +999,30 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc DATE NOT NULL,
+            integrity_score DOUBLE PRECISION NOT NULL,
+            drift_index DOUBLE PRECISION NOT NULL,
+            override_rate DOUBLE PRECISION NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS policy_decision_records (
             tenant_id TEXT NOT NULL,
             decision_id TEXT NOT NULL,

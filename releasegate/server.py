@@ -2044,6 +2044,152 @@ def governance_override_metrics(
     )
 
 
+@app.get("/dashboard/overview")
+def dashboard_overview_endpoint(
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    blocked_limit: int = 25,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_dashboard_overview
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        return get_dashboard_overview(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+            blocked_limit=blocked_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/dashboard/integrity")
+def dashboard_integrity_endpoint(
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_integrity_trend
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        trend = list_integrity_trend(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tenant_id": effective_tenant,
+        "window_days": int(window_days),
+        "trend": trend,
+    }
+
+
+@app.get("/dashboard/blocked")
+def dashboard_blocked_endpoint(
+    tenant_id: Optional[str] = None,
+    limit: int = 25,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_recent_blocked_decisions
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    bounded_limit = _bounded_limit(limit, max_allowed=100, field="limit")
+    try:
+        items = list_recent_blocked_decisions(
+            tenant_id=effective_tenant,
+            limit=bounded_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tenant_id": effective_tenant,
+        "items": items,
+    }
+
+
+@app.get("/dashboard/strict-modes")
+def dashboard_strict_modes_endpoint(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_active_strict_modes
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return {
+        "tenant_id": effective_tenant,
+        "items": list_active_strict_modes(tenant_id=effective_tenant),
+    }
+
+
+@app.get("/dashboard/decisions/{decision_id}/explainer")
+def dashboard_decision_explainer_endpoint(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.decision_explainer import build_decision_explainer
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = build_decision_explainer(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="decision_not_found")
+    return payload
+
+
+@app.post("/dashboard/policies/diff")
+def dashboard_policy_diff_endpoint(
+    payload: PolicyDiffImpactRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.policy_diff_visual import build_policy_diff_visual
+    from releasegate.policy.diff_impact import build_policy_impact_diff
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        raw = build_policy_impact_diff(
+            tenant_id=effective_tenant,
+            current_policy_id=payload.current_policy_id,
+            current_policy_version=payload.current_policy_version,
+            current_policy_json=payload.current_policy_json,
+            candidate_policy_id=payload.candidate_policy_id,
+            candidate_policy_version=payload.candidate_policy_version,
+            candidate_policy_json=payload.candidate_policy_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return build_policy_diff_visual(raw)
+
+
 @app.get("/governance/decisions")
 def governance_decision_archive(
     tenant_id: Optional[str] = None,

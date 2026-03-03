@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+from fastapi.testclient import TestClient
+
+from releasegate.config import DB_PATH
+from releasegate.server import app
+from releasegate.storage.schema import init_db
+from tests.auth_helpers import jwt_headers
+
+
+client = TestClient(app)
+
+
+def _reset_db() -> None:
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+    init_db()
+
+
+def _insert_governance_rollup(
+    *,
+    tenant_id: str,
+    date_utc: str,
+    integrity_score: float,
+    drift_index: float,
+    override_rate: float,
+    blocked_count: int,
+) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO governance_daily_metrics (
+                tenant_id, date_utc, integrity_score, drift_index, override_rate, blocked_count,
+                strict_mode_count, override_count, decision_count, computed_at, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                date_utc,
+                float(integrity_score),
+                float(drift_index),
+                float(override_rate),
+                int(blocked_count),
+                1,
+                2,
+                10,
+                datetime.now(timezone.utc).isoformat(),
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_blocked_decision(*, tenant_id: str, decision_id: str, created_at: datetime) -> None:
+    payload = {
+        "reason_code": "RISK_TOO_HIGH",
+        "input_snapshot": {
+            "request": {
+                "issue_key": "RG-900",
+                "transition_id": "31",
+                "actor_account_id": "acct-dashboard",
+                "environment": "prod",
+                "project_key": "PROJ",
+                "context_overrides": {"workflow_id": "wf-release"},
+            }
+        },
+    }
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO audit_decisions (
+                tenant_id, decision_id, context_id, repo, pr_number, release_status,
+                policy_bundle_hash, engine_version, decision_hash, input_hash, policy_hash,
+                replay_hash, full_decision_json, created_at, evaluation_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                decision_id,
+                f"ctx-{decision_id}",
+                "org/repo",
+                1,
+                "BLOCKED",
+                "bundle-hash",
+                "engine-v1",
+                f"decision-hash-{decision_id}",
+                f"input-hash-{decision_id}",
+                "policy-hash",
+                f"replay-hash-{decision_id}",
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                created_at.isoformat(),
+                f"eval-{decision_id}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_active_strict_policy(*, tenant_id: str) -> None:
+    policy_json = {"strict_fail_closed": True, "transition_rules": [{"transition_id": "31", "result": "BLOCK"}]}
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO policy_registry_entries (
+                tenant_id, policy_id, scope_type, scope_id, version, status,
+                policy_json, policy_hash, lint_errors_json, lint_warnings_json,
+                rollout_percentage, rollout_scope, created_at, created_by,
+                activated_at, activated_by, supersedes_policy_id, archived_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', 100, NULL, ?, 'tests', ?, 'tests', NULL, NULL)
+            """,
+            (
+                tenant_id,
+                "policy-strict",
+                "transition",
+                "31",
+                1,
+                "ACTIVE",
+                json.dumps(policy_json, separators=(",", ":"), sort_keys=True),
+                "sha256:strict-policy",
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
+    _reset_db()
+    tenant_id = "tenant-dashboard-overview"
+    today = datetime.now(timezone.utc).date()
+    _insert_governance_rollup(
+        tenant_id=tenant_id,
+        date_utc=(today - timedelta(days=1)).isoformat(),
+        integrity_score=93.5,
+        drift_index=1.2,
+        override_rate=0.08,
+        blocked_count=2,
+    )
+    _insert_governance_rollup(
+        tenant_id=tenant_id,
+        date_utc=today.isoformat(),
+        integrity_score=92.0,
+        drift_index=1.5,
+        override_rate=0.09,
+        blocked_count=3,
+    )
+    _insert_blocked_decision(
+        tenant_id=tenant_id,
+        decision_id="dec-blocked-1",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    _insert_active_strict_policy(tenant_id=tenant_id)
+
+    response = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] == tenant_id
+    assert body["integrity_score"] == 92.0
+    assert body["drift_index"] == 1.5
+    assert body["override_rate"] == 0.09
+    assert len(body["integrity_trend"]) == 2
+    assert body["recent_blocked"][0]["decision_id"] == "dec-blocked-1"
+    assert any(item["mode"] == "policy_strict_fail_closed" for item in body["active_strict_modes"])
+
+
+def test_dashboard_blocked_limit_validation():
+    _reset_db()
+    tenant_id = "tenant-dashboard-overview"
+    response = client.get(
+        "/dashboard/blocked",
+        params={"tenant_id": tenant_id, "limit": 999},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert response.status_code == 400
