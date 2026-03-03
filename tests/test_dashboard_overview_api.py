@@ -138,6 +138,35 @@ def _insert_active_strict_policy(*, tenant_id: str) -> None:
         conn.close()
 
 
+def _count_rollup_rows(*, tenant_id: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(1) FROM governance_daily_metrics WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def _rollup_computed_at(*, tenant_id: str, date_utc: str) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT computed_at
+            FROM governance_daily_metrics
+            WHERE tenant_id = ? AND date_utc = ?
+            LIMIT 1
+            """,
+            (tenant_id, date_utc),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
+    finally:
+        conn.close()
+
+
 def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     _reset_db()
     tenant_id = "tenant-dashboard-overview"
@@ -190,3 +219,62 @@ def test_dashboard_blocked_limit_validation():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 400
+
+
+def test_dashboard_rollup_backfill_endpoint_is_idempotent():
+    _reset_db()
+    tenant_id = "tenant-dashboard-rollup"
+    _insert_active_strict_policy(tenant_id=tenant_id)
+
+    first = client.post(
+        "/internal/dashboard/rollups/backfill",
+        params={"tenant_id": tenant_id, "days": 3},
+        headers=jwt_headers(
+            tenant_id=tenant_id,
+            roles=["admin"],
+            scopes=["policy:write"],
+        ),
+    )
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["ok"] is True
+    assert first_body["days_written"] == 3
+    assert _count_rollup_rows(tenant_id=tenant_id) == 3
+
+    first_end_date = str(first_body["end_date_utc"])
+    first_computed_at = _rollup_computed_at(tenant_id=tenant_id, date_utc=first_end_date)
+    assert first_computed_at
+
+    second = client.post(
+        "/internal/dashboard/rollups/backfill",
+        params={"tenant_id": tenant_id, "days": 3},
+        headers=jwt_headers(
+            tenant_id=tenant_id,
+            roles=["admin"],
+            scopes=["policy:write"],
+        ),
+    )
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert second_body["ok"] is True
+    assert second_body["days_written"] == 3
+    assert _count_rollup_rows(tenant_id=tenant_id) == 3
+
+    second_computed_at = _rollup_computed_at(tenant_id=tenant_id, date_utc=first_end_date)
+    assert second_computed_at
+    assert second_computed_at >= first_computed_at
+
+
+def test_dashboard_rollup_backfill_requires_admin():
+    _reset_db()
+    tenant_id = "tenant-dashboard-rollup-auth"
+    response = client.post(
+        "/internal/dashboard/rollups/backfill",
+        params={"tenant_id": tenant_id, "days": 2},
+        headers=jwt_headers(
+            tenant_id=tenant_id,
+            roles=["auditor"],
+            scopes=["policy:read"],
+        ),
+    )
+    assert response.status_code == 403

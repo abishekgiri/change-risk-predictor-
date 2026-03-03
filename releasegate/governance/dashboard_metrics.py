@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from releasegate.governance.integrity import get_tenant_governance_integrity
@@ -80,6 +80,30 @@ def _iso_date(value: Any) -> str:
     if raw:
         return raw[:10]
     return _utc_now().date().isoformat()
+
+
+def _coerce_date_utc(value: date | datetime | str) -> date:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        dt = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.date()
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("date_utc is required")
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    if "T" in raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            dt = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            return dt.date()
+        except ValueError as exc:
+            raise ValueError("date_utc must be an ISO-8601 date or timestamp") from exc
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError("date_utc must be an ISO-8601 date") from exc
 
 
 def list_integrity_trend(
@@ -311,52 +335,92 @@ def compute_and_upsert_governance_daily_metrics(
     tenant_id: str,
     days: int = 30,
 ) -> Dict[str, Any]:
+    return backfill_rollups(tenant_id=tenant_id, days=days)
+
+
+def compute_and_upsert_daily_rollup(
+    *,
+    tenant_id: str,
+    date_utc: date | datetime | str,
+) -> Dict[str, Any]:
     init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
-    bounded_days = max(1, min(int(days or DEFAULT_WINDOW_DAYS), MAX_WINDOW_DAYS))
-    now = _utc_now()
-    upserts = 0
+    day = _coerce_date_utc(date_utc)
+    day_start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    day_cutoff = day_start + timedelta(days=1)
+    metrics = get_tenant_governance_integrity(
+        tenant_id=effective_tenant,
+        window_days=30,
+        now=day_cutoff,
+    )
+    strict_mode_count = len(list_active_strict_modes(tenant_id=effective_tenant))
+    computed_at = _utc_now().isoformat()
+    storage.execute(
+        """
+        INSERT INTO governance_daily_metrics (
+            tenant_id, date_utc, integrity_score, drift_index, override_rate, blocked_count,
+            strict_mode_count, override_count, decision_count, computed_at, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, date_utc) DO UPDATE SET
+            integrity_score = EXCLUDED.integrity_score,
+            drift_index = EXCLUDED.drift_index,
+            override_rate = EXCLUDED.override_rate,
+            blocked_count = EXCLUDED.blocked_count,
+            strict_mode_count = EXCLUDED.strict_mode_count,
+            override_count = EXCLUDED.override_count,
+            decision_count = EXCLUDED.decision_count,
+            computed_at = EXCLUDED.computed_at,
+            details_json = EXCLUDED.details_json
+        """,
+        (
+            effective_tenant,
+            day.isoformat(),
+            float(metrics.get("governance_integrity_score") or 0.0),
+            float(metrics.get("drift_index") or 0.0),
+            float((metrics.get("override_abuse") or {}).get("override_rate") or 0.0),
+            int(metrics.get("deny_count") or 0),
+            int(strict_mode_count),
+            int((metrics.get("override_abuse") or {}).get("override_count") or 0),
+            int(metrics.get("decision_count") or 0),
+            computed_at,
+            json.dumps(metrics, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        ),
+    )
+    return {
+        "tenant_id": effective_tenant,
+        "date_utc": day.isoformat(),
+        "computed_at": computed_at,
+        "integrity_score": float(metrics.get("governance_integrity_score") or 0.0),
+        "drift_index": float(metrics.get("drift_index") or 0.0),
+        "override_rate": float((metrics.get("override_abuse") or {}).get("override_rate") or 0.0),
+        "blocked_count": int(metrics.get("deny_count") or 0),
+    }
 
-    for offset in range(bounded_days):
-        day_end = now - timedelta(days=offset)
-        day_start = datetime(day_end.year, day_end.month, day_end.day, tzinfo=timezone.utc)
-        day_cutoff = day_start + timedelta(days=1)
-        metrics = get_tenant_governance_integrity(
+
+def backfill_rollups(
+    *,
+    tenant_id: str,
+    days: int = 30,
+    anchor_date_utc: Optional[date | datetime | str] = None,
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    bounded_days = max(1, min(int(days or DEFAULT_WINDOW_DAYS), MAX_WINDOW_DAYS))
+    anchor_date = _coerce_date_utc(anchor_date_utc) if anchor_date_utc is not None else _utc_now().date()
+    start_date = anchor_date - timedelta(days=bounded_days - 1)
+    current = start_date
+    written = 0
+    while current <= anchor_date:
+        compute_and_upsert_daily_rollup(
             tenant_id=effective_tenant,
-            window_days=30,
-            now=day_cutoff,
+            date_utc=current,
         )
-        storage.execute(
-            """
-            INSERT INTO governance_daily_metrics (
-                tenant_id, date_utc, integrity_score, drift_index, override_rate, blocked_count,
-                strict_mode_count, override_count, decision_count, computed_at, details_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(tenant_id, date_utc) DO UPDATE SET
-                integrity_score = EXCLUDED.integrity_score,
-                drift_index = EXCLUDED.drift_index,
-                override_rate = EXCLUDED.override_rate,
-                blocked_count = EXCLUDED.blocked_count,
-                strict_mode_count = EXCLUDED.strict_mode_count,
-                override_count = EXCLUDED.override_count,
-                decision_count = EXCLUDED.decision_count,
-                computed_at = EXCLUDED.computed_at,
-                details_json = EXCLUDED.details_json
-            """,
-            (
-                effective_tenant,
-                day_start.date().isoformat(),
-                float(metrics.get("governance_integrity_score") or 0.0),
-                float(metrics.get("drift_index") or 0.0),
-                float((metrics.get("override_abuse") or {}).get("override_rate") or 0.0),
-                int(metrics.get("deny_count") or 0),
-                len(list_active_strict_modes(tenant_id=effective_tenant)),
-                int((metrics.get("override_abuse") or {}).get("override_count") or 0),
-                int(metrics.get("decision_count") or 0),
-                _utc_now().isoformat(),
-                json.dumps(metrics, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-            ),
-        )
-        upserts += 1
-    return {"tenant_id": effective_tenant, "upserted_days": upserts, "window_days": bounded_days}
+        written += 1
+        current += timedelta(days=1)
+    return {
+        "tenant_id": effective_tenant,
+        "days_requested": bounded_days,
+        "days_written": written,
+        "start_date_utc": start_date.isoformat(),
+        "end_date_utc": anchor_date.isoformat(),
+    }

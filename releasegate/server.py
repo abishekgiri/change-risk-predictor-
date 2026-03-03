@@ -2190,6 +2190,32 @@ def dashboard_policy_diff_endpoint(
     return build_policy_diff_visual(raw)
 
 
+@app.post("/internal/dashboard/rollups/backfill")
+def dashboard_rollups_backfill_endpoint(
+    days: int = 30,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import backfill_rollups
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = backfill_rollups(
+            tenant_id=effective_tenant,
+            days=days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        **result,
+    }
+
+
 @app.get("/governance/decisions")
 def governance_decision_archive(
     tenant_id: Optional[str] = None,
