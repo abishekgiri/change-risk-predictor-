@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -2044,8 +2045,61 @@ def governance_override_metrics(
     )
 
 
+def _dashboard_trace_id(request: Request) -> str:
+    supplied = str(request.headers.get("X-Request-Id") or "").strip()
+    if supplied:
+        return supplied[:128]
+    return uuid.uuid4().hex
+
+
+def _dashboard_response(
+    *,
+    response: Response,
+    trace_id: str,
+    cache_control: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = cache_control
+    body = dict(payload)
+    existing_trace_id = body.get("trace_id")
+    if existing_trace_id and str(existing_trace_id) != str(trace_id):
+        body["report_trace_id"] = existing_trace_id
+    body["trace_id"] = trace_id
+    return body
+
+
+def _audit_dashboard_read(
+    *,
+    auth: AuthContext,
+    tenant_id: str,
+    action: str,
+    endpoint: str,
+    trace_id: str,
+    params: Dict[str, Any],
+) -> None:
+    try:
+        log_security_event(
+            tenant_id=tenant_id,
+            principal_id=str(auth.principal_id or "system"),
+            auth_method="api",
+            action=action,
+            target_type="dashboard",
+            target_id=endpoint,
+            metadata={
+                "trace_id": trace_id,
+                "endpoint": endpoint,
+                "params": params,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to write dashboard read audit event: action=%s", action)
+
+
 @app.get("/dashboard/overview")
 def dashboard_overview_endpoint(
+    request: Request,
+    response: Response,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     blocked_limit: int = 25,
@@ -2058,18 +2112,38 @@ def dashboard_overview_endpoint(
     from releasegate.governance.dashboard_metrics import get_dashboard_overview
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
     try:
-        return get_dashboard_overview(
+        payload = get_dashboard_overview(
             tenant_id=effective_tenant,
             window_days=window_days,
             blocked_limit=blocked_limit,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_OVERVIEW",
+        endpoint="/dashboard/overview",
+        trace_id=trace_id,
+        params={
+            "window_days": int(window_days),
+            "blocked_limit": int(blocked_limit),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
 
 
 @app.get("/dashboard/integrity")
 def dashboard_integrity_endpoint(
+    request: Request,
+    response: Response,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     auth: AuthContext = require_access(
@@ -2081,6 +2155,7 @@ def dashboard_integrity_endpoint(
     from releasegate.governance.dashboard_metrics import list_integrity_trend
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
     try:
         trend = list_integrity_trend(
             tenant_id=effective_tenant,
@@ -2088,15 +2163,30 @@ def dashboard_integrity_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_INTEGRITY",
+        endpoint="/dashboard/integrity",
+        trace_id=trace_id,
+        params={"window_days": int(window_days)},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload={
         "tenant_id": effective_tenant,
         "window_days": int(window_days),
         "trend": trend,
-    }
+        },
+    )
 
 
 @app.get("/dashboard/alerts")
 def dashboard_alerts_endpoint(
+    request: Request,
+    response: Response,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     auth: AuthContext = require_access(
@@ -2108,6 +2198,7 @@ def dashboard_alerts_endpoint(
     from releasegate.governance.dashboard_metrics import list_dashboard_alerts
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
     try:
         payload = list_dashboard_alerts(
             tenant_id=effective_tenant,
@@ -2115,38 +2206,75 @@ def dashboard_alerts_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return payload
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_ALERTS",
+        endpoint="/dashboard/alerts",
+        trace_id=trace_id,
+        params={"window_days": int(window_days)},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload=payload,
+    )
 
 
 @app.get("/dashboard/blocked")
 def dashboard_blocked_endpoint(
+    request: Request,
+    response: Response,
     tenant_id: Optional[str] = None,
     limit: int = 25,
+    cursor: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
         rate_profile="default",
     ),
 ):
-    from releasegate.governance.dashboard_metrics import list_recent_blocked_decisions
+    from releasegate.governance.dashboard_metrics import list_recent_blocked_decisions_page
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     bounded_limit = _bounded_limit(limit, max_allowed=100, field="limit")
+    trace_id = _dashboard_trace_id(request)
     try:
-        items = list_recent_blocked_decisions(
+        page = list_recent_blocked_decisions_page(
             tenant_id=effective_tenant,
             limit=bounded_limit,
+            cursor=cursor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_BLOCKED",
+        endpoint="/dashboard/blocked",
+        trace_id=trace_id,
+        params={
+            "limit": int(bounded_limit),
+            "cursor": str(cursor or "") or None,
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=10",
+        payload={
         "tenant_id": effective_tenant,
-        "items": items,
-    }
+        "items": page.get("items") if isinstance(page.get("items"), list) else [],
+        "next_cursor": page.get("next_cursor"),
+        },
+    )
 
 
 @app.get("/dashboard/strict-modes")
 def dashboard_strict_modes_endpoint(
+    request: Request,
+    response: Response,
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -2157,14 +2285,31 @@ def dashboard_strict_modes_endpoint(
     from releasegate.governance.dashboard_metrics import list_active_strict_modes
 
     effective_tenant = _effective_tenant(auth, tenant_id)
-    return {
+    trace_id = _dashboard_trace_id(request)
+    payload = {
         "tenant_id": effective_tenant,
         "items": list_active_strict_modes(tenant_id=effective_tenant),
     }
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_STRICT_MODES",
+        endpoint="/dashboard/strict-modes",
+        trace_id=trace_id,
+        params={},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
 
 
 @app.get("/dashboard/decisions/{decision_id}/explainer")
 def dashboard_decision_explainer_endpoint(
+    request: Request,
+    response: Response,
     decision_id: str,
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
@@ -2176,17 +2321,33 @@ def dashboard_decision_explainer_endpoint(
     from releasegate.governance.decision_explainer import build_decision_explainer
 
     effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
     payload = build_decision_explainer(
         tenant_id=effective_tenant,
         decision_id=decision_id,
     )
     if not payload:
         raise HTTPException(status_code=404, detail="decision_not_found")
-    return payload
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_DECISION_EXPLAIN",
+        endpoint="/dashboard/decisions/{decision_id}/explainer",
+        trace_id=trace_id,
+        params={"decision_id": decision_id},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=payload,
+    )
 
 
 @app.post("/dashboard/policies/diff")
 def dashboard_policy_diff_endpoint(
+    request: Request,
+    response: Response,
     payload: PolicyDiffImpactRequest,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -2210,7 +2371,27 @@ def dashboard_policy_diff_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return build_policy_diff_visual(raw)
+    trace_id = _dashboard_trace_id(request)
+    response_payload = build_policy_diff_visual(raw)
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_POLICY_DIFF",
+        endpoint="/dashboard/policies/diff",
+        trace_id=trace_id,
+        params={
+            "current_policy_id": payload.current_policy_id,
+            "current_policy_version": payload.current_policy_version,
+            "candidate_policy_id": payload.candidate_policy_id,
+            "candidate_policy_version": payload.candidate_policy_version,
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=response_payload,
+    )
 
 
 @app.post("/internal/dashboard/rollups/backfill")

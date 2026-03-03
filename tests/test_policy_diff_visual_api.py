@@ -64,6 +64,9 @@ def test_dashboard_policy_diff_returns_visual_sections():
     )
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["trace_id"]
+    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("Cache-Control") == "private, no-store"
     assert body["overall"] == "WEAKENING"
     assert body["summary"]["has_changes"] is True
     assert body["summary"]["change_count"] >= 1

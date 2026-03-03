@@ -104,6 +104,9 @@ def test_dashboard_alerts_emits_override_spike_from_rollup_history():
     )
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["trace_id"]
+    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("Cache-Control") == "private, max-age=60"
     assert body["window_days"] == 30
     alert = next(item for item in body["alerts"] if item["code"] == "OVERRIDE_SPIKE")
     assert alert["severity"] == "high"
@@ -147,7 +150,11 @@ def test_dashboard_alerts_emits_strict_mode_drop():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    alerts = response.json()["alerts"]
+    body = response.json()
+    assert body["trace_id"]
+    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("Cache-Control") == "private, max-age=60"
+    alerts = body["alerts"]
     strict_drop = next(item for item in alerts if item["code"] == "STRICT_MODE_DROP")
     assert strict_drop["severity"] == "high"
     assert strict_drop["details"]["today"] == 1

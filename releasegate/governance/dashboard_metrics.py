@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from releasegate.governance.integrity import get_tenant_governance_integrity
 from releasegate.quota.quota_service import get_tenant_governance_metrics
@@ -334,6 +335,33 @@ def _collect_alert_counts(alerts: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
+def _encode_blocked_cursor(*, created_at: str, decision_id: str) -> str:
+    payload = {
+        "created_at": str(created_at or ""),
+        "decision_id": str(decision_id or ""),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_blocked_cursor(cursor: Optional[str]) -> Optional[Tuple[str, str]]:
+    raw_cursor = str(cursor or "").strip()
+    if not raw_cursor:
+        return None
+    try:
+        decoded = urlsafe_b64decode(raw_cursor.encode("ascii")).decode("utf-8")
+        payload = json.loads(decoded)
+    except Exception as exc:
+        raise ValueError("cursor is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("cursor is invalid")
+    created_at = str(payload.get("created_at") or "").strip()
+    decision_id = str(payload.get("decision_id") or "").strip()
+    if not created_at or not decision_id:
+        raise ValueError("cursor is invalid")
+    return created_at, decision_id
+
+
 def list_integrity_trend(
     *,
     tenant_id: str,
@@ -390,24 +418,47 @@ def list_recent_blocked_decisions(
     tenant_id: str,
     limit: int = DEFAULT_BLOCKED_LIMIT,
 ) -> List[Dict[str, Any]]:
+    page = list_recent_blocked_decisions_page(
+        tenant_id=tenant_id,
+        limit=limit,
+        cursor=None,
+    )
+    return page.get("items") if isinstance(page.get("items"), list) else []
+
+
+def list_recent_blocked_decisions_page(
+    *,
+    tenant_id: str,
+    limit: int = DEFAULT_BLOCKED_LIMIT,
+    cursor: Optional[str] = None,
+) -> Dict[str, Any]:
     init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     bounded_limit = _normalize_limit(limit)
+    decoded_cursor = _decode_blocked_cursor(cursor)
+    params: List[Any] = [effective_tenant]
+    cursor_clause = ""
+    if decoded_cursor is not None:
+        cursor_created_at, cursor_decision_id = decoded_cursor
+        cursor_clause = "AND (created_at < ? OR (created_at = ? AND decision_id < ?))"
+        params.extend([cursor_created_at, cursor_created_at, cursor_decision_id])
+    params.append(bounded_limit + 1)
     rows = storage.fetchall(
-        """
+        f"""
         SELECT decision_id, created_at, release_status, full_decision_json, policy_hash
         FROM audit_decisions
         WHERE tenant_id = ?
           AND release_status IN ('BLOCKED', 'ERROR', 'DENIED')
+          {cursor_clause}
         ORDER BY created_at DESC
         LIMIT ?
         """,
-        (effective_tenant, bounded_limit),
+        tuple(params),
     )
 
     items: List[Dict[str, Any]] = []
-    for row in rows:
+    for row in rows[:bounded_limit]:
         payload = _parse_json(row.get("full_decision_json"))
         request = _request_from_decision_payload(payload)
         overrides = request.get("context_overrides") if isinstance(request.get("context_overrides"), dict) else {}
@@ -436,7 +487,17 @@ def list_recent_blocked_decisions(
                 "explainer_path": f"/dashboard/decisions/{str(row.get('decision_id') or '')}/explainer",
             }
         )
-    return items
+    next_cursor: Optional[str] = None
+    if len(rows) > bounded_limit and items:
+        last_item = items[-1]
+        next_cursor = _encode_blocked_cursor(
+            created_at=str(last_item.get("created_at") or ""),
+            decision_id=str(last_item.get("decision_id") or ""),
+        )
+    return {
+        "items": items,
+        "next_cursor": next_cursor,
+    }
 
 
 def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:

@@ -119,6 +119,7 @@ def test_dashboard_decision_explainer_returns_binding_and_replay_link():
     )
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["trace_id"]
     assert body["decision_id"] == decision_id
     assert body["decision"]["outcome"] == "BLOCK"
     assert body["decision"]["blocked_because"]
@@ -136,6 +137,8 @@ def test_dashboard_decision_explainer_returns_binding_and_replay_link():
     assert body["replay"]["path"] == f"/decisions/{decision_id}/replay"
     assert body["replay"]["token"] == f"replay-hash-{decision_id}"
     assert "expires_at" in body["replay"]
+    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("Cache-Control") == "private, no-store"
 
 
 def test_dashboard_decision_explainer_returns_404_for_missing_decision():

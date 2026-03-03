@@ -170,6 +170,31 @@ def _rollup_computed_at(*, tenant_id: str, date_utc: str) -> str:
         conn.close()
 
 
+def _latest_security_audit(*, tenant_id: str, action: str) -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT action, metadata_json
+            FROM security_audit_events
+            WHERE tenant_id = ? AND action = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (tenant_id, action),
+        ).fetchone()
+        if not row:
+            return {}
+        metadata_raw = row[1] or "{}"
+        try:
+            metadata = json.loads(metadata_raw)
+        except Exception:
+            metadata = {}
+        return {"action": row[0], "metadata": metadata}
+    finally:
+        conn.close()
+
+
 def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     _reset_db()
     tenant_id = "tenant-dashboard-overview"
@@ -229,6 +254,7 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["tenant_id"] == tenant_id
+    assert body["trace_id"]
     assert body["integrity_score"] == 92.0
     assert body["drift_index"] == 1.5
     assert body["override_rate"] == 0.09
@@ -242,6 +268,8 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     assert "last_changed_at" in policy_strict
     assert body["drift"]["current"] == 1.5
     assert body["drift"]["breakdown"]["signal_totals"] == {"WEAKEN_APPROVAL_REQUIREMENT": 3}
+    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("Cache-Control") == "private, max-age=30"
 
     integrity_response = client.get(
         "/dashboard/integrity",
@@ -249,7 +277,11 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert integrity_response.status_code == 200, integrity_response.text
-    trend = integrity_response.json()["trend"]
+    integrity_body = integrity_response.json()
+    assert integrity_body["trace_id"]
+    assert integrity_response.headers.get("X-Request-Id") == integrity_body["trace_id"]
+    assert integrity_response.headers.get("Cache-Control") == "private, max-age=60"
+    trend = integrity_body["trend"]
     assert trend[-1]["override_count"] == 9
     assert trend[-1]["decision_count"] == 100
     assert trend[-1]["override_rate"] == 0.09
@@ -277,6 +309,58 @@ def test_dashboard_overview_fallback_returns_null_drift_breakdown():
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["drift"]["breakdown"] is None
+
+
+def test_dashboard_blocked_cursor_pagination_returns_non_overlapping_pages():
+    _reset_db()
+    tenant_id = "tenant-dashboard-blocked-pagination"
+    now = datetime.now(timezone.utc)
+    for index in range(5):
+        _insert_blocked_decision(
+            tenant_id=tenant_id,
+            decision_id=f"blocked-{index}",
+            created_at=now - timedelta(minutes=index),
+        )
+
+    first = client.get(
+        "/dashboard/blocked",
+        params={"tenant_id": tenant_id, "limit": 2},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    assert first_body["trace_id"]
+    assert first.headers.get("Cache-Control") == "private, max-age=10"
+    assert len(first_body["items"]) == 2
+    assert first_body["next_cursor"]
+
+    second = client.get(
+        "/dashboard/blocked",
+        params={"tenant_id": tenant_id, "limit": 2, "cursor": first_body["next_cursor"]},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert second.status_code == 200, second.text
+    second_body = second.json()
+    assert len(second_body["items"]) == 2
+
+    first_ids = {item["decision_id"] for item in first_body["items"]}
+    second_ids = {item["decision_id"] for item in second_body["items"]}
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_dashboard_overview_read_is_audited_with_trace_id():
+    _reset_db()
+    tenant_id = "tenant-dashboard-read-audit"
+    response = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert response.status_code == 200, response.text
+    trace_id = response.json()["trace_id"]
+    audit = _latest_security_audit(tenant_id=tenant_id, action="DASHBOARD_READ_OVERVIEW")
+    assert audit["action"] == "DASHBOARD_READ_OVERVIEW"
+    assert audit["metadata"]["trace_id"] == trace_id
 
 
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():
