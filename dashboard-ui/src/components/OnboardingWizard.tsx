@@ -11,6 +11,7 @@ import type {
   JiraWorkflowsDiscoveryResponse,
   OnboardingMode,
   OnboardingStatus,
+  SimulationResult,
 } from "@/lib/types";
 
 function toggleSelection(items: string[], value: string, checked: boolean): string[] {
@@ -39,10 +40,13 @@ export function OnboardingWizard() {
   const [saving, setSaving] = useState(false);
   const [busyWorkflows, setBusyWorkflows] = useState(false);
   const [busyTransitions, setBusyTransitions] = useState(false);
+  const [simulationLoading, setSimulationLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [simulationError, setSimulationError] = useState<string | null>(null);
 
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
+  const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
   const [projects, setProjects] = useState<JiraProject[]>([]);
   const [workflows, setWorkflows] = useState<JiraWorkflow[]>([]);
   const [transitions, setTransitions] = useState<JiraTransitionsDiscoveryResponse["items"]>([]);
@@ -55,6 +59,17 @@ export function OnboardingWizard() {
   const [canaryPct, setCanaryPct] = useState<number>(10);
 
   const onboardingCompleted = Boolean(status?.onboarding_completed);
+
+  const loadLastSimulation = async () => {
+    try {
+      const payload = await fetchJson<SimulationResult>(
+        `/api/dashboard/simulation/last?tenant_id=${encodeURIComponent(tenantId)}&lookback_days=30`,
+      );
+      setSimulationResult(payload);
+    } catch {
+      setSimulationResult(null);
+    }
+  };
 
   const loadProjects = async () => {
     const data = await fetchJson<JiraProjectsDiscoveryResponse>(
@@ -144,6 +159,7 @@ export function OnboardingWizard() {
       if ((statusData.config.workflow_ids || []).length) {
         await loadTransitions(statusData.config.workflow_ids);
       }
+      await loadLastSimulation();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load onboarding state");
     } finally {
@@ -179,6 +195,28 @@ export function OnboardingWizard() {
       setError(saveError instanceof Error ? saveError.message : "Failed to save onboarding setup");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runSimulation = async () => {
+    setSimulationLoading(true);
+    setSimulationError(null);
+    setSuccess(null);
+    try {
+      const payload = await fetchJson<SimulationResult>("/api/dashboard/simulation/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          lookback_days: 30,
+        }),
+      });
+      setSimulationResult(payload);
+      setSuccess("Historical simulation completed.");
+    } catch (runError) {
+      setSimulationError(runError instanceof Error ? runError.message : "Failed to run historical simulation");
+    } finally {
+      setSimulationLoading(false);
     }
   };
 
@@ -357,6 +395,64 @@ export function OnboardingWizard() {
         <p className="mt-3 text-xs text-slate-500">
           Simulation mode is safest for initial rollout. Move to Canary or Strict after reviewing historical simulation.
         </p>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">6. Historical Simulation (30-day lookback)</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Evaluate recent transitions in dry-run mode with no enforcement side effects.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void runSimulation()}
+            disabled={simulationLoading}
+            className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
+          >
+            {simulationLoading ? "Running..." : "Run 30-day simulation"}
+          </button>
+        </div>
+        {simulationError ? <p className="mt-3 text-sm text-rose-700">{simulationError}</p> : null}
+        {simulationResult?.has_run ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Would have blocked</p>
+                <p className="mt-1 text-xl font-semibold text-slate-900">
+                  {simulationResult.blocked_pct.toFixed(2)}%
+                </p>
+                <p className="text-sm text-slate-600">
+                  {simulationResult.blocked} / {simulationResult.total_transitions}
+                </p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Projected overrides</p>
+                <p className="mt-1 text-xl font-semibold text-slate-900">{simulationResult.override_required}</p>
+                <p className="text-sm text-slate-600">Transitions requiring manual override</p>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs uppercase tracking-wide text-slate-500">Transitions analyzed</p>
+                <p className="mt-1 text-xl font-semibold text-slate-900">{simulationResult.total_transitions}</p>
+                <p className="text-sm text-slate-600">Last 30 days</p>
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-200 p-3">
+              <p className="text-sm font-medium text-slate-800">Risk distribution</p>
+              <div className="mt-2 grid gap-2 text-sm text-slate-700 md:grid-cols-3">
+                <p>Low: {simulationResult.risk_distribution.low}</p>
+                <p>Medium: {simulationResult.risk_distribution.medium}</p>
+                <p>High: {simulationResult.risk_distribution.high}</p>
+              </div>
+            </div>
+            {simulationResult.ran_at ? (
+              <p className="text-xs text-slate-500">Last run: {simulationResult.ran_at}</p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-slate-500">No historical simulation run yet.</p>
+        )}
       </section>
 
       <div className="flex items-center gap-3">

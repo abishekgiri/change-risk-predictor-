@@ -54,6 +54,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260311_035_governance_query_indexes" in migration_ids
         assert "20260312_036_governance_dashboard_rollups" in migration_ids
         assert "20260313_037_enterprise_onboarding_config" in migration_ids
+        assert "20260314_038_tenant_simulation_runs" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -234,6 +235,19 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "updated_at",
         } <= onboarding_cols
         assert onboarding_pk == ["tenant_id"]
+
+        cur.execute("PRAGMA table_info(tenant_simulation_runs)")
+        simulation_info = cur.fetchall()
+        simulation_cols = {row[1] for row in simulation_info}
+        simulation_pk = [row[1] for row in sorted((r for r in simulation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "run_id",
+            "lookback_days",
+            "result_json",
+            "ran_at",
+        } <= simulation_cols
+        assert simulation_pk == ["tenant_id", "run_id"]
 
         cur.execute("PRAGMA table_info(tenant_security_anomaly_events)")
         anomaly_info = cur.fetchall()

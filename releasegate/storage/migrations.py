@@ -2665,6 +2665,33 @@ def _migration_20260313_037_enterprise_onboarding_config(cursor) -> None:
         """
     )
 
+
+def _migration_20260314_038_tenant_simulation_runs(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_simulation_runs (
+            tenant_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            lookback_days INTEGER NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            ran_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, run_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_simulation_runs_tenant_ran
+        ON tenant_simulation_runs(tenant_id, ran_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_simulation_runs_lookback
+        ON tenant_simulation_runs(tenant_id, lookback_days, ran_at DESC)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2850,6 +2877,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260313_037_enterprise_onboarding_config",
         description="Add tenant onboarding configuration records for enterprise guided setup flow.",
         apply=_migration_20260313_037_enterprise_onboarding_config,
+    ),
+    Migration(
+        migration_id="20260314_038_tenant_simulation_runs",
+        description="Add tenant historical simulation run records for onboarding lookback analytics.",
+        apply=_migration_20260314_038_tenant_simulation_runs,
     ),
 ]
 
