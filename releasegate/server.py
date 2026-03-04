@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exception_handlers import (
     http_exception_handler as fastapi_http_exception_handler,
     request_validation_exception_handler as fastapi_request_validation_exception_handler,
@@ -125,6 +126,38 @@ app = FastAPI(
 )
 app.include_router(jira_router, prefix="/integrations/jira", tags=["jira"])
 logger = logging.getLogger(__name__)
+
+
+def _releasegate_env() -> str:
+    return str(os.getenv("RELEASEGATE_ENV") or "development").strip().lower()
+
+
+def _is_production_env() -> bool:
+    return _releasegate_env() in {"prod", "production"}
+
+
+def _parse_allowed_origins() -> List[str]:
+    raw = str(os.getenv("RELEASEGATE_ALLOWED_ORIGINS") or "").strip()
+    if not raw:
+        return []
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    deduped: List[str] = []
+    for origin in origins:
+        if origin not in deduped:
+            deduped.append(origin)
+    return deduped
+
+
+ALLOWED_ORIGINS = _parse_allowed_origins()
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-Id"],
+    )
 
 
 class CIScoreRequest(BaseModel):
@@ -1570,6 +1603,7 @@ def verify_ledger_on_startup():
     from releasegate.crypto.kms_client import ensure_kms_runtime_policy
     from releasegate.storage.schema import init_db
 
+    _validate_startup_environment()
     ensure_kms_runtime_policy()
     init_db()
     app.state.anchor_scheduler = start_anchor_scheduler()
@@ -1656,6 +1690,34 @@ def _derive_reason_code(decision: str, message: str, explicit: Optional[str] = N
     if decision == "SKIPPED":
         return "POLICY_SKIPPED"
     return "POLICY_ALLOWED"
+
+
+def _validate_startup_environment() -> None:
+    if _is_production_env():
+        required_for_production = [
+            "RELEASEGATE_INTERNAL_SERVICE_KEY",
+            "RELEASEGATE_ALLOWED_ORIGINS",
+            "RELEASEGATE_JWT_SECRET",
+            "RELEASEGATE_KEY_ENCRYPTION_SECRET",
+        ]
+        missing_for_production = [
+            name for name in required_for_production if not str(os.getenv(name) or "").strip()
+        ]
+        if missing_for_production:
+            raise RuntimeError(
+                "Missing required production environment variables: "
+                + ", ".join(missing_for_production)
+            )
+
+        if not ALLOWED_ORIGINS:
+            raise RuntimeError(
+                "RELEASEGATE_ALLOWED_ORIGINS must include at least one origin in production."
+            )
+    else:
+        if not str(os.getenv("RELEASEGATE_INTERNAL_SERVICE_KEY") or "").strip():
+            logger.warning(
+                "RELEASEGATE_INTERNAL_SERVICE_KEY is not set; internal service authentication will be disabled."
+            )
 
 
 def _decision_hashes_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, str]:
