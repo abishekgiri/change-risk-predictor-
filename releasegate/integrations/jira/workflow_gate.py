@@ -45,6 +45,10 @@ from releasegate.governance.signal_freshness import (
     evaluate_risk_signal_freshness,
     resolve_signal_freshness_policy,
 )
+from releasegate.signals.attestation import (
+    evaluate_signal_attestation,
+    resolve_signal_attestation_policy,
+)
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
 
@@ -786,6 +790,50 @@ class WorkflowGate:
                     "signal_freshness": freshness,
                 },
             )
+
+        attestation_policy = resolve_signal_attestation_policy(
+            policy_overrides=request.context_overrides.get("signals")
+            if isinstance(request.context_overrides.get("signals"), dict)
+            else None,
+            strict_enabled=strict_mode,
+        )
+        signal_report = evaluate_signal_attestation(
+            tenant_id=tenant_id,
+            signal_type="risk_eval",
+            subject_type="jira_issue",
+            subject_id=request.issue_key,
+            inline_signal={
+                "signal_source": risk_meta.get("signal_source") or risk_meta.get("source"),
+                "computed_at": risk_meta.get("computed_at"),
+                "expires_at": risk_meta.get("expires_at") or risk_meta.get("expiration"),
+                "signal_hash": risk_meta.get("signal_hash"),
+                "payload": risk_meta,
+            },
+            policy=attestation_policy,
+            now=datetime.now(timezone.utc),
+        )
+        if signal_report.get("stale") and signal_report.get("should_block"):
+            reason_code = str(signal_report.get("reason_code") or "STALE_SIGNAL")
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:attested-signal:{reason_code}",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=reason_code,
+                message=f"BLOCKED: required signal attestation invalid (`{reason_code}`)",
+                unlock_conditions=["Publish a fresh risk signal attestation and retry transition."],
+                event="jira.transition.signal_attestation_failed",
+                dependency="signals",
+                error_code=reason_code,
+                inputs_present={"releasegate_risk": True},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "risk_meta": risk_meta,
+                    "signal_attestation": signal_report,
+                },
+            )
         
         try:
             # 1. Idempotency Check
@@ -1319,7 +1367,8 @@ class WorkflowGate:
                     approval_scope_hash=approval_scope_hash,
                     limit=1000,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning("Failed to list active scope approvals: %s", e)
                 persisted_scope_approvals = []
             for approval in persisted_scope_approvals:
                 actor_id = str(approval.get("approver_actor") or "").strip()
