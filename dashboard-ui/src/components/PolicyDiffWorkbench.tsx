@@ -300,7 +300,7 @@ export function PolicyDiffWorkbench({
                 setTimeout(() => setCopyState("idle"), 1500);
               }}
             >
-              {copyState === "copied" ? "Copied!" : copyState === "failed" ? "No paths" : "Copy paths"}
+              {copyState === "copied" ? "Copied!" : copyState === "failed" ? (copyablePaths.length > 0 ? "Copy failed" : "No paths") : "Copy paths"}
             </button>
           </div>
 
