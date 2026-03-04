@@ -4,7 +4,7 @@ import { KpiCard } from "@/components/KpiCard";
 import { LineChartCard } from "@/components/LineChartCard";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
-import { resolveTenantId } from "@/lib/tenant";
+import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DashboardAlerts, DashboardOverview } from "@/lib/types";
 
 interface BlockedPagePayload {
@@ -18,26 +18,31 @@ export const dynamic = "force-dynamic";
 export default async function OverviewPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tenant_id?: string | string[] }>;
+  searchParams: Promise<{
+    tenant_id?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+    window_days?: string | string[];
+  }>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
+  const scope = resolveDashboardScope(resolvedSearchParams);
+  const baseQuery = scopeToQuery(scope);
 
   const overviewResp = await backendFetch<DashboardOverview>("/dashboard/overview", {
     method: "GET",
     query: {
-      tenant_id: tenantId,
-      window_days: 30,
+      ...baseQuery,
       blocked_limit: 25,
     },
   });
   const alertsResp = await backendFetch<DashboardAlerts>("/dashboard/alerts", {
     method: "GET",
-    query: { tenant_id: tenantId, window_days: 30 },
+    query: baseQuery,
   });
   const blockedResp = await backendFetch<BlockedPagePayload>("/dashboard/blocked", {
     method: "GET",
-    query: { tenant_id: tenantId, limit: 25 },
+    query: { ...baseQuery, limit: 25 },
   });
 
   const trendRows = overviewResp.data.integrity_trend.map((point, index) => ({
@@ -52,7 +57,7 @@ export default async function OverviewPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Executive Overview</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {tenantId}</p>
+          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
         <TraceInfo traceId={overviewResp.data.trace_id ?? overviewResp.traceId} />
       </div>
@@ -114,7 +119,9 @@ export default async function OverviewPage({
       </div>
 
       <BlockedDecisionsTable
-        tenantId={tenantId}
+        tenantId={scope.tenantId}
+        fromTs={scope.fromTs}
+        toTs={scope.toTs}
         initialItems={blockedResp.data.items}
         initialCursor={blockedResp.data.next_cursor}
       />

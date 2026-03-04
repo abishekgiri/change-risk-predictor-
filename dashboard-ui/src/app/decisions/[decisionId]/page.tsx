@@ -3,7 +3,7 @@ import { JsonPanel } from "@/components/JsonPanel";
 import { KpiCard } from "@/components/KpiCard";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
-import { resolveTenantId } from "@/lib/tenant";
+import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DecisionExplainer } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -13,16 +13,21 @@ export default async function DecisionPage({
   searchParams,
 }: {
   params: Promise<{ decisionId: string }>;
-  searchParams: Promise<{ tenant_id?: string | string[] }>;
+  searchParams: Promise<{
+    tenant_id?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+    window_days?: string | string[];
+  }>;
 }) {
   const resolvedParams = await params;
   const resolvedSearchParams = await searchParams;
-  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
+  const scope = resolveDashboardScope(resolvedSearchParams);
   const explainer = await backendFetch<DecisionExplainer>(
     `/dashboard/decisions/${encodeURIComponent(resolvedParams.decisionId)}/explainer`,
     {
       method: "GET",
-      query: { tenant_id: tenantId },
+      query: scopeToQuery(scope),
     },
   );
 

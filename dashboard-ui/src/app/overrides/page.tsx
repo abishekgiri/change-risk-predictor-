@@ -1,7 +1,7 @@
 import { OverrideBreakdownTable } from "@/components/OverrideBreakdownTable";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
-import { resolveTenantId } from "@/lib/tenant";
+import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DashboardOverridesBreakdown, OverridesGroupBy } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -18,15 +18,23 @@ function normalizeGroupBy(value: string | string[] | undefined): OverridesGroupB
 export default async function OverridesPage({
   searchParams,
 }: {
-  searchParams: { tenant_id?: string | string[]; group_by?: string | string[] };
+  searchParams: Promise<{
+    tenant_id?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+    window_days?: string | string[];
+    group_by?: string | string[];
+  }>;
 }) {
-  const tenantId = resolveTenantId(searchParams.tenant_id);
-  const groupBy = normalizeGroupBy(searchParams.group_by);
+  const resolvedSearchParams = await searchParams;
+  const scope = resolveDashboardScope(resolvedSearchParams);
+  const baseQuery = scopeToQuery(scope);
+  const groupBy = normalizeGroupBy(resolvedSearchParams.group_by);
 
   const breakdown = await backendFetch<DashboardOverridesBreakdown>("/dashboard/overrides/breakdown", {
     method: "GET",
     query: {
-      tenant_id: tenantId,
+      ...baseQuery,
       group_by: groupBy,
       limit: 25,
     },
@@ -37,14 +45,16 @@ export default async function OverridesPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Override Breakdown</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {tenantId}</p>
+          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
         <TraceInfo traceId={breakdown.data.trace_id ?? breakdown.traceId} />
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <form action="/overrides" method="get" className="flex flex-wrap items-end gap-3">
-          <input type="hidden" name="tenant_id" value={tenantId} />
+          <input type="hidden" name="tenant_id" value={scope.tenantId} />
+          {scope.fromTs ? <input type="hidden" name="from" value={scope.fromTs} /> : null}
+          {scope.toTs ? <input type="hidden" name="to" value={scope.toTs} /> : null}
           <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
             Group by
             <select
