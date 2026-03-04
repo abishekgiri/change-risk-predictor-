@@ -308,7 +308,18 @@ def test_dashboard_blocked_limit_validation():
     body = response.json()
     assert body["generated_at"]
     assert body["trace_id"]
+    assert body["error"]["code"] == "VALIDATION_ERROR"
     assert body["error"]["error_code"] == "VALIDATION_ERROR"
+
+
+def test_non_dashboard_route_keeps_default_shape():
+    _reset_db()
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    body = response.json()
+    assert "generated_at" not in body
+    assert "trace_id" not in body
+    assert body["status"] == "ok"
 
 
 def test_dashboard_overview_fallback_returns_null_drift_breakdown():

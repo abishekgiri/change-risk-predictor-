@@ -550,16 +550,18 @@ class DashboardPolicyDiffData(BaseModel):
 
 
 class DashboardErrorDetail(BaseModel):
-    code: str
-    error_code: str
+    code: str = Field(description="Stable canonical dashboard error code.")
+    error_code: str = Field(description="Detailed service error code. Defaults to canonical code.")
     message: str
     details: Dict[str, Any] = Field(default_factory=dict)
-    request_id: str
+    request_id: str = Field(
+        description="Client-facing request correlation identifier; equals top-level trace_id for dashboard responses."
+    )
 
 
 class DashboardErrorResponse(BaseModel):
     generated_at: str
-    trace_id: str
+    trace_id: str = Field(description="Distributed request correlation identifier.")
     error: DashboardErrorDetail
 
 
@@ -2220,11 +2222,7 @@ def _dashboard_generated_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _dashboard_error_code(status_code: int, detail: Any) -> str:
-    if isinstance(detail, dict):
-        existing = str(detail.get("error_code") or "").strip()
-        if existing:
-            return existing
+def _dashboard_error_code(status_code: int) -> str:
     if status_code == 401:
         return "AUTH_REQUIRED"
     if status_code == 403:
@@ -2236,6 +2234,14 @@ def _dashboard_error_code(status_code: int, detail: Any) -> str:
     if status_code in {400, 422}:
         return "VALIDATION_ERROR"
     return "INTERNAL"
+
+
+def _dashboard_error_subcode(detail: Any, default_code: str) -> str:
+    if isinstance(detail, dict):
+        existing = str(detail.get("error_code") or "").strip()
+        if existing:
+            return existing
+    return default_code
 
 
 def _dashboard_error_message(detail: Any, status_code: int) -> str:
@@ -2260,13 +2266,14 @@ def _dashboard_error_response(
     headers: Optional[Dict[str, str]] = None,
 ) -> JSONResponse:
     trace_id = _dashboard_trace_id(request)
-    error_code = _dashboard_error_code(status_code, detail)
+    canonical_code = _dashboard_error_code(status_code)
+    detailed_code = _dashboard_error_subcode(detail, canonical_code)
     payload = {
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
         "error": {
-            "code": error_code,
-            "error_code": error_code,
+            "code": canonical_code,
+            "error_code": detailed_code,
             "message": _dashboard_error_message(detail, status_code),
             "details": detail if isinstance(detail, dict) else {},
             "request_id": trace_id,

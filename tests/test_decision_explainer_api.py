@@ -162,4 +162,5 @@ def test_dashboard_decision_explainer_returns_404_for_missing_decision():
     body = response.json()
     assert body["generated_at"]
     assert body["trace_id"]
+    assert body["error"]["code"] == "NOT_FOUND"
     assert body["error"]["error_code"] == "NOT_FOUND"
