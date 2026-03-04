@@ -53,6 +53,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260310_034_signal_attestations" in migration_ids
         assert "20260311_035_governance_query_indexes" in migration_ids
         assert "20260312_036_governance_dashboard_rollups" in migration_ids
+        assert "20260313_037_enterprise_onboarding_config" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -216,6 +217,23 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "updated_at",
         } <= usage_cols
         assert usage_pk == ["tenant_id", "period_type", "period_start"]
+
+        cur.execute("PRAGMA table_info(tenant_onboarding_config)")
+        onboarding_info = cur.fetchall()
+        onboarding_cols = {row[1] for row in onboarding_info}
+        onboarding_pk = [row[1] for row in sorted((r for r in onboarding_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "jira_instance_id",
+            "project_keys_json",
+            "workflow_ids_json",
+            "transition_ids_json",
+            "mode",
+            "canary_pct",
+            "created_at",
+            "updated_at",
+        } <= onboarding_cols
+        assert onboarding_pk == ["tenant_id"]
 
         cur.execute("PRAGMA table_info(tenant_security_anomaly_events)")
         anomaly_info = cur.fetchall()

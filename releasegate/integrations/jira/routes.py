@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from releasegate.integrations.jira.lock_store import (
@@ -39,6 +39,11 @@ from releasegate.integrations.jira.client import JiraClient
 from releasegate.integrations.jira.override_validation import (
     ACTION_OVERRIDE,
     validate_override_request,
+)
+from releasegate.onboarding.service import (
+    discover_jira_projects,
+    discover_jira_workflow_transitions,
+    discover_jira_workflows,
 )
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
 from releasegate.quota import QUOTA_KIND_DECISIONS, TenantQuotaExceededError, consume_tenant_quota
@@ -608,6 +613,112 @@ async def health_check():
     if client.check_permissions():
         return {"status": "ok", "service": "jira"}
     raise HTTPException(status_code=503, detail="Jira connectivity failed")
+
+
+@router.get("/projects")
+async def list_jira_projects_endpoint(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    effective_tenant = resolve_tenant_id(tenant_id or auth.tenant_id)
+    payload = discover_jira_projects()
+    return {
+        "tenant_id": effective_tenant,
+        "source": payload.get("source", "configured_map"),
+        "items": payload.get("items", []),
+    }
+
+
+@router.get("/workflows")
+async def list_jira_workflows_endpoint(
+    project_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    effective_tenant = resolve_tenant_id(tenant_id or auth.tenant_id)
+    payload = discover_jira_workflows(project_key=project_key)
+    workflows: List[Dict[str, Any]] = []
+    for row in payload.get("items", []):
+        if not isinstance(row, dict):
+            continue
+        workflow_id = str(row.get("workflow_id") or "").strip()
+        workflow_name = str(row.get("workflow_name") or workflow_id or "").strip()
+        if not workflow_id and not workflow_name:
+            continue
+        workflows.append(
+            {
+                "workflow_id": workflow_id or workflow_name.lower().replace(" ", "-"),
+                "workflow_name": workflow_name or workflow_id,
+                "project_keys": [
+                    str(key).strip()
+                    for key in (row.get("project_keys") or [])
+                    if str(key).strip()
+                ],
+            }
+        )
+    return {
+        "tenant_id": effective_tenant,
+        "project_key": str(project_key or "").strip() or None,
+        "source": payload.get("source", "configured_map"),
+        "items": workflows,
+    }
+
+
+@router.get("/workflows/{workflow_id}/transitions")
+async def list_jira_workflow_transitions_endpoint(
+    workflow_id: str,
+    project_key: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    effective_tenant = resolve_tenant_id(tenant_id or auth.tenant_id)
+    payload = discover_jira_workflow_transitions(
+        workflow_id=workflow_id,
+        project_key=project_key,
+    )
+    transitions: List[Dict[str, Any]] = []
+    for row in payload.get("items", []):
+        if not isinstance(row, dict):
+            continue
+        transition_id = str(row.get("transition_id") or "").strip()
+        transition_name = str(row.get("transition_name") or transition_id or "").strip()
+        if not transition_id and not transition_name:
+            continue
+        transitions.append(
+            {
+                "transition_id": transition_id or transition_name.lower().replace(" ", "-"),
+                "transition_name": transition_name or transition_id,
+                "workflow_id": str(row.get("workflow_id") or workflow_id).strip() or workflow_id,
+                "workflow_name": str(row.get("workflow_name") or workflow_id).strip() or workflow_id,
+                "project_keys": [
+                    str(key).strip()
+                    for key in (row.get("project_keys") or [])
+                    if str(key).strip()
+                ],
+            }
+        )
+    return {
+        "tenant_id": effective_tenant,
+        "workflow_id": workflow_id,
+        "project_key": str(project_key or "").strip() or None,
+        "source": payload.get("source", "configured_map"),
+        "items": transitions,
+    }
 
 
 @router.get("/metrics/internal")

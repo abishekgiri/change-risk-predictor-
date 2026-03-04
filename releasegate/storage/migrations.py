@@ -2635,6 +2635,36 @@ def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
         """
     )
 
+
+def _migration_20260313_037_enterprise_onboarding_config(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_onboarding_config (
+            tenant_id TEXT PRIMARY KEY,
+            jira_instance_id TEXT,
+            project_keys_json TEXT NOT NULL DEFAULT '[]',
+            workflow_ids_json TEXT NOT NULL DEFAULT '[]',
+            transition_ids_json TEXT NOT NULL DEFAULT '[]',
+            mode TEXT NOT NULL DEFAULT 'simulation',
+            canary_pct INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_onboarding_config_updated_at
+        ON tenant_onboarding_config(updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_onboarding_config_mode
+        ON tenant_onboarding_config(mode)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2815,6 +2845,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260312_036_governance_dashboard_rollups",
         description="Add tenant-scoped governance daily rollups for dashboard trend APIs.",
         apply=_migration_20260312_036_governance_dashboard_rollups,
+    ),
+    Migration(
+        migration_id="20260313_037_enterprise_onboarding_config",
+        description="Add tenant onboarding configuration records for enterprise guided setup flow.",
+        apply=_migration_20260313_037_enterprise_onboarding_config,
     ),
 ]
 
