@@ -14,10 +14,17 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.exception_handlers import (
+    http_exception_handler as fastapi_http_exception_handler,
+    request_validation_exception_handler as fastapi_request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from starlette.background import BackgroundTask
 import csv
 import io
 import zipfile
@@ -259,6 +266,32 @@ class PolicySimulateRequest(BaseModel):
     status_filter: str = "ACTIVE"
 
 
+class PolicySimulateHistoricalRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor: Optional[str] = None
+    policy_id: Optional[str] = None
+    policy_version: Optional[int] = None
+    policy_json: Optional[Dict[str, Any]] = None
+    time_window_days: int = 30
+    transition_id: Optional[str] = None
+    project_key: Optional[str] = None
+    workflow_id: Optional[str] = None
+    environment: Optional[str] = None
+    only_protected: bool = False
+    max_events: Optional[int] = None
+    top_n: int = 10
+
+
+class PolicyDiffImpactRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    current_policy_id: Optional[str] = None
+    current_policy_version: Optional[int] = None
+    current_policy_json: Optional[Dict[str, Any]] = None
+    candidate_policy_id: Optional[str] = None
+    candidate_policy_version: Optional[int] = None
+    candidate_policy_json: Optional[Dict[str, Any]] = None
+
+
 class PolicyConflictAnalyzeRequest(BaseModel):
     tenant_id: Optional[str] = None
     policy_id: Optional[str] = None
@@ -275,6 +308,26 @@ class DeployGateCheckRequest(BaseModel):
     env: str
     commit_sha: Optional[str] = None
     artifact_digest: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CorrelationDeploymentRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    deployment_event_id: str
+    repo: str
+    environment: str
+    service: str
+    decision_id: Optional[str] = None
+    jira_issue_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    commit_sha: Optional[str] = None
+    artifact_digest: Optional[str] = None
+    risk_eval_id: Optional[str] = None
+    risk_evaluated_at: Optional[str] = None
+    deployed_at: Optional[str] = None
+    source: Optional[str] = None
+    jira_ticket_approved: Optional[bool] = None
+    jira_ticket_status: Optional[str] = None
     policy_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -350,6 +403,12 @@ class AnchorTickRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class DailyIndependentCheckpointPublishRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    provider: Optional[str] = None
+    publish_anchor: bool = True
+
+
 class RotateApiKeyRequest(BaseModel):
     tenant_id: Optional[str] = None
 
@@ -363,6 +422,189 @@ class CreateWebhookSigningKeyRequest(BaseModel):
 
 class VerifyAttestationRequest(BaseModel):
     attestation: Dict[str, Any]
+
+
+class SignalAttestRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    signal_type: str = Field(min_length=1)
+    signal_source: str = Field(min_length=1)
+    subject_type: str = Field(min_length=1)
+    subject_id: str = Field(min_length=1)
+    computed_at: str
+    expires_at: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    signal_hash: Optional[str] = None
+    sig_alg: Optional[str] = None
+    signature: Optional[str] = None
+    key_id: Optional[str] = None
+
+
+class GovernanceExportRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    type: str = Field(min_length=1)
+    year: int
+    quarter: Optional[int] = None
+
+
+class DashboardTrendPoint(BaseModel):
+    date_utc: str
+    value: float = 0.0
+
+
+class DashboardOverrideRateTrendPoint(BaseModel):
+    date_utc: str
+    value: float = 0.0
+    override_count: int = 0
+    decision_count: int = 0
+
+
+class DashboardDriftPayload(BaseModel):
+    current: float = 0.0
+    breakdown: Optional[Dict[str, Any]] = None
+
+
+class DashboardOverviewData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    integrity_score: float = 0.0
+    integrity_trend: List[DashboardTrendPoint] = Field(default_factory=list)
+    drift_index: float = 0.0
+    drift_trend: List[DashboardTrendPoint] = Field(default_factory=list)
+    override_rate: float = 0.0
+    override_rate_trend: List[DashboardOverrideRateTrendPoint] = Field(default_factory=list)
+    drift: DashboardDriftPayload = Field(default_factory=DashboardDriftPayload)
+    active_strict_modes: List[Dict[str, Any]] = Field(default_factory=list)
+    recent_blocked: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardIntegrityTrendPoint(BaseModel):
+    date_utc: str
+    integrity_score: float = 0.0
+    drift_index: float = 0.0
+    override_rate: float = 0.0
+    override_count: int = 0
+    decision_count: int = 0
+    blocked_count: int = 0
+    drift_breakdown: Optional[Dict[str, Any]] = None
+    override_abuse_index: float = 0.0
+
+
+class DashboardIntegrityData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    trend: List[DashboardIntegrityTrendPoint] = Field(default_factory=list)
+
+
+class DashboardAlertsData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    current_override_abuse_index: float = 0.0
+    alerts: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardBlockedData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    next_cursor: Optional[str] = None
+
+
+class DashboardStrictModesData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardDecisionExplainData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    decision_id: str
+    decision: Dict[str, Any] = Field(default_factory=dict)
+    snapshot_binding: Dict[str, Any] = Field(default_factory=dict)
+    evaluation_tree: Dict[str, Any] = Field(default_factory=dict)
+    signals: List[Dict[str, Any]] = Field(default_factory=list)
+    risk: Dict[str, Any] = Field(default_factory=dict)
+    evidence_links: List[Dict[str, Any]] = Field(default_factory=list)
+    replay: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardPolicyDiffData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    report_id: Optional[str] = None
+    report_trace_id: Optional[str] = None
+    overall: Optional[str] = None
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    threshold_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    condition_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    role_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    sod_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    active_policy: Dict[str, Any] = Field(default_factory=dict)
+    staged_policy: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
+    strengthening_signals: List[Dict[str, Any]] = Field(default_factory=list)
+    legacy_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardErrorDetail(BaseModel):
+    code: str = Field(description="Stable canonical dashboard error code.")
+    error_code: str = Field(description="Detailed service error code. Defaults to canonical code.")
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    request_id: str = Field(
+        description="Client-facing request correlation identifier; equals top-level trace_id for dashboard responses."
+    )
+
+
+class DashboardErrorResponse(BaseModel):
+    generated_at: str
+    trace_id: str = Field(description="Distributed request correlation identifier.")
+    error: DashboardErrorDetail
+
+
+class DashboardOverviewResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardOverviewData
+
+
+class DashboardIntegrityResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardIntegrityData
+
+
+class DashboardAlertsResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardAlertsData
+
+
+class DashboardBlockedResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardBlockedData
+
+
+class DashboardStrictModesResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardStrictModesData
+
+
+class DashboardDecisionExplainResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardDecisionExplainData
+
+
+class DashboardPolicyDiffResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardPolicyDiffData
 
 
 # --- Config ---
@@ -955,6 +1197,100 @@ def transparency_root_anchors_by_date(
     }
 
 
+@app.post("/anchors/checkpoints/daily/{date_utc}/publish")
+def publish_independent_daily_checkpoint(
+    date_utc: str,
+    payload: Optional[DailyIndependentCheckpointPublishRequest] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import create_independent_daily_checkpoint
+
+    body = payload or DailyIndependentCheckpointPublishRequest()
+    effective_tenant = _effective_tenant(auth, body.tenant_id)
+    try:
+        checkpoint = create_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+            publish_anchor=bool(body.publish_anchor),
+            provider_name=body.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"failed to publish independent checkpoint: {exc}") from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="independent_checkpoint_publish",
+        target_type="checkpoint",
+        target_id=str((checkpoint.get("ids") or {}).get("checkpoint_id") or date_utc),
+        metadata={
+            "date_utc": date_utc,
+            "created": bool(checkpoint.get("created")),
+            "provider": str(((checkpoint.get("external_anchor") or {}).get("provider") or "")),
+        },
+    )
+    return checkpoint
+
+
+@app.get("/anchors/checkpoints/daily/{date_utc}")
+def get_independent_daily_checkpoint_endpoint(
+    date_utc: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import get_independent_daily_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        payload = get_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not payload:
+        raise HTTPException(status_code=404, detail="independent daily checkpoint not found")
+    return payload
+
+
+@app.get("/anchors/checkpoints/daily/{date_utc}/verify")
+def verify_independent_daily_checkpoint_endpoint(
+    date_utc: str,
+    require_anchor: bool = True,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import verify_independent_daily_checkpoint
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        report = verify_independent_daily_checkpoint(
+            date_utc=date_utc,
+            tenant_id=effective_tenant,
+            require_anchor=require_anchor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not report.get("exists"):
+        raise HTTPException(status_code=404, detail="independent daily checkpoint not found")
+    return report
+
+
 @app.get("/transparency/proof/{attestation_id}")
 def transparency_inclusion_proof(attestation_id: str, tenant_id: Optional[str] = None):
     from releasegate.audit.transparency import get_transparency_inclusion_proof
@@ -1090,6 +1426,74 @@ def metrics_for_tenant(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics_snapshot(tenant_id=effective_tenant),
     }
+
+
+@app.post("/signals/attest")
+def attest_signal_endpoint(
+    payload: SignalAttestRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.signals.attestation import attest_signal
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        record = attest_signal(
+            tenant_id=effective_tenant,
+            signal_type=payload.signal_type,
+            signal_source=payload.signal_source,
+            subject_type=payload.subject_type,
+            subject_id=payload.subject_id,
+            computed_at=payload.computed_at,
+            expires_at=payload.expires_at,
+            payload=payload.payload,
+            signal_hash=payload.signal_hash,
+            sig_alg=payload.sig_alg,
+            signature=payload.signature,
+            key_id=payload.key_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "signal_id": record.get("signal_id"),
+        "signal_hash": record.get("signal_hash"),
+        "signal_type": record.get("signal_type"),
+        "subject_type": record.get("subject_type"),
+        "subject_id": record.get("subject_id"),
+        "computed_at": record.get("computed_at"),
+        "expires_at": record.get("expires_at"),
+    }
+
+
+@app.get("/signals/latest")
+def latest_signal_attestation_endpoint(
+    signal_type: str,
+    subject_type: str,
+    subject_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.signals.attestation import get_latest_signal_attestation
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    item = get_latest_signal_attestation(
+        tenant_id=effective_tenant,
+        signal_type=signal_type,
+        subject_type=subject_type,
+        subject_id=subject_id,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Signal attestation not found")
+    return {"ok": True, "tenant_id": effective_tenant, "item": item}
 
 
 @app.get("/internal/metrics/anchor")
@@ -1807,6 +2211,666 @@ def governance_override_metrics(
     )
 
 
+def _dashboard_trace_id(request: Request) -> str:
+    supplied = str(request.headers.get("X-Request-Id") or "").strip()
+    if supplied:
+        return supplied[:128]
+    return uuid.uuid4().hex
+
+
+def _dashboard_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _dashboard_error_code(status_code: int) -> str:
+    if status_code == 401:
+        return "AUTH_REQUIRED"
+    if status_code == 403:
+        return "FORBIDDEN"
+    if status_code == 404:
+        return "NOT_FOUND"
+    if status_code == 409:
+        return "CONFLICT"
+    if status_code in {400, 422}:
+        return "VALIDATION_ERROR"
+    return "INTERNAL"
+
+
+def _dashboard_error_subcode(detail: Any, default_code: str) -> str:
+    if isinstance(detail, dict):
+        existing = str(detail.get("error_code") or "").strip()
+        if existing:
+            return existing
+    return default_code
+
+
+def _dashboard_error_message(detail: Any, status_code: int) -> str:
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or "").strip()
+        if message:
+            return message
+        if "error_code" in detail and len(detail.keys()) == 1:
+            return f"Dashboard request failed with {status_code}"
+        serialized = json.dumps(detail, separators=(",", ":"), ensure_ascii=False)
+        return serialized if serialized else f"Dashboard request failed with {status_code}"
+    return f"Dashboard request failed with {status_code}"
+
+
+def _dashboard_error_response(
+    *,
+    request: Request,
+    status_code: int,
+    detail: Any,
+    headers: Optional[Dict[str, str]] = None,
+) -> JSONResponse:
+    trace_id = _dashboard_trace_id(request)
+    canonical_code = _dashboard_error_code(status_code)
+    detailed_code = _dashboard_error_subcode(detail, canonical_code)
+    payload = {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "error": {
+            "code": canonical_code,
+            "error_code": detailed_code,
+            "message": _dashboard_error_message(detail, status_code),
+            "details": detail if isinstance(detail, dict) else {},
+            "request_id": trace_id,
+        },
+    }
+    response_headers = dict(headers or {})
+    response_headers["X-Request-Id"] = trace_id
+    response_headers["Cache-Control"] = "private, no-store"
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers=response_headers,
+    )
+
+
+def _dashboard_error_models() -> Dict[int, Dict[str, Any]]:
+    return {
+        400: {"model": DashboardErrorResponse},
+        401: {"model": DashboardErrorResponse},
+        403: {"model": DashboardErrorResponse},
+        404: {"model": DashboardErrorResponse},
+        409: {"model": DashboardErrorResponse},
+        422: {"model": DashboardErrorResponse},
+        500: {"model": DashboardErrorResponse},
+    }
+
+
+def _dashboard_response(
+    *,
+    response: Response,
+    trace_id: str,
+    cache_control: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = cache_control
+    data = dict(payload)
+    existing_trace_id = data.get("trace_id")
+    if existing_trace_id and str(existing_trace_id) != str(trace_id):
+        data["report_trace_id"] = existing_trace_id
+    data["trace_id"] = trace_id
+    generated_at = data.get("generated_at")
+    if not generated_at:
+        generated_at = _dashboard_generated_at()
+    return {
+        "generated_at": generated_at,
+        "trace_id": trace_id,
+        "data": data,
+    }
+
+
+def _audit_dashboard_read(
+    *,
+    auth: AuthContext,
+    tenant_id: str,
+    action: str,
+    endpoint: str,
+    trace_id: str,
+    params: Dict[str, Any],
+) -> None:
+    try:
+        log_security_event(
+            tenant_id=tenant_id,
+            principal_id=str(auth.principal_id or "system"),
+            auth_method="api",
+            action=action,
+            target_type="dashboard",
+            target_id=endpoint,
+            metadata={
+                "trace_id": trace_id,
+                "endpoint": endpoint,
+                "params": params,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to write dashboard read audit event: action=%s", action)
+
+
+@app.exception_handler(HTTPException)
+async def releasegate_http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/dashboard/"):
+        header_map = dict(exc.headers or {})
+        return _dashboard_error_response(
+            request=request,
+            status_code=int(exc.status_code),
+            detail=exc.detail,
+            headers=header_map,
+        )
+    return await fastapi_http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def releasegate_request_validation_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/dashboard/"):
+        return _dashboard_error_response(
+            request=request,
+            status_code=422,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Request validation failed",
+                "validation_errors": exc.errors(),
+            },
+        )
+    return await fastapi_request_validation_exception_handler(request, exc)
+
+
+@app.get(
+    "/dashboard/overview",
+    response_model=DashboardOverviewResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_overview_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    blocked_limit: int = 25,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_dashboard_overview
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_dashboard_overview(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+            blocked_limit=blocked_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_OVERVIEW",
+        endpoint="/dashboard/overview",
+        trace_id=trace_id,
+        params={
+            "window_days": int(window_days),
+            "blocked_limit": int(blocked_limit),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/integrity",
+    response_model=DashboardIntegrityResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_integrity_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_integrity_trend
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        trend = list_integrity_trend(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_INTEGRITY",
+        endpoint="/dashboard/integrity",
+        trace_id=trace_id,
+        params={"window_days": int(window_days)},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload={
+        "tenant_id": effective_tenant,
+        "window_days": int(window_days),
+        "trend": trend,
+        },
+    )
+
+
+@app.get(
+    "/dashboard/alerts",
+    response_model=DashboardAlertsResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_alerts_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_dashboard_alerts
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = list_dashboard_alerts(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_ALERTS",
+        endpoint="/dashboard/alerts",
+        trace_id=trace_id,
+        params={"window_days": int(window_days)},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/blocked",
+    response_model=DashboardBlockedResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_blocked_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    limit: int = 25,
+    cursor: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_recent_blocked_decisions_page
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    bounded_limit = _bounded_limit(limit, max_allowed=100, field="limit")
+    trace_id = _dashboard_trace_id(request)
+    try:
+        page = list_recent_blocked_decisions_page(
+            tenant_id=effective_tenant,
+            limit=bounded_limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_BLOCKED",
+        endpoint="/dashboard/blocked",
+        trace_id=trace_id,
+        params={
+            "limit": int(bounded_limit),
+            "cursor": str(cursor or "") or None,
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=10",
+        payload={
+        "tenant_id": effective_tenant,
+        "items": page.get("items") if isinstance(page.get("items"), list) else [],
+        "next_cursor": page.get("next_cursor"),
+        },
+    )
+
+
+@app.get(
+    "/dashboard/strict-modes",
+    response_model=DashboardStrictModesResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_strict_modes_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import list_active_strict_modes
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    payload = {
+        "tenant_id": effective_tenant,
+        "items": list_active_strict_modes(tenant_id=effective_tenant),
+    }
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_STRICT_MODES",
+        endpoint="/dashboard/strict-modes",
+        trace_id=trace_id,
+        params={},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/decisions/{decision_id}/explainer",
+    response_model=DashboardDecisionExplainResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_decision_explainer_endpoint(
+    request: Request,
+    response: Response,
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.decision_explainer import build_decision_explainer
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    payload = build_decision_explainer(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="decision_not_found")
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_DECISION_EXPLAIN",
+        endpoint="/dashboard/decisions/{decision_id}/explainer",
+        trace_id=trace_id,
+        params={"decision_id": decision_id},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=payload,
+    )
+
+
+@app.post(
+    "/dashboard/policies/diff",
+    response_model=DashboardPolicyDiffResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_policy_diff_endpoint(
+    request: Request,
+    response: Response,
+    payload: PolicyDiffImpactRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.policy_diff_visual import build_policy_diff_visual
+    from releasegate.policy.diff_impact import build_policy_impact_diff
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        raw = build_policy_impact_diff(
+            tenant_id=effective_tenant,
+            current_policy_id=payload.current_policy_id,
+            current_policy_version=payload.current_policy_version,
+            current_policy_json=payload.current_policy_json,
+            candidate_policy_id=payload.candidate_policy_id,
+            candidate_policy_version=payload.candidate_policy_version,
+            candidate_policy_json=payload.candidate_policy_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    trace_id = _dashboard_trace_id(request)
+    response_payload = build_policy_diff_visual(raw)
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_POLICY_DIFF",
+        endpoint="/dashboard/policies/diff",
+        trace_id=trace_id,
+        params={
+            "current_policy_id": payload.current_policy_id,
+            "current_policy_version": payload.current_policy_version,
+            "candidate_policy_id": payload.candidate_policy_id,
+            "candidate_policy_version": payload.candidate_policy_version,
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=response_payload,
+    )
+
+
+@app.post("/internal/dashboard/rollups/backfill")
+def dashboard_rollups_backfill_endpoint(
+    days: int = 30,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import backfill_rollups
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = backfill_rollups(
+            tenant_id=effective_tenant,
+            days=days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        **result,
+    }
+
+
+@app.get("/governance/decisions")
+def governance_decision_archive(
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    decision_status: Optional[str] = None,
+    risk_min: Optional[float] = None,
+    risk_max: Optional[float] = None,
+    risk_band: Optional[str] = None,
+    override_used: Optional[bool] = None,
+    workflow_id: Optional[str] = None,
+    transition_id: Optional[str] = None,
+    actor: Optional[str] = None,
+    environment: Optional[str] = None,
+    project_key: Optional[str] = None,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.governance_query import DecisionArchiveFilters, search_decisions
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    bounded_limit = _bounded_limit(limit, max_allowed=500, field="limit")
+    try:
+        payload = search_decisions(
+            tenant_id=effective_tenant,
+            filters=DecisionArchiveFilters(
+                from_ts=from_ts,
+                to_ts=to_ts,
+                decision_status=decision_status,
+                risk_min=risk_min,
+                risk_max=risk_max,
+                risk_band=risk_band,
+                override_used=override_used,
+                workflow_id=workflow_id,
+                transition_id=transition_id,
+                actor=actor,
+                environment=environment,
+                project_key=project_key,
+            ),
+            limit=bounded_limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "tenant_id": effective_tenant,
+        "results": payload.get("results") or [],
+        "next_cursor": payload.get("next_cursor"),
+        "truncated": bool(payload.get("truncated")),
+    }
+
+
+@app.get("/governance/decisions/{decision_id}/graph")
+def governance_decision_graph(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.audit_graph import build_decision_graph
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = build_decision_graph(
+        tenant_id=effective_tenant,
+        decision_id=decision_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Decision graph not found")
+    return payload
+
+
+@app.post("/governance/export")
+def governance_export_bundle(
+    payload: GovernanceExportRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.governance.governance_export import (
+        build_governance_export,
+        cleanup_export_artifact,
+    )
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        artifact = build_governance_export(
+            tenant_id=effective_tenant,
+            export_type=payload.type,
+            year=payload.year,
+            quarter=payload.quarter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="governance_export",
+        target_type="tenant_governance_export",
+        target_id=effective_tenant,
+        metadata={
+            "type": str(payload.type).lower(),
+            "year": payload.year,
+            "quarter": payload.quarter,
+            "archive_name": artifact.archive_name,
+        },
+    )
+
+    return FileResponse(
+        path=artifact.archive_path,
+        media_type="application/zip",
+        filename=artifact.archive_name,
+        background=BackgroundTask(cleanup_export_artifact, artifact.temp_dir),
+        headers={
+            "X-Export-Version": str(artifact.manifest.get("export_version") or ""),
+            "X-Range-Start": str(artifact.manifest.get("range_start") or ""),
+            "X-Range-End-Exclusive": str(artifact.manifest.get("range_end_exclusive") or ""),
+        },
+    )
+
+
 @app.get("/policy/simulate")
 def simulate_policy_impact(
     repo: str,
@@ -1875,6 +2939,98 @@ def simulate_policy_endpoint(
             "status": result.get("status"),
             "allow": result.get("allow"),
             "policy_version": payload.policy_version,
+        },
+    )
+    return result
+
+
+@app.post("/policies/simulate-historical")
+def simulate_historical_policy_endpoint(
+    payload: PolicySimulateHistoricalRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.policy.historical_simulation import simulate_historical_policy_impact
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = simulate_historical_policy_impact(
+            tenant_id=effective_tenant,
+            actor=payload.actor or auth.principal_id,
+            policy_id=payload.policy_id,
+            policy_version=payload.policy_version,
+            policy_json=payload.policy_json,
+            time_window_days=payload.time_window_days,
+            transition_id=payload.transition_id,
+            project_key=payload.project_key,
+            workflow_id=payload.workflow_id,
+            environment=payload.environment,
+            only_protected=payload.only_protected,
+            max_events=payload.max_events,
+            top_n=payload.top_n,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_simulate_historical",
+        target_type="policy_registry",
+        target_id=str(payload.policy_id or "candidate"),
+        metadata={
+            "simulation_id": result.get("simulation_id"),
+            "policy_version": payload.policy_version,
+            "time_window_days": payload.time_window_days,
+            "scanned_events": result.get("scanned_events"),
+            "simulated_events": result.get("simulated_events"),
+            "would_block_count": result.get("would_block_count"),
+            "override_delta": result.get("override_delta"),
+            "truncated": result.get("truncated"),
+        },
+    )
+    return result
+
+
+@app.post("/policies/diff-impact")
+def policy_diff_impact_endpoint(
+    payload: PolicyDiffImpactRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.policy.diff_impact import build_policy_impact_diff
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = build_policy_impact_diff(
+            tenant_id=effective_tenant,
+            current_policy_id=payload.current_policy_id,
+            current_policy_version=payload.current_policy_version,
+            current_policy_json=payload.current_policy_json,
+            candidate_policy_id=payload.candidate_policy_id,
+            candidate_policy_version=payload.candidate_policy_version,
+            candidate_policy_json=payload.candidate_policy_json,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_diff_impact",
+        target_type="policy_registry",
+        target_id=str(payload.candidate_policy_id or "candidate"),
+        metadata={
+            "report_id": result.get("report_id"),
+            "overall": result.get("overall"),
+            "warning_count": ((result.get("summary") or {}).get("warning_count")),
+            "strengthening_count": ((result.get("summary") or {}).get("strengthening_count")),
         },
     )
     return result
@@ -1988,9 +3144,13 @@ def audit_proof_pack(
     chain_proof = None
     checkpoint_proof = None
     checkpoint_snapshot = None
+    independent_checkpoint = None
+    transparency_merkle_proof = None
+    approvals_snapshot: Dict[str, Any] = {}
     ledger_segment = []
     period_id = None
     external_anchor = None
+    anchor_date = ""
 
     if repo:
         overrides = list_overrides(repo=repo, limit=500, pr=pr_number, tenant_id=effective_tenant)
@@ -2020,14 +3180,43 @@ def audit_proof_pack(
         except Exception as exc:
             checkpoint_proof = {"exists": False, "valid": False, "reason": str(exc)}
 
+    raw_approvals = decision_snapshot.get("approvals")
+    if isinstance(raw_approvals, dict):
+        approvals_snapshot = dict(raw_approvals)
+    elif isinstance(raw_approvals, list):
+        approvals_snapshot = {"items": raw_approvals}
+    else:
+        input_snapshot = decision_snapshot.get("input_snapshot")
+        if isinstance(input_snapshot, dict):
+            for key in ("approvals", "approval_snapshot", "approval_events"):
+                value = input_snapshot.get(key)
+                if isinstance(value, dict):
+                    approvals_snapshot = dict(value)
+                    break
+                if isinstance(value, list):
+                    approvals_snapshot = {"items": value}
+                    break
+
+    attestation_id = str(decision_snapshot.get("attestation_id") or "").strip()
+    if attestation_id:
+        try:
+            from releasegate.audit.transparency import get_transparency_inclusion_proof
+
+            transparency_merkle_proof = get_transparency_inclusion_proof(
+                attestation_id=attestation_id,
+                tenant_id=effective_tenant,
+            )
+        except Exception:
+            transparency_merkle_proof = None
+
+    if isinstance(created_at, str):
+        anchor_date = created_at[:10]
+    elif isinstance(created_at, datetime):
+        anchor_date = created_at.astimezone(timezone.utc).date().isoformat()
+
     try:
         from releasegate.anchoring.roots import get_root_anchor_for_date
 
-        anchor_date = ""
-        if isinstance(created_at, str):
-            anchor_date = created_at[:10]
-        elif isinstance(created_at, datetime):
-            anchor_date = created_at.astimezone(timezone.utc).date().isoformat()
         if anchor_date:
             external_anchor = get_root_anchor_for_date(
                 date_utc=anchor_date,
@@ -2035,6 +3224,37 @@ def audit_proof_pack(
             )
     except Exception:
         external_anchor = None
+
+    if anchor_date:
+        try:
+            from releasegate.anchoring.independent_checkpoints import get_independent_daily_checkpoint
+
+            independent_checkpoint = get_independent_daily_checkpoint(
+                date_utc=anchor_date,
+                tenant_id=effective_tenant,
+            )
+        except Exception:
+            independent_checkpoint = None
+
+    external_anchor_reference = {}
+    if isinstance(independent_checkpoint, dict):
+        anchor_payload = independent_checkpoint.get("external_anchor")
+        if isinstance(anchor_payload, dict):
+            external_anchor_reference = {
+                "provider": str(anchor_payload.get("provider") or ""),
+                "external_ref": str(anchor_payload.get("external_ref") or ""),
+                "date_utc": anchor_date,
+            }
+    if not external_anchor_reference and isinstance(external_anchor, dict):
+        external_anchor_reference = {
+            "provider": str(external_anchor.get("provider") or ""),
+            "external_ref": str(
+                external_anchor.get("external_ref")
+                or external_anchor.get("anchor_id")
+                or ""
+            ),
+            "date_utc": str(external_anchor.get("date_utc") or anchor_date or ""),
+        }
 
     proof_pack_id = record_proof_pack_generation(
         decision_id=decision_id,
@@ -2082,7 +3302,7 @@ def audit_proof_pack(
         chain_proof=chain_proof,
         replay_request=replay_request,
         proof_pack_id=proof_pack_id,
-        external_anchor_snapshot=external_anchor,
+        external_anchor_snapshot=external_anchor if external_anchor else external_anchor_reference,
     )
     graph_hash = str(evidence_graph.get("graph_hash") or "")
 
@@ -2116,13 +3336,18 @@ def audit_proof_pack(
         "pr_number": pr_number,
         "decision_snapshot": decision_snapshot,
         "policy_snapshot": decision_snapshot.get("policy_bindings", []),
+        "approvals_snapshot": approvals_snapshot,
         "input_snapshot": decision_snapshot.get("input_snapshot", {}),
         "override_snapshot": override_snapshot,
+        "override_history": ledger_segment,
         "ledger_segment": ledger_segment,
         "checkpoint_snapshot": checkpoint_snapshot,
+        "independent_checkpoint": independent_checkpoint,
         "chain_proof": chain_proof,
         "checkpoint_proof": checkpoint_proof,
+        "merkle_proof": transparency_merkle_proof,
         "external_anchor": external_anchor,
+        "external_anchor_ref": external_anchor_reference,
         "evidence_graph": evidence_graph,
         "replay_request": replay_request,
     }
@@ -2207,15 +3432,20 @@ def audit_proof_pack(
     zip_entries = {
         "bundle.json": bundle,
         "integrity.json": bundle["integrity"],
+        "approvals.json": bundle["approvals_snapshot"],
         "chain_proof.json": bundle["chain_proof"],
         "checkpoint_proof.json": bundle["checkpoint_proof"],
         "checkpoint_snapshot.json": bundle["checkpoint_snapshot"],
+        "independent_checkpoint.json": bundle["independent_checkpoint"],
         "decision_snapshot.json": bundle["decision_snapshot"],
         "input_snapshot.json": bundle["input_snapshot"],
         "ledger_segment.json": bundle["ledger_segment"],
+        "override_history.json": bundle["override_history"],
+        "merkle_proof.json": bundle["merkle_proof"],
         "override_snapshot.json": bundle["override_snapshot"],
         "policy_snapshot.json": bundle["policy_snapshot"],
         "external_anchor.json": bundle["external_anchor"],
+        "external_anchor_ref.json": bundle["external_anchor_ref"],
         "evidence_graph.json": bundle["evidence_graph"],
         "replay_request.json": bundle["replay_request"],
     }
@@ -2225,6 +3455,19 @@ def audit_proof_pack(
         zip_entries["dsse_envelope.json"] = dsse_envelope
     if isinstance(dsse_error, dict):
         zip_entries["dsse_error.json"] = dsse_error
+    independent_sig = (
+        (bundle.get("independent_checkpoint") or {}).get("signature")
+        if isinstance(bundle.get("independent_checkpoint"), dict)
+        else {}
+    )
+    if isinstance(independent_sig, dict):
+        public_key = str(independent_sig.get("public_key") or "").strip()
+        if public_key:
+            zip_entries["checkpoint_public_key.json"] = {
+                "algorithm": str(independent_sig.get("algorithm") or "").strip().lower(),
+                "key_id": str(independent_sig.get("key_id") or "").strip(),
+                "public_key": public_key,
+            }
     zip_entries["manifest.json"] = _proof_bundle_manifest(
         decision_id=decision_id,
         proof_pack_id=proof_pack_id,
@@ -2272,6 +3515,26 @@ def export_decision_proof_bundle(
     ),
 ):
     # Reuse the hardened proof-pack exporter and return a deterministic zip bundle.
+    return audit_proof_pack(
+        decision_id=decision_id,
+        format="zip",
+        checkpoint_cadence=checkpoint_cadence,
+        tenant_id=tenant_id,
+        auth=auth,
+    )
+
+
+@app.get("/decisions/{decision_id}/proof-bundle")
+def export_decision_proof_bundle_alias(
+    decision_id: str,
+    tenant_id: Optional[str] = None,
+    checkpoint_cadence: str = "daily",
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["proofpack:read", "checkpoint:read", "policy:read"],
+        rate_profile="heavy",
+    ),
+):
     return audit_proof_pack(
         decision_id=decision_id,
         format="zip",
@@ -3764,6 +5027,29 @@ def tenant_governance_metrics_endpoint(
     return get_tenant_governance_metrics(tenant_id=effective_tenant)
 
 
+@app.get("/tenants/{tenant_id}/governance-integrity")
+def tenant_governance_integrity_endpoint(
+    tenant_id: str,
+    window_days: int = 90,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.integrity import get_tenant_governance_integrity
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        payload = get_tenant_governance_integrity(
+            tenant_id=effective_tenant,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload
+
+
 @app.post("/tenants/{tenant_id}/emergency-rotate")
 def emergency_rotate_tenant_key_endpoint(
     tenant_id: str,
@@ -3986,11 +5272,36 @@ def replay_stored_decision(
     from releasegate.decision.types import Decision
     from releasegate.replay.decision_replay import replay_decision
     from releasegate.replay.events import record_replay_event
+    from releasegate.integrations.jira.decision_linkage import get_decision_linkage, is_protected_status
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     row = AuditReader.get_decision(decision_id, tenant_id=effective_tenant)
     if not row:
         raise HTTPException(status_code=404, detail="Decision not found")
+
+    def _linkage_snapshot() -> Optional[Dict[str, Any]]:
+        try:
+            link = get_decision_linkage(tenant_id=effective_tenant, decision_id=decision_id)
+        except Exception:
+            return None
+        if not link:
+            return None
+        target_status = str(link.get("target_status") or "")
+        return {
+            "protected": bool(is_protected_status(target_status)),
+            "context_hash": str(link.get("context_hash") or ""),
+            "expires_at": link.get("expires_at"),
+            "consumed": bool(link.get("consumed")),
+            "consumed_at": link.get("consumed_at"),
+            "consumed_by_request_id": link.get("consumed_by_request_id"),
+            "bound_fields": {
+                "jira_issue_id": link.get("jira_issue_id"),
+                "transition_id": link.get("transition_id"),
+                "actor": link.get("actor"),
+                "source_status": link.get("source_status"),
+                "target_status": target_status,
+            },
+        }
 
     def _build_deterministic_block(report_payload: Dict[str, Any]) -> Dict[str, Any]:
         old = report_payload.get("old") or {}
@@ -4087,6 +5398,7 @@ def replay_stored_decision(
             "repo": row.get("repo"),
             "pr_number": row.get("pr_number"),
             "attestation_id": None,
+            "linkage": _linkage_snapshot(),
         }
         replay_event = record_replay_event(
             tenant_id=effective_tenant,
@@ -4191,6 +5503,7 @@ def replay_stored_decision(
     report["repo"] = row.get("repo")
     report["pr_number"] = row.get("pr_number")
     report["attestation_id"] = decision.attestation_id
+    report["linkage"] = _linkage_snapshot()
     report["replay_id"] = replay_event.get("replay_id")
     report["deterministic"] = _build_deterministic_block(report)
     report["meta"] = {
@@ -4298,6 +5611,142 @@ def explain_decision_endpoint(
     )
     if not payload:
         raise HTTPException(status_code=404, detail="Decision evidence explanation not found")
+    return payload
+
+
+@app.post("/correlation/deployments/authorize")
+def authorize_correlation_deployment_endpoint(
+    payload: CorrelationDeploymentRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import evaluate_and_record_deployment_correlation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = evaluate_and_record_deployment_correlation(
+            tenant_id=effective_tenant,
+            deployment_event_id=payload.deployment_event_id,
+            repo=payload.repo,
+            environment=payload.environment,
+            service=payload.service,
+            decision_id=payload.decision_id,
+            jira_issue_id=payload.jira_issue_id,
+            correlation_id=payload.correlation_id,
+            commit_sha=payload.commit_sha,
+            artifact_digest=payload.artifact_digest,
+            risk_eval_id=payload.risk_eval_id,
+            risk_evaluated_at=payload.risk_evaluated_at,
+            deployed_at=payload.deployed_at,
+            source=payload.source,
+            jira_ticket_approved=payload.jira_ticket_approved,
+            jira_ticket_status=payload.jira_ticket_status,
+            policy_overrides=payload.policy_overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_deployment_authorize",
+        target_type="deployment",
+        target_id=payload.deployment_event_id,
+        metadata={
+            "verdict": result.get("contract_verdict"),
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "jira_issue_id": result.get("jira_issue_id"),
+            "environment": result.get("environment"),
+            "service": result.get("service"),
+            "violations": result.get("violations"),
+            "strict": result.get("strict"),
+        },
+    )
+    return result
+
+
+@app.post("/correlation/deployments/ingest")
+def ingest_correlation_deployment_endpoint(
+    payload: CorrelationDeploymentRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import evaluate_and_record_deployment_correlation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        result = evaluate_and_record_deployment_correlation(
+            tenant_id=effective_tenant,
+            deployment_event_id=payload.deployment_event_id,
+            repo=payload.repo,
+            environment=payload.environment,
+            service=payload.service,
+            decision_id=payload.decision_id,
+            jira_issue_id=payload.jira_issue_id,
+            correlation_id=payload.correlation_id,
+            commit_sha=payload.commit_sha,
+            artifact_digest=payload.artifact_digest,
+            risk_eval_id=payload.risk_eval_id,
+            risk_evaluated_at=payload.risk_evaluated_at,
+            deployed_at=payload.deployed_at,
+            source=payload.source,
+            jira_ticket_approved=payload.jira_ticket_approved,
+            jira_ticket_status=payload.jira_ticket_status,
+            policy_overrides=payload.policy_overrides,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_deployment_ingest",
+        target_type="deployment",
+        target_id=payload.deployment_event_id,
+        metadata={
+            "verdict": result.get("contract_verdict"),
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "jira_issue_id": result.get("jira_issue_id"),
+            "environment": result.get("environment"),
+            "service": result.get("service"),
+            "violations": result.get("violations"),
+            "strict": result.get("strict"),
+        },
+    )
+    return result
+
+
+@app.get("/correlation/deployments/{deployment_event_id}")
+def get_correlation_deployment_endpoint(
+    deployment_event_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.contracts import get_deployment_correlation_link
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_deployment_correlation_link(
+        tenant_id=effective_tenant,
+        deployment_event_id=deployment_event_id,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail="Deployment correlation link not found")
     return payload
 
 

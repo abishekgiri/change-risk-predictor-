@@ -117,6 +117,14 @@ def _init_postgres_schema() -> str:
         )
         """
     )
+    # Existing Postgres deployments may have an older override table shape.
+    # Ensure expires_at exists before creating indexes that depend on it.
+    cur.execute(
+        """
+        ALTER TABLE audit_overrides
+        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
+        """
+    )
     cur.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_overrides_tenant_idempotency_key
@@ -149,8 +157,18 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
-        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
-        ON audit_overrides(tenant_id, expires_at)
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = ANY(current_schemas(false))
+                  AND table_name = 'audit_overrides'
+                  AND column_name = 'expires_at'
+            ) THEN
+                EXECUTE 'CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at ON audit_overrides(tenant_id, expires_at)';
+            END IF;
+        END $$;
         """
     )
     cur.execute(
@@ -184,6 +202,41 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_audit_decision_refs_tenant_repo_pr_created
         ON audit_decision_refs(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_transition_links (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            jira_issue_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            target_status TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            context_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            consumed BOOLEAN NOT NULL DEFAULT FALSE,
+            consumed_at TIMESTAMPTZ,
+            consumed_by_request_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_issue_transition
+        ON decision_transition_links(tenant_id, jira_issue_id, transition_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_expires
+        ON decision_transition_links(tenant_id, expires_at)
         """
     )
     cur.execute(
@@ -407,6 +460,14 @@ def _init_postgres_schema() -> str:
         ON audit_attestations(tenant_id, decision_id)
         """
     )
+    # Existing Postgres deployments may have an older attestation table shape.
+    # Ensure compromise columns exist before creating indexes that reference them.
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
+    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
+    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
@@ -934,6 +995,30 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_actor
         ON governance_override_metrics_daily(tenant_id, actor, date_utc DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc DATE NOT NULL,
+            integrity_score DOUBLE PRECISION NOT NULL,
+            drift_index DOUBLE PRECISION NOT NULL,
+            override_rate DOUBLE PRECISION NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
         """
     )
     cur.execute(
@@ -2043,12 +2128,6 @@ def _init_postgres_schema() -> str:
     cur.execute("UPDATE tenant_signing_keys SET signing_mode = COALESCE(NULLIF(btrim(signing_mode), ''), 'envelope')")
     cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
     cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN signing_mode SET NOT NULL")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
-    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
-    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
-    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tenant_governance_settings (

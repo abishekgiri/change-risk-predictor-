@@ -2273,6 +2273,369 @@ def _migration_20260305_029_policy_rollout_and_simulation(cursor) -> None:
         END;
         """
     )
+def _migration_20260306_030_decision_transition_authority(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_transition_links (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            jira_issue_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            target_status TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            context_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed INTEGER NOT NULL DEFAULT 0,
+            consumed_at TEXT,
+            consumed_by_request_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_issue_transition
+        ON decision_transition_links(tenant_id, jira_issue_id, transition_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_expires
+        ON decision_transition_links(tenant_id, expires_at)
+        """
+    )
+
+
+def _migration_20260307_031_cross_system_correlation_fabric(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deployment_decision_links (
+            tenant_id TEXT NOT NULL,
+            deployment_event_id TEXT NOT NULL,
+            decision_id TEXT,
+            jira_issue_id TEXT,
+            correlation_id TEXT,
+            environment TEXT NOT NULL,
+            service TEXT NOT NULL,
+            artifact_digest TEXT,
+            risk_eval_id TEXT,
+            risk_evaluated_at TEXT,
+            override_state_at_deploy TEXT NOT NULL DEFAULT 'NONE',
+            override_id TEXT,
+            deployed_at TEXT NOT NULL,
+            source TEXT,
+            contract_mode TEXT NOT NULL DEFAULT 'AUDIT',
+            contract_verdict TEXT NOT NULL,
+            violation_codes_json TEXT NOT NULL DEFAULT '[]',
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, deployment_event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_decision
+        ON deployment_decision_links(tenant_id, decision_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_issue
+        ON deployment_decision_links(tenant_id, jira_issue_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_deployed_at
+        ON deployment_decision_links(tenant_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_service_env_deployed
+        ON deployment_decision_links(tenant_id, service, environment, deployed_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_update
+        BEFORE UPDATE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_delete
+        BEFORE DELETE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260308_032_independent_daily_checkpoints(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_independent_daily_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            as_of_utc TEXT NOT NULL,
+            ledger_root TEXT NOT NULL,
+            ledger_size INTEGER NOT NULL,
+            prev_checkpoint_hash TEXT,
+            checkpoint_hash TEXT NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            signing_key_id TEXT,
+            anchor_provider TEXT,
+            anchor_ref TEXT,
+            anchor_receipt_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_independent_daily_checkpoint_date
+        ON audit_independent_daily_checkpoints(tenant_id, date_utc)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_created
+        ON audit_independent_daily_checkpoints(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_anchor
+        ON audit_independent_daily_checkpoints(tenant_id, anchor_provider, date_utc)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_update
+        BEFORE UPDATE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_delete
+        BEFORE DELETE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260309_033_approval_orchestration(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_approvals (
+            tenant_id TEXT NOT NULL,
+            approval_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            approval_scope_hash TEXT NOT NULL,
+            approval_scope_json TEXT NOT NULL,
+            approval_group TEXT,
+            approver_actor TEXT NOT NULL,
+            approver_role TEXT,
+            justification_json TEXT NOT NULL,
+            justification_hash TEXT NOT NULL,
+            request_id TEXT,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            PRIMARY KEY (tenant_id, approval_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_scope
+        ON decision_approvals(tenant_id, approval_scope_hash, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_decision
+        ON decision_approvals(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_actor
+        ON decision_approvals(tenant_id, approver_actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_approvals_request
+        ON decision_approvals(tenant_id, request_id)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_update
+        BEFORE UPDATE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_delete
+        BEFORE DELETE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260310_034_signal_attestations(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_attestations (
+            tenant_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            signal_source TEXT NOT NULL,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            signal_hash TEXT NOT NULL,
+            sig_alg TEXT,
+            signature TEXT,
+            key_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, signal_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_subject
+        ON signal_attestations(tenant_id, signal_type, subject_type, subject_id, computed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_expiry
+        ON signal_attestations(tenant_id, expires_at)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_update
+        BEFORE UPDATE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_delete
+        BEFORE DELETE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260311_035_governance_query_indexes(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_created_decision
+        ON audit_decisions(tenant_id, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_release_created_decision
+        ON audit_decisions(tenant_id, release_status, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_actor_created
+        ON decision_transition_links(tenant_id, actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_transition_created
+        ON decision_transition_links(tenant_id, transition_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_decision_created
+        ON audit_overrides(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_actor_created
+        ON audit_overrides(tenant_id, actor, created_at DESC)
+        """
+    )
+
+
+def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            integrity_score REAL NOT NULL,
+            drift_index REAL NOT NULL,
+            override_rate REAL NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+
 
 MIGRATIONS: List[Migration] = [
     Migration(
@@ -2419,6 +2782,41 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260305_029_policy_rollout_and_simulation",
         description="Add policy rollout control-plane records and policy simulation audit events.",
         apply=_migration_20260305_029_policy_rollout_and_simulation,
+    ),
+    Migration(
+        migration_id="20260306_030_decision_transition_authority",
+        description="Add decision linkage authority table for protected Jira transition authorization.",
+        apply=_migration_20260306_030_decision_transition_authority,
+    ),
+    Migration(
+        migration_id="20260307_031_cross_system_correlation_fabric",
+        description="Add append-only deployment-to-decision linkage records for cross-system correlation contracts.",
+        apply=_migration_20260307_031_cross_system_correlation_fabric,
+    ),
+    Migration(
+        migration_id="20260308_032_independent_daily_checkpoints",
+        description="Add append-only independent daily signed checkpoint records with external anchor references.",
+        apply=_migration_20260308_032_independent_daily_checkpoints,
+    ),
+    Migration(
+        migration_id="20260309_033_approval_orchestration",
+        description="Add append-only approval records bound to deterministic approval scope hashes.",
+        apply=_migration_20260309_033_approval_orchestration,
+    ),
+    Migration(
+        migration_id="20260310_034_signal_attestations",
+        description="Add append-only signal attestation records with freshness and integrity metadata.",
+        apply=_migration_20260310_034_signal_attestations,
+    ),
+    Migration(
+        migration_id="20260311_035_governance_query_indexes",
+        description="Add governance query indexes for decision explorer and compliance exports.",
+        apply=_migration_20260311_035_governance_query_indexes,
+    ),
+    Migration(
+        migration_id="20260312_036_governance_dashboard_rollups",
+        description="Add tenant-scoped governance daily rollups for dashboard trend APIs.",
+        apply=_migration_20260312_036_governance_dashboard_rollups,
     ),
 ]
 
