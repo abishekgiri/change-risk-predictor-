@@ -22,6 +22,7 @@ from releasegate.utils.canonical import canonical_json
 
 CANONICALIZATION_VERSION = "releasegate-canonical-json-v1"
 HASH_ALGORITHM = "sha256"
+_PROOF_PACK_SIDELOAD_KEYS = {"in_toto_statement", "dsse_envelope", "dsse_error", "export_checksum", "proof_pack_id"}
 
 
 class ProofPackFileError(RuntimeError):
@@ -38,6 +39,18 @@ class VerificationFailure(RuntimeError):
         return f"{self.code}: {self.message}"
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _read_text(path: str) -> str:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
@@ -50,6 +63,11 @@ def load_proof_pack_file(path: str) -> Dict[str, Any]:
     if not file_path.exists() or not file_path.is_file():
         raise ProofPackFileError(f"proof pack file not found: {path}")
 
+    sidecar_files = {
+        "in_toto_statement": "in_toto_statement.json",
+        "dsse_envelope": "dsse_envelope.json",
+        "dsse_error": "dsse_error.json",
+    }
     try:
         if zipfile.is_zipfile(file_path):
             with zipfile.ZipFile(file_path, "r") as zf:
@@ -59,6 +77,16 @@ def load_proof_pack_file(path: str) -> Dict[str, Any]:
         else:
             raw = _read_text(path)
         payload = json.loads(raw)
+        if zipfile.is_zipfile(file_path):
+            with zipfile.ZipFile(file_path, "r") as zf:
+                for key, name in sidecar_files.items():
+                    if name not in zf.namelist():
+                        continue
+                    try:
+                        sidecar = json.loads(zf.read(name).decode("utf-8"))
+                    except Exception as exc:
+                        raise ProofPackFileError(f"unable to parse {name}: {exc}") from exc
+                    payload[key] = sidecar
     except ProofPackFileError:
         raise
     except Exception as exc:
@@ -85,6 +113,14 @@ def _event_payload(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if row.get("idempotency_key") is not None:
         payload["idempotency_key"] = row.get("idempotency_key")
+    if row.get("ttl_seconds") is not None:
+        payload["ttl_seconds"] = row.get("ttl_seconds")
+    if row.get("expires_at") is not None:
+        payload["expires_at"] = row.get("expires_at")
+    if row.get("requested_by") is not None:
+        payload["requested_by"] = row.get("requested_by")
+    if row.get("approved_by") is not None:
+        payload["approved_by"] = row.get("approved_by")
     return payload
 
 
@@ -195,10 +231,6 @@ def _resolve_trusted_signing_key(
         if resolved:
             return resolved, key_file
 
-    env_key = (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY") or "").strip()
-    if env_key:
-        return env_key, "env:RELEASEGATE_CHECKPOINT_SIGNING_KEY"
-
     default_json = Path.home() / ".releasegate" / "keys" / f"{tenant_id}.json"
     if default_json.exists():
         resolved = _load_key_from_file(str(default_json), tenant_id=tenant_id, key_id=key_id)
@@ -210,6 +242,10 @@ def _resolve_trusted_signing_key(
         raw = default_key.read_text(encoding="utf-8").strip()
         if raw:
             return raw, str(default_key)
+
+    env_key = (os.getenv("RELEASEGATE_CHECKPOINT_SIGNING_KEY") or "").strip()
+    if env_key:
+        return env_key, "env:RELEASEGATE_CHECKPOINT_SIGNING_KEY"
 
     raise VerificationFailure(
         code="CHECKPOINT_SIGNATURE_INVALID",
@@ -360,6 +396,50 @@ def _verify_snapshot_hashes(bundle: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, **computed}
 
 
+def _verify_evidence_graph_hash(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    from releasegate.evidence.graph import compute_evidence_graph_hash
+
+    integrity = bundle.get("integrity") or {}
+    if not isinstance(integrity, dict):
+        raise VerificationFailure(
+            code="EVIDENCE_GRAPH_HASH_MISMATCH",
+            message="proof pack missing integrity section",
+            details={"field": "integrity"},
+        )
+
+    expected_graph_hash = str(integrity.get("graph_hash") or "")
+    evidence_graph = bundle.get("evidence_graph")
+    if not isinstance(evidence_graph, dict):
+        if expected_graph_hash:
+            raise VerificationFailure(
+                code="EVIDENCE_GRAPH_HASH_MISMATCH",
+                message="integrity has graph_hash but evidence_graph is missing",
+                details={"field": "evidence_graph"},
+            )
+        return {"ok": True, "graph_hash": ""}
+
+    computed_graph_hash = compute_evidence_graph_hash(evidence_graph)
+    embedded_graph_hash = str(evidence_graph.get("graph_hash") or "")
+    mismatches: Dict[str, Dict[str, str]] = {}
+    if embedded_graph_hash and embedded_graph_hash != computed_graph_hash:
+        mismatches["evidence_graph.graph_hash"] = {
+            "expected": computed_graph_hash,
+            "actual": embedded_graph_hash,
+        }
+    if expected_graph_hash and expected_graph_hash != computed_graph_hash:
+        mismatches["integrity.graph_hash"] = {
+            "expected": computed_graph_hash,
+            "actual": expected_graph_hash,
+        }
+    if mismatches:
+        raise VerificationFailure(
+            code="EVIDENCE_GRAPH_HASH_MISMATCH",
+            message="evidence graph hash verification failed",
+            details={"mismatches": mismatches},
+        )
+    return {"ok": True, "graph_hash": computed_graph_hash}
+
+
 def _verify_replay(bundle: Dict[str, Any]) -> Dict[str, Any]:
     decision_snapshot = bundle.get("decision_snapshot")
     if not isinstance(decision_snapshot, dict):
@@ -403,6 +483,158 @@ def _verify_replay(bundle: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _bundle_without_attestation_sidecars(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value
+        for key, value in bundle.items()
+        if key not in _PROOF_PACK_SIDELOAD_KEYS
+    }
+
+
+def _verify_supply_chain_envelope(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    from releasegate.attestation.crypto import load_public_keys_map
+    from releasegate.attestation.dsse import verify_dsse_signatures
+    from releasegate.attestation.intoto import PREDICATE_TYPE_PROOF_PACK_V1, STATEMENT_TYPE_V1
+    from releasegate.tenants.keys import KEY_STATUS_REVOKED, get_tenant_signing_public_keys_with_status
+    from releasegate.utils.canonical import sha256_json
+
+    statement = bundle.get("in_toto_statement")
+    envelope = bundle.get("dsse_envelope")
+    if not isinstance(statement, dict) and not isinstance(envelope, dict):
+        return {"ok": True, "present": False, "signed": False}
+
+    if isinstance(statement, dict):
+        if str(statement.get("_type") or "") != STATEMENT_TYPE_V1:
+            raise VerificationFailure(
+                code="DSSE_STATEMENT_INVALID",
+                message="in_toto_statement has invalid _type",
+                details={"expected": STATEMENT_TYPE_V1, "actual": statement.get("_type")},
+            )
+        if str(statement.get("predicateType") or "") != PREDICATE_TYPE_PROOF_PACK_V1:
+            raise VerificationFailure(
+                code="DSSE_STATEMENT_INVALID",
+                message="in_toto_statement has invalid predicateType",
+                details={
+                    "expected": PREDICATE_TYPE_PROOF_PACK_V1,
+                    "actual": statement.get("predicateType"),
+                },
+            )
+
+        subject = statement.get("subject")
+        if not isinstance(subject, list) or not subject or not isinstance(subject[0], dict):
+            raise VerificationFailure(
+                code="DSSE_STATEMENT_INVALID",
+                message="in_toto_statement subject is missing",
+                details={},
+            )
+        subject_digest = str((subject[0].get("digest") or {}).get("sha256") or "").strip().lower()
+        expected_digest = sha256_json(_bundle_without_attestation_sidecars(bundle))
+        if not subject_digest or subject_digest != expected_digest:
+            raise VerificationFailure(
+                code="DSSE_STATEMENT_MISMATCH",
+                message="in_toto_statement digest does not match proof bundle",
+                details={"expected": expected_digest, "actual": subject_digest},
+            )
+        predicate = statement.get("predicate") if isinstance(statement.get("predicate"), dict) else {}
+        predicate_export_checksum = str(predicate.get("export_checksum") or "").strip().lower()
+        if predicate_export_checksum and predicate_export_checksum != expected_digest:
+            raise VerificationFailure(
+                code="DSSE_STATEMENT_MISMATCH",
+                message="in_toto_statement predicate export checksum mismatch",
+                details={"expected": expected_digest, "actual": predicate_export_checksum},
+            )
+
+    if not isinstance(envelope, dict):
+        return {"ok": True, "present": isinstance(statement, dict), "signed": False}
+
+    tenant_id = str(bundle.get("tenant_id") or "").strip() or None
+    revoked_key_map: Dict[str, str] = {}
+    active_key_map: Dict[str, str] = {}
+    if tenant_id:
+        try:
+            key_records = get_tenant_signing_public_keys_with_status(
+                tenant_id=tenant_id,
+                include_verify_only=True,
+                include_revoked=True,
+            )
+        except Exception:
+            key_records = {}
+        for key_id, item in key_records.items():
+            if not isinstance(item, dict):
+                continue
+            public_key = str(item.get("public_key") or "").strip()
+            if not public_key:
+                continue
+            status = str(item.get("status") or "").strip().upper()
+            if status == KEY_STATUS_REVOKED:
+                revoked_key_map[str(key_id)] = public_key
+            else:
+                active_key_map[str(key_id)] = public_key
+    key_map = active_key_map or load_public_keys_map(tenant_id=tenant_id)
+    if not key_map and not revoked_key_map:
+        raise VerificationFailure(
+            code="DSSE_PUBLIC_KEYS_MISSING",
+            message="no attestation public keys configured for DSSE verification",
+            details={},
+        )
+
+    decoded, signatures, error = verify_dsse_signatures(envelope, key_map)
+    revoked_signing_key_ids: list[str] = []
+    if (error or not isinstance(decoded, dict)) and revoked_key_map:
+        revoked_decoded, revoked_signatures, revoked_error = verify_dsse_signatures(envelope, revoked_key_map)
+        if revoked_error:
+            raise VerificationFailure(
+                code="DSSE_SIGNATURE_INVALID",
+                message=f"DSSE verification failed: {error or revoked_error}",
+                details={"error_code": error or revoked_error},
+            )
+        if isinstance(revoked_decoded, dict):
+            if _env_flag("RELEASEGATE_ALLOW_REVOKED_SIGNING_KEY_VERIFY", True):
+                decoded = revoked_decoded
+                signatures = revoked_signatures
+                revoked_signing_key_ids = [
+                    str(entry.get("keyid") or "")
+                    for entry in revoked_signatures
+                    if isinstance(entry, dict) and bool(entry.get("ok")) and str(entry.get("keyid") or "").strip()
+                ]
+            else:
+                raise VerificationFailure(
+                    code="DSSE_SIGNING_KEY_REVOKED",
+                    message="DSSE signature verified only with revoked tenant signing key(s)",
+                    details={"tenant_id": tenant_id},
+                )
+    if error:
+        raise VerificationFailure(
+            code="DSSE_SIGNATURE_INVALID",
+            message=f"DSSE verification failed: {error}",
+            details={"error_code": error},
+        )
+    if not isinstance(decoded, dict):
+        raise VerificationFailure(
+            code="DSSE_SIGNATURE_INVALID",
+            message="DSSE payload is missing after signature verification",
+            details={},
+        )
+    if isinstance(statement, dict) and decoded != statement:
+        raise VerificationFailure(
+            code="DSSE_STATEMENT_MISMATCH",
+            message="DSSE payload does not match in_toto_statement",
+            details={},
+        )
+    signing_key_ids = [
+        str(entry.get("keyid") or "")
+        for entry in signatures
+        if isinstance(entry, dict) and bool(entry.get("ok"))
+    ]
+    return {
+        "ok": True,
+        "present": True,
+        "signed": True,
+        "signing_key_ids": sorted(key_id for key_id in signing_key_ids if key_id),
+        "revoked_signing_key_ids": sorted(key_id for key_id in revoked_signing_key_ids if key_id),
+    }
+
+
 def verify_proof_pack_bundle(
     bundle: Dict[str, Any],
     *,
@@ -419,7 +651,9 @@ def verify_proof_pack_bundle(
         "ledger_ok": False,
         "signature_ok": False,
         "hashes_ok": False,
+        "graph_ok": False,
         "replay_ok": False,
+        "interop_ok": False,
         "matches_original": False,
         "failure_code": None,
         "error_code": None,
@@ -436,9 +670,13 @@ def verify_proof_pack_bundle(
         result["signature_ok"] = True
         result["checks"]["hashes"] = _verify_snapshot_hashes(bundle)
         result["hashes_ok"] = True
+        result["checks"]["graph"] = _verify_evidence_graph_hash(bundle)
+        result["graph_ok"] = True
         result["checks"]["replay"] = _verify_replay(bundle)
         result["replay_ok"] = True
         result["matches_original"] = bool(result["checks"]["replay"].get("matches_original"))
+        result["checks"]["interop"] = _verify_supply_chain_envelope(bundle)
+        result["interop_ok"] = True
         result["ok"] = True
         return result
     except VerificationFailure as exc:
@@ -469,11 +707,19 @@ def format_verification_summary(report: Dict[str, Any]) -> str:
         + (f" (key_id={checks.get('signature', {}).get('key_id')})" if checks.get("signature", {}).get("ok") else "")
     )
     lines.append(f"hashes: {'OK' if checks.get('hashes', {}).get('ok') else 'FAIL'}")
+    lines.append(f"graph: {'OK' if checks.get('graph', {}).get('ok') else 'FAIL'}")
     replay = checks.get("replay", {})
     replay_suffix = ""
     if replay.get("ok"):
         replay_suffix = f" (matches_original={str(replay.get('matches_original')).lower()})"
     lines.append(f"replay: {'OK' if replay.get('ok') else 'FAIL'}{replay_suffix}")
+    interop = checks.get("interop", {})
+    if interop:
+        lines.append(
+            "interop: "
+            + ("OK" if interop.get("ok") else "FAIL")
+            + f" (signed={str(bool(interop.get('signed'))).lower()})"
+        )
     if not report.get("ok"):
         lines.append(f"error_code: {report.get('error_code')}")
         lines.append(f"error_message: {report.get('error_message')}")

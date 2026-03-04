@@ -80,6 +80,10 @@ def _present_auth_methods(request: Request) -> List[str]:
         "X-Key-Id",
         "X-Timestamp",
         "X-Nonce",
+        "X-RG-Signature",
+        "X-RG-Key-Id",
+        "X-RG-Timestamp",
+        "X-RG-Nonce",
     )
     if any((request.headers.get(name) or "").strip() for name in signature_headers):
         methods.append("signature")
@@ -93,6 +97,28 @@ def _request_ip(request: Request) -> str:
         if forwarded:
             return forwarded.split(",", 1)[0].strip() or "unknown"
     return request.client.host if request.client else "unknown"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _allow_cross_tenant_access(auth: AuthContext) -> bool:
+    if not _env_bool("RELEASEGATE_ALLOW_CROSS_TENANT_ACCESS", False):
+        return False
+    roles = {str(role).strip().lower() for role in auth.roles}
+    if roles.intersection({"platform_admin", "super_admin"}):
+        return True
+    scopes = set(auth.scopes)
+    return bool(scopes.intersection({"tenant:impersonate", "tenant:admin", "*"}))
 
 
 def _safe_log_security_event(
@@ -283,17 +309,32 @@ def _consume_nonce(
             ),
         )
     except Exception as exc:
+        try:
+            from releasegate.security.anomaly_detector import record_anomaly_event
+
+            record_anomaly_event(
+                tenant_id=tenant_id,
+                signal_type="replay_nonce_abuse",
+                operation="webhook_nonce_replay",
+                details={
+                    "integration_id": integration_id,
+                    "key_id": key_id,
+                    "nonce_prefix": nonce[:8],
+                },
+            )
+        except Exception:
+            pass
         raise _auth_error(401, "AUTH_SIGNATURE_REPLAY", "Webhook signature replay detected") from exc
 
 
 async def _authenticate_signature(request: Request, *, rate_profile: str) -> Optional[AuthContext]:
-    signature = (request.headers.get("X-Signature") or "").strip()
+    signature = (request.headers.get("X-RG-Signature") or request.headers.get("X-Signature") or "").strip()
     if not signature:
         return None
 
-    key_id = (request.headers.get("X-Key-Id") or "").strip()
+    key_id = (request.headers.get("X-RG-Key-Id") or request.headers.get("X-Key-Id") or "").strip()
     if not key_id:
-        raise _auth_error(401, "AUTH_SIGNATURE_KEY_ID", "Missing X-Key-Id header")
+        raise _auth_error(401, "AUTH_SIGNATURE_KEY_ID", "Missing signature key id header")
 
     key_record = lookup_active_webhook_key(key_id)
     if not key_record:
@@ -307,8 +348,8 @@ async def _authenticate_signature(request: Request, *, rate_profile: str) -> Opt
     enforce_tenant_rate_limit(tenant_id=tenant_id, profile=rate_profile)
     request.state.pre_tenant_rate_limited = True
 
-    timestamp_raw = request.headers.get("X-Timestamp")
-    nonce = (request.headers.get("X-Nonce") or "").strip()
+    timestamp_raw = request.headers.get("X-RG-Timestamp") or request.headers.get("X-Timestamp")
+    nonce = (request.headers.get("X-RG-Nonce") or request.headers.get("X-Nonce") or "").strip()
     if not nonce:
         raise _auth_error(401, "AUTH_SIGNATURE_NONCE", "Missing X-Nonce header")
 
@@ -372,14 +413,16 @@ def _authenticate_internal_service(request: Request, *, rate_profile: str) -> Au
     tenant_hint = (
         (request.headers.get("X-Tenant-Id") or "").strip()
         or (os.getenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID") or "").strip()
-        or "default"
     )
-    tenant_id = resolve_tenant_id(tenant_hint)
+    try:
+        tenant_id = resolve_tenant_id(tenant_hint or None)
+    except ValueError as exc:
+        raise _auth_error(401, "AUTH_TENANT_REQUIRED", str(exc)) from exc
     enforce_tenant_rate_limit(tenant_id=tenant_id, profile=rate_profile)
     request.state.pre_tenant_rate_limited = True
 
     roles = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_ROLES", "operator")) or ["operator"]
-    scopes = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "enforcement:write"))
+    scopes = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "enforcement:write,policy:read"))
     return AuthContext(
         tenant_id=tenant_id,
         principal_id="internal_service",
@@ -485,6 +528,7 @@ def require_access(
     allow_signature: bool = False,
     allow_internal_service: bool = False,
     rate_profile: str = "default",
+    allow_locked: bool = False,
 ):
     async def _dependency(request: Request) -> AuthContext:
         ip = _request_ip(request)
@@ -506,6 +550,14 @@ def require_access(
         if not getattr(request.state, "pre_tenant_rate_limited", False):
             enforce_tenant_rate_limit(tenant_id=auth.tenant_id, profile=rate_profile)
 
+        if not allow_locked and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            from releasegate.security.security_state_service import enforce_tenant_operation_allowed
+
+            enforce_tenant_operation_allowed(
+                tenant_id=auth.tenant_id,
+                operation=f"{request.method.upper()} {request.url.path}",
+            )
+
         request.state.auth_context = auth
         return auth
 
@@ -516,6 +568,6 @@ def tenant_from_request(auth: AuthContext, requested_tenant: Optional[str]) -> s
     if not requested_tenant:
         return auth.tenant_id
     resolved = resolve_tenant_id(requested_tenant)
-    if resolved != auth.tenant_id and "admin" not in auth.roles:
+    if resolved != auth.tenant_id and not _allow_cross_tenant_access(auth):
         raise _auth_error(403, "TENANT_SCOPE_FORBIDDEN", "Cannot access another tenant")
     return resolved

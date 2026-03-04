@@ -1,7 +1,9 @@
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from releasegate.audit.overrides import record_override, verify_override_chain
+from releasegate.audit.overrides import get_active_override
 from releasegate.config import DB_PATH
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -90,3 +92,42 @@ def test_override_record_is_idempotent_with_idempotency_key():
         conn.close()
 
     assert count == 1
+
+
+def test_get_active_override_respects_expiry_and_boundary():
+    repo = f"chain-expiry-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+    expires_at = now.isoformat()
+    target_id = f"{repo}#1"
+
+    record_override(
+        repo=repo,
+        pr_number=1,
+        issue_key="T-EXP",
+        decision_id="d-exp",
+        actor="u-exp",
+        reason="expiry test",
+        tenant_id="tenant-test",
+        target_type="pr",
+        target_id=target_id,
+        expires_at=expires_at,
+    )
+
+    at_boundary = get_active_override(
+        tenant_id="tenant-test",
+        target_type="pr",
+        target_id=target_id,
+        at_time=now,
+    )
+    assert at_boundary is not None
+    assert at_boundary.get("expired") is False
+
+    after_boundary = get_active_override(
+        tenant_id="tenant-test",
+        target_type="pr",
+        target_id=target_id,
+        at_time=now + timedelta(seconds=1),
+        include_expired=True,
+    )
+    assert after_boundary is not None
+    assert after_boundary.get("expired") is True

@@ -12,6 +12,7 @@ from releasegate.attestation.crypto import (
     current_key_id,
     load_private_key_from_env,
     load_public_keys_map,
+    parse_public_key,
     public_key_pem_from_private,
 )
 from releasegate.attestation.dsse import (
@@ -167,6 +168,34 @@ def test_dsse_conformance_invariants_and_determinism():
     signed_payload_hash = str(predicate["signature"]["signed_payload_hash"])
     digest = signed_payload_hash.split(":", 1)[1] if ":" in signed_payload_hash else signed_payload_hash
     assert decoded["subject"][0]["digest"]["sha256"] == digest.lower()
+
+
+def test_dsse_signatures_follow_pae_format():
+    attestation = _sample_attestation()
+    statement = build_intoto_statement(attestation)
+    key_id = current_key_id()
+
+    envelope = wrap_dsse(
+        statement,
+        signing_key=load_private_key_from_env(),
+        key_id=key_id,
+    )
+
+    payload_bytes = base64.b64decode(envelope["payload"].encode("ascii"), validate=True)
+    signature_bytes = base64.b64decode(envelope["signatures"][0]["sig"].encode("ascii"), validate=True)
+    payload_type_bytes = envelope["payloadType"].encode("utf-8")
+    pae = (
+        b"DSSEv1 "
+        + str(len(payload_type_bytes)).encode("ascii")
+        + b" "
+        + payload_type_bytes
+        + b" "
+        + str(len(payload_bytes)).encode("ascii")
+        + b" "
+        + payload_bytes
+    )
+    pub_key = parse_public_key(load_public_keys_map()[key_id])
+    pub_key.verify(signature_bytes, pae)
 
 
 def test_dsse_signature_length_invalid_is_rejected():
