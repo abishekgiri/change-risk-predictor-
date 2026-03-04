@@ -155,8 +155,8 @@ async def check_transition(
                     },
                     actor=auth.principal_id,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to record anomaly event: %s", e, exc_info=True)
             raise HTTPException(
                 status_code=status_code,
                 detail={

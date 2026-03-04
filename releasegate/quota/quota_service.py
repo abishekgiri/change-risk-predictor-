@@ -491,9 +491,9 @@ def get_tenant_governance_metrics(*, tenant_id: str) -> Dict[str, Any]:
         "security_reason": settings.get("security_reason"),
         "security_since": settings.get("security_since"),
         "last_rotation": {
-            "key_id": (last_rotation or {}).get("key_id") if isinstance(last_rotation, dict) else None,
-            "created_at": (last_rotation or {}).get("created_at") if isinstance(last_rotation, dict) else None,
-            "rotated_at": (last_rotation or {}).get("rotated_at") if isinstance(last_rotation, dict) else None,
+            "key_id": (last_rotation or {}).get("key_id"),
+            "created_at": (last_rotation or {}).get("created_at"),
+            "rotated_at": (last_rotation or {}).get("rotated_at"),
         },
         "limits": {
             "max_decisions_per_month": settings.get("max_decisions_per_month"),
