@@ -200,6 +200,14 @@ export interface OnboardingStatus {
   config: OnboardingConfig;
 }
 
+export interface OnboardingActivation {
+  tenant_id: string;
+  mode: OnboardingMode;
+  canary_pct: number | null;
+  applied: boolean;
+  updated_at: string | null;
+}
+
 export interface SimulationResult {
   tenant_id: string;
   lookback_days: number;

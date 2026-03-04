@@ -338,3 +338,48 @@ def save_onboarding_config(
         ),
     )
     return get_onboarding_status(tenant_id=effective_tenant)
+
+
+def _activation_payload_from_status(status_payload: Dict[str, Any]) -> Dict[str, Any]:
+    config = status_payload.get("config") or {}
+    mode = normalize_onboarding_mode(str(config.get("mode") or "simulation"))
+    canary_pct = config.get("canary_pct")
+    if mode == "canary":
+        canary_pct = normalize_canary_pct(mode=mode, canary_pct=canary_pct)
+    else:
+        canary_pct = None
+    return {
+        "tenant_id": str(status_payload.get("tenant_id") or ""),
+        "mode": mode,
+        "canary_pct": canary_pct,
+        "applied": bool(status_payload.get("onboarding_completed")),
+        "updated_at": config.get("updated_at"),
+    }
+
+
+def get_onboarding_activation(*, tenant_id: Optional[str]) -> Dict[str, Any]:
+    status_payload = get_onboarding_status(tenant_id=tenant_id)
+    return _activation_payload_from_status(status_payload)
+
+
+def save_onboarding_activation(
+    *,
+    tenant_id: Optional[str],
+    mode: str,
+    canary_pct: Optional[int],
+) -> Dict[str, Any]:
+    normalized_mode = normalize_onboarding_mode(mode)
+    if normalized_mode == "canary" and canary_pct is None:
+        raise ValueError("canary_pct is required when mode is canary")
+    status_payload = get_onboarding_status(tenant_id=tenant_id)
+    config = status_payload.get("config") or {}
+    updated_status = save_onboarding_config(
+        tenant_id=tenant_id,
+        jira_instance_id=config.get("jira_instance_id"),
+        project_keys=list(config.get("project_keys") or []),
+        workflow_ids=list(config.get("workflow_ids") or []),
+        transition_ids=list(config.get("transition_ids") or []),
+        mode=normalized_mode,
+        canary_pct=canary_pct,
+    )
+    return _activation_payload_from_status(updated_status)
