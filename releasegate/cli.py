@@ -425,6 +425,20 @@ def build_parser() -> argparse.ArgumentParser:
     verify_pack_p.add_argument("--expected-hash", help="Expected proofpack sha256 hash (sha256:<hex> or <hex>)")
     verify_pack_p.add_argument("--tsa-ca-bundle", help="CA bundle for RFC3161 timestamp verification")
 
+    anchor_p = sub.add_parser("anchor", help="Operational anchoring controls.")
+    anchor_sub = anchor_p.add_subparsers(dest="anchor_cmd", required=True)
+    anchor_tick_p = anchor_sub.add_parser(
+        "tick",
+        help="Run one external anchoring scheduler tick.",
+    )
+    anchor_tick_p.add_argument("--tenant", help="Tenant/org identifier (optional)")
+    anchor_tick_p.add_argument(
+        "--once",
+        action="store_true",
+        help="Compatibility flag (tick already runs once).",
+    )
+    anchor_tick_p.add_argument("--format", default="text", choices=["text", "json"])
+
     sub.add_parser("db-migrate", help="Apply forward-only DB migrations.")
     sub.add_parser("db-migration-status", help="Show applied DB migrations.")
     sub.add_parser("version", help="Print version.")
@@ -443,6 +457,48 @@ def main() -> int:
     if args.cmd == "version":
         print("releasegate 0.1.0")
         return 0
+
+    if args.cmd == "anchor":
+        if args.anchor_cmd == "tick":
+            from releasegate.anchoring.anchor_scheduler import tick as anchor_tick
+
+            tenant_id = None
+            if getattr(args, "tenant", None):
+                tenant_id = resolve_tenant_id(args.tenant)
+
+            try:
+                report = anchor_tick(tenant_id=tenant_id)
+            except Exception as exc:
+                if args.format == "json":
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "error_code": "ANCHOR_TICK_FAILED",
+                                "error": str(exc),
+                            },
+                            indent=2,
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        )
+                    )
+                else:
+                    print(f"anchor tick failed: {exc}", file=sys.stderr)
+                return 1
+
+            if args.format == "json":
+                print(json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False, default=str))
+            else:
+                print(f"ok: {bool(report.get('ok'))}")
+                if report.get("skipped"):
+                    print(f"skipped: true")
+                    print(f"reason: {report.get('reason')}")
+                else:
+                    print(f"tenant_count: {int(report.get('tenant_count') or 0)}")
+
+            if report.get("skipped") and str(report.get("reason") or "") in {"LOCAL_LOCK_HELD", "POSTGRES_LOCK_HELD"}:
+                return 2
+            return 0 if bool(report.get("ok")) else 1
 
     if args.cmd == "verify":
         if args.verify_cmd == "lock-ledger":

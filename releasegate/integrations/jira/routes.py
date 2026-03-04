@@ -10,12 +10,30 @@ from releasegate.integrations.jira.lock_store import (
     expire_override_if_needed,
 )
 from releasegate.audit.idempotency import (
+    cancel_idempotency_claim,
     claim_idempotency,
     complete_idempotency,
     derive_system_idempotency_key,
     wait_for_idempotency_response,
 )
-from releasegate.integrations.jira.types import TransitionCheckRequest, TransitionCheckResponse
+from releasegate.integrations.jira.decision_linkage import (
+    build_context_payload,
+    compute_context_hash,
+    is_protected_status,
+    register_transition_decision_link,
+    validate_and_consume_decision_link,
+)
+from releasegate.integrations.jira.approvals_orchestration import (
+    create_decision_approval,
+)
+from releasegate.integrations.jira.types import (
+    DecisionApprovalRequest,
+    DecisionApprovalResponse,
+    TransitionAuthorizeRequest,
+    TransitionAuthorizeResponse,
+    TransitionCheckRequest,
+    TransitionCheckResponse,
+)
 from releasegate.integrations.jira.workflow_gate import WorkflowGate
 from releasegate.integrations.jira.client import JiraClient
 from releasegate.integrations.jira.override_validation import (
@@ -23,7 +41,11 @@ from releasegate.integrations.jira.override_validation import (
     validate_override_request,
 )
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
+from releasegate.quota import QUOTA_KIND_DECISIONS, TenantQuotaExceededError, consume_tenant_quota
 from releasegate.security.auth import require_access
+from releasegate.security.anomaly_detector import record_anomaly_event
+from releasegate.security.rate_limit import enforce_issue_rate_limit
+from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.security.types import AuthContext
 from releasegate.utils.canonical import sha256_json
@@ -53,6 +75,7 @@ async def check_transition(
     """
     tenant_id = resolve_tenant_id(request.tenant_id or auth.tenant_id or request.context_overrides.get("tenant_id"))
     request.tenant_id = tenant_id
+    enforce_issue_rate_limit(tenant_id=tenant_id, issue_key=request.issue_key, profile="webhook")
 
     # Best-effort: clear expired overrides before evaluating this transition.
     try:
@@ -120,6 +143,20 @@ async def check_transition(
         )
         if not validation.allowed:
             status_code = 403 if validation.reason_code == "OVERRIDE_ADMIN_REQUIRED" else 400
+            try:
+                record_anomaly_event(
+                    tenant_id=tenant_id,
+                    signal_type="failed_override_attempt",
+                    operation="jira_transition_check",
+                    details={
+                        "reason_code": validation.reason_code,
+                        "status_code": status_code,
+                        "issue_key": request.issue_key,
+                    },
+                    actor=auth.principal_id,
+                )
+            except Exception:
+                pass
             raise HTTPException(
                 status_code=status_code,
                 detail={
@@ -198,8 +235,66 @@ async def check_transition(
             return modeled
         raise HTTPException(status_code=409, detail="Idempotent request is still in progress")
 
+    try:
+        consume_tenant_quota(
+            tenant_id=tenant_id,
+            quota_kind=QUOTA_KIND_DECISIONS,
+            amount=1,
+        )
+    except TenantQuotaExceededError as exc:
+        cancel_idempotency_claim(
+            tenant_id=tenant_id,
+            operation=operation,
+            idem_key=idem_key,
+        )
+        try:
+            record_anomaly_event(
+                tenant_id=tenant_id,
+                signal_type="quota_bypass_attempt",
+                operation=operation,
+                details=exc.to_http_detail(),
+                actor=auth.principal_id,
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=429, detail=exc.to_http_detail()) from exc
+
     gate = WorkflowGate()
     response = gate.check_transition(request)
+    try:
+        register_transition_decision_link(
+            tenant_id=tenant_id,
+            decision_id=response.decision_id,
+            issue_key=request.issue_key,
+            transition_id=request.transition_id,
+            actor_account_id=request.actor_account_id,
+            source_status=request.source_status,
+            target_status=request.target_status,
+            environment=request.environment,
+            project_key=request.project_key,
+        )
+    except Exception as exc:
+        if is_protected_status(request.target_status):
+            cancel_idempotency_claim(
+                tenant_id=tenant_id,
+                operation=operation,
+                idem_key=idem_key,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "DECISION_LINK_REGISTRATION_FAILED",
+                    "message": "Decision linkage registration failed for protected transition.",
+                },
+            ) from exc
+        logger.warning(
+            "Decision linkage registration failed for tenant=%s decision=%s issue=%s transition=%s: %s",
+            tenant_id,
+            response.decision_id,
+            request.issue_key,
+            request.transition_id,
+            exc,
+        )
     logger.info(
         json.dumps(
             {
@@ -227,6 +322,185 @@ async def check_transition(
     )
     _apply_jira_lock_best_effort(request, response, tenant_id=tenant_id)
     return response
+
+
+@router.post("/transition/authorize", response_model=TransitionAuthorizeResponse)
+async def authorize_transition(
+    request: TransitionAuthorizeRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    x_idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        allow_signature=True,
+        rate_profile="webhook",
+    ),
+):
+    from releasegate.audit.reader import AuditReader
+
+    tenant_id = resolve_tenant_id(request.tenant_id or auth.tenant_id)
+    request.tenant_id = tenant_id
+
+    decision_id = str(request.releasegate_decision_id or "").strip()
+    if is_protected_status(request.target_status) and not decision_id:
+        return TransitionAuthorizeResponse(
+            allow=False,
+            decision_id=None,
+            reason_code="DECISION_ID_REQUIRED",
+            message="Protected transitions require releasegate_decision_id.",
+            tenant_id=tenant_id,
+        )
+
+    if not is_protected_status(request.target_status):
+        return TransitionAuthorizeResponse(
+            allow=True,
+            decision_id=decision_id or None,
+            reason_code="NOT_PROTECTED",
+            message="Transition target is not protected.",
+            tenant_id=tenant_id,
+        )
+
+    decision_row = AuditReader.get_decision(decision_id=decision_id, tenant_id=tenant_id)
+    if not decision_row:
+        return TransitionAuthorizeResponse(
+            allow=False,
+            decision_id=decision_id,
+            reason_code="DECISION_NOT_FOUND",
+            message="Referenced decision was not found.",
+            tenant_id=tenant_id,
+        )
+
+    if str(decision_row.get("release_status") or "").upper() != "ALLOWED":
+        return TransitionAuthorizeResponse(
+            allow=False,
+            decision_id=decision_id,
+            reason_code="DECISION_NOT_ALLOWED",
+            message="Referenced decision is not ALLOWED.",
+            tenant_id=tenant_id,
+        )
+
+    expected_context_hash = compute_context_hash(
+        build_context_payload(
+            tenant_id=tenant_id,
+            issue_key=request.issue_key,
+            transition_id=request.transition_id,
+            actor_account_id=request.actor_account_id,
+            source_status=request.source_status,
+            target_status=request.target_status,
+            environment=request.environment,
+            project_key=request.project_key,
+        )
+    )
+    consume_request_id = (
+        str(request.request_id or "").strip()
+        or str(x_request_id or "").strip()
+        or str(x_idempotency_key or "").strip()
+        or None
+    )
+    try:
+        with get_storage_backend().transaction():
+            ok, reason = validate_and_consume_decision_link(
+                tenant_id=tenant_id,
+                decision_id=decision_id,
+                expected_context_hash=expected_context_hash,
+                request_id=consume_request_id,
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error_code": "DECISION_LINK_CHECK_FAILED",
+                "message": f"Decision linkage check failed: {exc}",
+            },
+        ) from exc
+
+    if not ok:
+        return TransitionAuthorizeResponse(
+            allow=False,
+            decision_id=decision_id,
+            reason_code=reason,
+            message=f"Protected transition denied ({reason}).",
+            tenant_id=tenant_id,
+        )
+    return TransitionAuthorizeResponse(
+        allow=True,
+        decision_id=decision_id,
+        reason_code=reason,
+        message="Protected transition authorized.",
+        tenant_id=tenant_id,
+    )
+
+
+@router.post("/decisions/{decision_id}/approvals", response_model=DecisionApprovalResponse)
+async def submit_decision_approval(
+    decision_id: str,
+    payload: DecisionApprovalRequest,
+    x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
+    x_idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        allow_signature=True,
+        rate_profile="default",
+    ),
+):
+    tenant_id = resolve_tenant_id(payload.tenant_id or auth.tenant_id)
+    actor = str(payload.approver_actor_id or auth.principal_id or "").strip()
+    request_id = (
+        str(payload.request_id or "").strip()
+        or str(x_request_id or "").strip()
+        or str(x_idempotency_key or "").strip()
+        or None
+    )
+
+    try:
+        created = create_decision_approval(
+            tenant_id=tenant_id,
+            decision_id=decision_id,
+            approver_actor=actor,
+            approver_role=payload.approver_role,
+            approval_group=payload.approval_group,
+            justification=payload.justification,
+            request_id=request_id,
+        )
+    except ValueError as exc:
+        error_code = str(exc)
+        if error_code == "DECISION_NOT_FOUND":
+            raise HTTPException(status_code=404, detail={"error_code": error_code, "message": "Decision not found"}) from exc
+        if error_code == "APPROVAL_SCOPE_UNAVAILABLE":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": error_code,
+                    "message": "Decision approval scope is unavailable. Re-run transition check to mint a current scope.",
+                },
+            ) from exc
+        if error_code in {
+            "JUSTIFICATION_INVALID",
+            "JUSTIFICATION_MISSING",
+            "JUSTIFICATION_TOO_SHORT",
+            "JUSTIFICATION_FIELD_REQUIRED",
+            "APPROVER_REQUIRED",
+        }:
+            raise HTTPException(status_code=400, detail={"error_code": error_code, "message": error_code}) from exc
+        raise HTTPException(status_code=400, detail={"error_code": "APPROVAL_INVALID", "message": error_code}) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "APPROVAL_SUBMISSION_FAILED", "message": "Approval submission failed"},
+        ) from exc
+
+    return DecisionApprovalResponse(
+        ok=True,
+        tenant_id=tenant_id,
+        decision_id=str(created.get("decision_id") or decision_id),
+        approval_id=str(created.get("approval_id") or ""),
+        approval_scope_hash=str(created.get("approval_scope_hash") or ""),
+        approver_actor=str(created.get("approver_actor") or actor),
+        approver_role=str(created.get("approver_role") or "").strip() or None,
+        approval_group=str(created.get("approval_group") or "").strip() or None,
+        created_at=str(created.get("created_at") or ""),
+    )
 
 
 def _apply_jira_lock_best_effort(

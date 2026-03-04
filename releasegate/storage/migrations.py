@@ -1693,6 +1693,950 @@ def _migration_20260228_024_external_root_anchors(cursor) -> None:
         END;
         """
     )
+
+
+def _migration_20260301_025_tenant_signing_key_lifecycle(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            revoked_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active
+        ON tenant_signing_keys(tenant_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created
+        ON tenant_signing_keys(tenant_id, status, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_signing_keys_key_material_mutation
+        BEFORE UPDATE ON tenant_signing_keys
+        WHEN
+            COALESCE(NEW.public_key, '') != COALESCE(OLD.public_key, '')
+            OR COALESCE(NEW.encrypted_private_key, '') != COALESCE(OLD.encrypted_private_key, '')
+            OR COALESCE(NEW.created_at, '') != COALESCE(OLD.created_at, '')
+            OR COALESCE(NEW.created_by, '') != COALESCE(OLD.created_by, '')
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant signing key material is immutable');
+        END;
+        """
+    )
+
+
+def _migration_20260302_026_anchor_jobs(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            submitted_at TEXT,
+            confirmed_at TEXT,
+            PRIMARY KEY (tenant_id, job_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash
+        ON anchor_jobs(tenant_id, root_hash)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt
+        ON anchor_jobs(tenant_id, status, next_attempt_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt
+        ON anchor_jobs(status, next_attempt_at)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at
+        ON anchor_jobs(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at
+        ON anchor_jobs(tenant_id, confirmed_at DESC)
+        """
+    )
+def _migration_20260303_027_kms_custody_and_compromise_playbook(cursor) -> None:
+    if not _column_exists(cursor, "tenant_signing_keys", "encrypted_data_key"):
+        cursor.execute("ALTER TABLE tenant_signing_keys ADD COLUMN encrypted_data_key TEXT")
+    if not _column_exists(cursor, "tenant_signing_keys", "kms_key_id"):
+        cursor.execute("ALTER TABLE tenant_signing_keys ADD COLUMN kms_key_id TEXT")
+    if not _column_exists(cursor, "tenant_signing_keys", "encryption_mode"):
+        cursor.execute(
+            "ALTER TABLE tenant_signing_keys ADD COLUMN encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet'"
+        )
+    if not _column_exists(cursor, "tenant_signing_keys", "signing_mode"):
+        cursor.execute(
+            "ALTER TABLE tenant_signing_keys ADD COLUMN signing_mode TEXT NOT NULL DEFAULT 'envelope'"
+        )
+    cursor.execute(
+        """
+        UPDATE tenant_signing_keys
+        SET encryption_mode = COALESCE(NULLIF(TRIM(encryption_mode), ''), 'legacy_fernet'),
+            signing_mode = COALESCE(NULLIF(TRIM(signing_mode), ''), 'envelope')
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_signing_keys_key_material_mutation")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_signing_keys_key_material_mutation
+        BEFORE UPDATE ON tenant_signing_keys
+        WHEN
+            COALESCE(NEW.public_key, '') != COALESCE(OLD.public_key, '')
+            OR COALESCE(NEW.encrypted_private_key, '') != COALESCE(OLD.encrypted_private_key, '')
+            OR COALESCE(NEW.encrypted_data_key, '') != COALESCE(OLD.encrypted_data_key, '')
+            OR COALESCE(NEW.kms_key_id, '') != COALESCE(OLD.kms_key_id, '')
+            OR COALESCE(NEW.encryption_mode, '') != COALESCE(OLD.encryption_mode, '')
+            OR COALESCE(NEW.signing_mode, '') != COALESCE(OLD.signing_mode, '')
+            OR COALESCE(NEW.created_at, '') != COALESCE(OLD.created_at, '')
+            OR COALESCE(NEW.created_by, '') != COALESCE(OLD.created_by, '')
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant signing key material is immutable');
+        END;
+        """
+    )
+
+    if not _column_exists(cursor, "checkpoint_signing_keys", "encrypted_data_key"):
+        cursor.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN encrypted_data_key TEXT")
+    if not _column_exists(cursor, "checkpoint_signing_keys", "kms_key_id"):
+        cursor.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN kms_key_id TEXT")
+    if not _column_exists(cursor, "checkpoint_signing_keys", "encryption_mode"):
+        cursor.execute(
+            "ALTER TABLE checkpoint_signing_keys ADD COLUMN encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet'"
+        )
+    cursor.execute(
+        """
+        UPDATE checkpoint_signing_keys
+        SET encryption_mode = COALESCE(NULLIF(TRIM(encryption_mode), ''), 'legacy_fernet')
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_access_log (
+            tenant_id TEXT NOT NULL,
+            access_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            actor TEXT,
+            purpose TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, access_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_key_created
+        ON key_access_log(tenant_id, key_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_operation_created
+        ON key_access_log(tenant_id, operation, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_key_access_log_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_key_access_log_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_key_access_log_update
+        BEFORE UPDATE ON key_access_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Key access log is append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_key_access_log_delete
+        BEFORE DELETE ON key_access_log
+        BEGIN
+            SELECT RAISE(FAIL, 'Key access log is append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_key_compromise_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            revoked_key_id TEXT NOT NULL,
+            replacement_key_id TEXT NOT NULL,
+            compromise_start TEXT NOT NULL,
+            compromise_end TEXT NOT NULL,
+            reason TEXT,
+            actor TEXT,
+            created_at TEXT NOT NULL,
+            affected_count INTEGER NOT NULL DEFAULT 0,
+            affected_attestation_ids_json TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_created
+        ON tenant_key_compromise_events(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_revoked
+        ON tenant_key_compromise_events(tenant_id, revoked_key_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_key_compromise_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_key_compromise_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_key_compromise_events_update
+        BEFORE UPDATE ON tenant_key_compromise_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant key compromise events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_key_compromise_events_delete
+        BEFORE DELETE ON tenant_key_compromise_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant key compromise events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    if not _column_exists(cursor, "audit_attestations", "compromised"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised INTEGER NOT NULL DEFAULT 0")
+    if not _column_exists(cursor, "audit_attestations", "compromised_reason"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised_reason TEXT")
+    if not _column_exists(cursor, "audit_attestations", "compromised_at"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN compromised_at TEXT")
+    if not _column_exists(cursor, "audit_attestations", "superseded_by_resign_id"):
+        cursor.execute("ALTER TABLE audit_attestations ADD COLUMN superseded_by_resign_id TEXT")
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
+        ON audit_attestations(tenant_id, compromised, created_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attestation_resignatures (
+            tenant_id TEXT NOT NULL,
+            resign_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            new_key_id TEXT NOT NULL,
+            supersedes_attestation_id TEXT NOT NULL,
+            attestation_json TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, resign_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_attestation_created
+        ON attestation_resignatures(tenant_id, attestation_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_decision_created
+        ON attestation_resignatures(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_attestation_resignatures_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_attestation_resignatures_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_resignatures_update
+        BEFORE UPDATE ON attestation_resignatures
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation re-signatures are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_attestation_resignatures_delete
+        BEFORE DELETE ON attestation_resignatures
+        BEGIN
+            SELECT RAISE(FAIL, 'Attestation re-signatures are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260304_028_saas_operational_controls(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_governance_settings (
+            tenant_id TEXT PRIMARY KEY,
+            max_decisions_per_month INTEGER,
+            max_anchors_per_day INTEGER,
+            max_overrides_per_month INTEGER,
+            quota_enforcement_mode TEXT NOT NULL DEFAULT 'HARD',
+            security_state TEXT NOT NULL DEFAULT 'normal',
+            security_reason TEXT,
+            security_since TEXT,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_governance_settings_security_state
+        ON tenant_governance_settings(security_state, updated_at)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_usage_counters (
+            tenant_id TEXT NOT NULL,
+            period_type TEXT NOT NULL,
+            period_start TEXT NOT NULL,
+            decisions_count INTEGER NOT NULL DEFAULT 0,
+            anchors_count INTEGER NOT NULL DEFAULT 0,
+            overrides_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, period_type, period_start)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_tenant_updated
+        ON tenant_usage_counters(tenant_id, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_period
+        ON tenant_usage_counters(period_type, period_start)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_anomaly_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            operation TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_anomaly_events_signal_created
+        ON tenant_security_anomaly_events(tenant_id, signal_type, created_at DESC)
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_state_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state TEXT NOT NULL,
+            reason TEXT,
+            source TEXT,
+            actor TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_state_events_created
+        ON tenant_security_state_events(tenant_id, created_at DESC)
+        """
+    )
+
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_anomaly_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_anomaly_events_delete")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_state_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_tenant_security_state_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_anomaly_events_update
+        BEFORE UPDATE ON tenant_security_anomaly_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security anomaly events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_anomaly_events_delete
+        BEFORE DELETE ON tenant_security_anomaly_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security anomaly events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_state_events_update
+        BEFORE UPDATE ON tenant_security_state_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security state events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_tenant_security_state_events_delete
+        BEFORE DELETE ON tenant_security_state_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Tenant security state events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260305_029_policy_rollout_and_simulation(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollouts (
+            tenant_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            from_release_id TEXT,
+            to_release_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'FULL',
+            canary_percent INTEGER NOT NULL DEFAULT 100,
+            state TEXT NOT NULL DEFAULT 'PLANNED',
+            rollback_to_release_id TEXT,
+            created_by TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, rollout_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollouts_tenant_policy_env_state
+        ON policy_rollouts(tenant_id, policy_id, target_env, state, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_rollouts_running_scope
+        ON policy_rollouts(tenant_id, policy_id, target_env)
+        WHERE state = 'RUNNING'
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollout_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_tenant_rollout_created
+        ON policy_rollout_events(tenant_id, rollout_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_rollout_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_rollout_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_rollout_events_update
+        BEFORE UPDATE ON policy_rollout_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy rollout events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_rollout_events_delete
+        BEFORE DELETE ON policy_rollout_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy rollout events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_simulation_events (
+            tenant_id TEXT NOT NULL,
+            simulation_id TEXT NOT NULL,
+            actor_id TEXT,
+            policy_id TEXT,
+            policy_version INTEGER,
+            policy_hash TEXT,
+            environment TEXT,
+            input_hash TEXT,
+            result_status TEXT NOT NULL,
+            allow INTEGER NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, simulation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_simulation_events_tenant_created
+        ON policy_simulation_events(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_simulation_events_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_policy_simulation_events_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_simulation_events_update
+        BEFORE UPDATE ON policy_simulation_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy simulation events are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_policy_simulation_events_delete
+        BEFORE DELETE ON policy_simulation_events
+        BEGIN
+            SELECT RAISE(FAIL, 'Policy simulation events are append-only: DELETE not allowed');
+        END;
+        """
+    )
+def _migration_20260306_030_decision_transition_authority(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_transition_links (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            jira_issue_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            target_status TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            context_hash TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed INTEGER NOT NULL DEFAULT 0,
+            consumed_at TEXT,
+            consumed_by_request_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_issue_transition
+        ON decision_transition_links(tenant_id, jira_issue_id, transition_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_expires
+        ON decision_transition_links(tenant_id, expires_at)
+        """
+    )
+
+
+def _migration_20260307_031_cross_system_correlation_fabric(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deployment_decision_links (
+            tenant_id TEXT NOT NULL,
+            deployment_event_id TEXT NOT NULL,
+            decision_id TEXT,
+            jira_issue_id TEXT,
+            correlation_id TEXT,
+            environment TEXT NOT NULL,
+            service TEXT NOT NULL,
+            artifact_digest TEXT,
+            risk_eval_id TEXT,
+            risk_evaluated_at TEXT,
+            override_state_at_deploy TEXT NOT NULL DEFAULT 'NONE',
+            override_id TEXT,
+            deployed_at TEXT NOT NULL,
+            source TEXT,
+            contract_mode TEXT NOT NULL DEFAULT 'AUDIT',
+            contract_verdict TEXT NOT NULL,
+            violation_codes_json TEXT NOT NULL DEFAULT '[]',
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, deployment_event_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_decision
+        ON deployment_decision_links(tenant_id, decision_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_issue
+        ON deployment_decision_links(tenant_id, jira_issue_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_deployed_at
+        ON deployment_decision_links(tenant_id, deployed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_deploy_links_tenant_service_env_deployed
+        ON deployment_decision_links(tenant_id, service, environment, deployed_at DESC)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_deployment_decision_links_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_update
+        BEFORE UPDATE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_deployment_decision_links_delete
+        BEFORE DELETE ON deployment_decision_links
+        BEGIN
+            SELECT RAISE(FAIL, 'Deployment decision links are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260308_032_independent_daily_checkpoints(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_independent_daily_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            as_of_utc TEXT NOT NULL,
+            ledger_root TEXT NOT NULL,
+            ledger_size INTEGER NOT NULL,
+            prev_checkpoint_hash TEXT,
+            checkpoint_hash TEXT NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            signing_key_id TEXT,
+            anchor_provider TEXT,
+            anchor_ref TEXT,
+            anchor_receipt_json TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_independent_daily_checkpoint_date
+        ON audit_independent_daily_checkpoints(tenant_id, date_utc)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_created
+        ON audit_independent_daily_checkpoints(tenant_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_independent_daily_checkpoint_anchor
+        ON audit_independent_daily_checkpoints(tenant_id, anchor_provider, date_utc)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_independent_daily_checkpoint_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_update
+        BEFORE UPDATE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_independent_daily_checkpoint_delete
+        BEFORE DELETE ON audit_independent_daily_checkpoints
+        BEGIN
+            SELECT RAISE(FAIL, 'Independent daily checkpoints are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260309_033_approval_orchestration(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_approvals (
+            tenant_id TEXT NOT NULL,
+            approval_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            approval_scope_hash TEXT NOT NULL,
+            approval_scope_json TEXT NOT NULL,
+            approval_group TEXT,
+            approver_actor TEXT NOT NULL,
+            approver_role TEXT,
+            justification_json TEXT NOT NULL,
+            justification_hash TEXT NOT NULL,
+            request_id TEXT,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            PRIMARY KEY (tenant_id, approval_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_scope
+        ON decision_approvals(tenant_id, approval_scope_hash, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_decision
+        ON decision_approvals(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_approvals_actor
+        ON decision_approvals(tenant_id, approver_actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_approvals_request
+        ON decision_approvals(tenant_id, request_id)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_decision_approvals_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_update
+        BEFORE UPDATE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_decision_approvals_delete
+        BEFORE DELETE ON decision_approvals
+        BEGIN
+            SELECT RAISE(FAIL, 'Decision approvals are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260310_034_signal_attestations(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signal_attestations (
+            tenant_id TEXT NOT NULL,
+            signal_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            signal_source TEXT NOT NULL,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            signal_hash TEXT NOT NULL,
+            sig_alg TEXT,
+            signature TEXT,
+            key_id TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, signal_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_subject
+        ON signal_attestations(tenant_id, signal_type, subject_type, subject_id, computed_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_signal_attestations_expiry
+        ON signal_attestations(tenant_id, expires_at)
+        """
+    )
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_update")
+    cursor.execute("DROP TRIGGER IF EXISTS prevent_signal_attestations_delete")
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_update
+        BEFORE UPDATE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: UPDATE not allowed');
+        END;
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS prevent_signal_attestations_delete
+        BEFORE DELETE ON signal_attestations
+        BEGIN
+            SELECT RAISE(FAIL, 'Signal attestations are append-only: DELETE not allowed');
+        END;
+        """
+    )
+
+
+def _migration_20260311_035_governance_query_indexes(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_created_decision
+        ON audit_decisions(tenant_id, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_release_created_decision
+        ON audit_decisions(tenant_id, release_status, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_actor_created
+        ON decision_transition_links(tenant_id, actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_transition_created
+        ON decision_transition_links(tenant_id, transition_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_decision_created
+        ON audit_overrides(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_actor_created
+        ON audit_overrides(tenant_id, actor, created_at DESC)
+        """
+    )
+
+
+def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            integrity_score REAL NOT NULL,
+            drift_index REAL NOT NULL,
+            override_rate REAL NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -1813,6 +2757,66 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260228_024_external_root_anchors",
         description="Add append-only external transparency root anchor receipts.",
         apply=_migration_20260228_024_external_root_anchors,
+    ),
+    Migration(
+        migration_id="20260301_025_tenant_signing_key_lifecycle",
+        description="Add tenant attestation signing keys with active/verify/revoked lifecycle and single-active constraint.",
+        apply=_migration_20260301_025_tenant_signing_key_lifecycle,
+    ),
+    Migration(
+        migration_id="20260302_026_anchor_jobs",
+        description="Add anchor job lifecycle table for scheduled external root anchoring and retries.",
+        apply=_migration_20260302_026_anchor_jobs,
+    ),
+    Migration(
+        migration_id="20260303_027_kms_custody_and_compromise_playbook",
+        description="Add KMS envelope key custody fields, key access audit trail, and emergency compromise response tables.",
+        apply=_migration_20260303_027_kms_custody_and_compromise_playbook,
+    ),
+    Migration(
+        migration_id="20260304_028_saas_operational_controls",
+        description="Add tenant quotas, usage counters, and tenant security state/anomaly append-only ledgers.",
+        apply=_migration_20260304_028_saas_operational_controls,
+    ),
+    Migration(
+        migration_id="20260305_029_policy_rollout_and_simulation",
+        description="Add policy rollout control-plane records and policy simulation audit events.",
+        apply=_migration_20260305_029_policy_rollout_and_simulation,
+    ),
+    Migration(
+        migration_id="20260306_030_decision_transition_authority",
+        description="Add decision linkage authority table for protected Jira transition authorization.",
+        apply=_migration_20260306_030_decision_transition_authority,
+    ),
+    Migration(
+        migration_id="20260307_031_cross_system_correlation_fabric",
+        description="Add append-only deployment-to-decision linkage records for cross-system correlation contracts.",
+        apply=_migration_20260307_031_cross_system_correlation_fabric,
+    ),
+    Migration(
+        migration_id="20260308_032_independent_daily_checkpoints",
+        description="Add append-only independent daily signed checkpoint records with external anchor references.",
+        apply=_migration_20260308_032_independent_daily_checkpoints,
+    ),
+    Migration(
+        migration_id="20260309_033_approval_orchestration",
+        description="Add append-only approval records bound to deterministic approval scope hashes.",
+        apply=_migration_20260309_033_approval_orchestration,
+    ),
+    Migration(
+        migration_id="20260310_034_signal_attestations",
+        description="Add append-only signal attestation records with freshness and integrity metadata.",
+        apply=_migration_20260310_034_signal_attestations,
+    ),
+    Migration(
+        migration_id="20260311_035_governance_query_indexes",
+        description="Add governance query indexes for decision explorer and compliance exports.",
+        apply=_migration_20260311_035_governance_query_indexes,
+    ),
+    Migration(
+        migration_id="20260312_036_governance_dashboard_rollups",
+        description="Add tenant-scoped governance daily rollups for dashboard trend APIs.",
+        apply=_migration_20260312_036_governance_dashboard_rollups,
     ),
 ]
 

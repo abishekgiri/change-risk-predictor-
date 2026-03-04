@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from releasegate.policy.analyzer import detect_transition_coverage
+from releasegate.policy.conflict_engine import analyze_policy_conflicts
 from releasegate.policy.inheritance import deep_merge_policies
 from releasegate.policy.lint import lint_registry_policy
 from releasegate.policy.models import ALLOWED_STATUS_TRANSITIONS, PolicyStatus
@@ -436,6 +437,16 @@ def _validate_policy_ready_for_activation(*, tenant_id: str, policy: Dict[str, A
         policy_json=policy_json,
     )
     lint_report = _run_registry_lint(effective_candidate)
+    conflict_report = analyze_policy_conflicts(effective_candidate)
+    contradictions = conflict_report.get("contradictions") if isinstance(conflict_report.get("contradictions"), list) else []
+    if contradictions:
+        raise PolicyConflictError(
+            code="POLICY_CONTRADICTIONS",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            stage="activate",
+            conflicts=contradictions,
+        )
     lint_errors = [issue for issue in lint_report.get("issues", []) if issue.get("severity") == "ERROR"]
     if lint_errors:
         sample_codes = sorted({str(issue.get("code") or "") for issue in lint_errors if str(issue.get("code") or "")})
@@ -468,6 +479,7 @@ def _validate_policy_ready_for_activation(*, tenant_id: str, policy: Dict[str, A
     return {
         "effective_policy_hash": str(resolution.get("effective_policy_hash") or ""),
         "component_policy_ids": list(resolution.get("component_policy_ids") or []),
+        "conflict_summary": conflict_report.get("summary") if isinstance(conflict_report, dict) else {},
     }
 
 

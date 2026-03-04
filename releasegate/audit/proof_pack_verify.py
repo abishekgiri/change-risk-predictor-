@@ -39,6 +39,18 @@ class VerificationFailure(RuntimeError):
         return f"{self.code}: {self.message}"
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _read_text(path: str) -> str:
     file_path = Path(path)
     if not file_path.exists() or not file_path.is_file():
@@ -483,6 +495,7 @@ def _verify_supply_chain_envelope(bundle: Dict[str, Any]) -> Dict[str, Any]:
     from releasegate.attestation.crypto import load_public_keys_map
     from releasegate.attestation.dsse import verify_dsse_signatures
     from releasegate.attestation.intoto import PREDICATE_TYPE_PROOF_PACK_V1, STATEMENT_TYPE_V1
+    from releasegate.tenants.keys import KEY_STATUS_REVOKED, get_tenant_signing_public_keys_with_status
     from releasegate.utils.canonical import sha256_json
 
     statement = bundle.get("in_toto_statement")
@@ -534,8 +547,31 @@ def _verify_supply_chain_envelope(bundle: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(envelope, dict):
         return {"ok": True, "present": isinstance(statement, dict), "signed": False}
 
-    key_map = load_public_keys_map()
-    if not key_map:
+    tenant_id = str(bundle.get("tenant_id") or "").strip() or None
+    revoked_key_map: Dict[str, str] = {}
+    active_key_map: Dict[str, str] = {}
+    if tenant_id:
+        try:
+            key_records = get_tenant_signing_public_keys_with_status(
+                tenant_id=tenant_id,
+                include_verify_only=True,
+                include_revoked=True,
+            )
+        except Exception:
+            key_records = {}
+        for key_id, item in key_records.items():
+            if not isinstance(item, dict):
+                continue
+            public_key = str(item.get("public_key") or "").strip()
+            if not public_key:
+                continue
+            status = str(item.get("status") or "").strip().upper()
+            if status == KEY_STATUS_REVOKED:
+                revoked_key_map[str(key_id)] = public_key
+            else:
+                active_key_map[str(key_id)] = public_key
+    key_map = active_key_map or load_public_keys_map(tenant_id=tenant_id)
+    if not key_map and not revoked_key_map:
         raise VerificationFailure(
             code="DSSE_PUBLIC_KEYS_MISSING",
             message="no attestation public keys configured for DSSE verification",
@@ -543,6 +579,30 @@ def _verify_supply_chain_envelope(bundle: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     decoded, signatures, error = verify_dsse_signatures(envelope, key_map)
+    revoked_signing_key_ids: list[str] = []
+    if (error or not isinstance(decoded, dict)) and revoked_key_map:
+        revoked_decoded, revoked_signatures, revoked_error = verify_dsse_signatures(envelope, revoked_key_map)
+        if revoked_error:
+            raise VerificationFailure(
+                code="DSSE_SIGNATURE_INVALID",
+                message=f"DSSE verification failed: {error or revoked_error}",
+                details={"error_code": error or revoked_error},
+            )
+        if isinstance(revoked_decoded, dict):
+            if _env_flag("RELEASEGATE_ALLOW_REVOKED_SIGNING_KEY_VERIFY", True):
+                decoded = revoked_decoded
+                signatures = revoked_signatures
+                revoked_signing_key_ids = [
+                    str(entry.get("keyid") or "")
+                    for entry in revoked_signatures
+                    if isinstance(entry, dict) and bool(entry.get("ok")) and str(entry.get("keyid") or "").strip()
+                ]
+            else:
+                raise VerificationFailure(
+                    code="DSSE_SIGNING_KEY_REVOKED",
+                    message="DSSE signature verified only with revoked tenant signing key(s)",
+                    details={"tenant_id": tenant_id},
+                )
     if error:
         raise VerificationFailure(
             code="DSSE_SIGNATURE_INVALID",
@@ -571,6 +631,7 @@ def _verify_supply_chain_envelope(bundle: Dict[str, Any]) -> Dict[str, Any]:
         "present": True,
         "signed": True,
         "signing_key_ids": sorted(key_id for key_id in signing_key_ids if key_id),
+        "revoked_signing_key_ids": sorted(key_id for key_id in revoked_signing_key_ids if key_id),
     }
 
 

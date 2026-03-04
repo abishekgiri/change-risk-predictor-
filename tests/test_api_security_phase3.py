@@ -6,6 +6,7 @@ import json
 from unittest.mock import patch
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 
 from releasegate.audit.recorder import AuditRecorder
@@ -199,6 +200,25 @@ def test_replay_endpoint_rate_limits_heavy_profile(monkeypatch):
         headers=headers,
     )
     assert second.status_code == 429
+
+
+def test_issue_level_rate_limit_blocks_transition_spam(monkeypatch):
+    from fastapi import HTTPException
+    from releasegate.security import rate_limit
+
+    monkeypatch.setitem(
+        rate_limit.PROFILES,
+        "webhook",
+        {
+            "tenant": [(100, 60)],
+            "ip": [(100, 60)],
+            "issue": [(1, 60)],
+        },
+    )
+    rate_limit.enforce_issue_rate_limit(tenant_id="tenant-test", issue_key="RG-123", profile="webhook")
+    with pytest.raises(HTTPException) as exc:
+        rate_limit.enforce_issue_rate_limit(tenant_id="tenant-test", issue_key="RG-123", profile="webhook")
+    assert exc.value.status_code == 429
 
 
 def test_webhook_signature_auth_and_replay_protection():

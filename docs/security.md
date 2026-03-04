@@ -60,9 +60,44 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
   - Introduce a new `key_id`, publish it in `/keys` and the signed manifest.
   - Keep old public keys available for verification until retention windows expire.
   - Revoke compromised keys by setting status `REVOKED` in the signed key manifest.
+- Tenant signing-key lifecycle:
+  - One `ACTIVE` signing key per tenant.
+  - Previous keys move to `VERIFY_ONLY` so older proofs remain verifiable after rotation.
+  - `REVOKED` keys are excluded from normal verification key pools.
+  - Optional compatibility mode (`RELEASEGATE_ALLOW_REVOKED_SIGNING_KEY_VERIFY=true`) verifies revoked signatures but flags them in verifier output.
 - Revocation list artifact:
   - Source of truth: `/.well-known/releasegate-keys.json` (signed by `/.well-known/releasegate-keys.sig`).
   - Revoked keys remain verifiable cryptographically, but are marked untrusted by verifier policy.
+
+## KMS Custody (Phase 7)
+
+- Tenant and checkpoint signing keys are stored with envelope encryption:
+  - Private material ciphertext
+  - KMS-encrypted data key
+  - `kms_key_id`
+- `RELEASEGATE_STRICT_KMS=true` enforces boot-time guardrails:
+  - service refuses to start unless `RELEASEGATE_KMS_MODE` is a cloud mode (`aws|gcp|azure`)
+  - local/mock modes are rejected when strict mode is enabled
+- Current implementation status:
+  - `local|mock` KMS adapter implemented for development/testing
+  - `aws` KMS adapter implemented (`GenerateDataKey`, `Decrypt`, and optional `Sign`)
+  - `gcp|azure` adapters are still pending
+- Legacy encrypted records can still be read for migration compatibility unless strict mode is enabled.
+- Key material access is audit logged (`decrypt`/`sign`) in append-only `key_access_log`.
+- AWS KMS runtime configuration:
+  - `RELEASEGATE_KMS_MODE=aws`
+  - `RELEASEGATE_KMS_KEY_ID=<aws-kms-key-arn-or-id>`
+  - optional tuning:
+    - `RELEASEGATE_AWS_KMS_REGION`
+    - `RELEASEGATE_AWS_KMS_MAX_ATTEMPTS`
+    - `RELEASEGATE_AWS_KMS_CONNECT_TIMEOUT_SECONDS`
+    - `RELEASEGATE_AWS_KMS_READ_TIMEOUT_SECONDS`
+  - optional KMS signing key map:
+    - `RELEASEGATE_AWS_KMS_SIGNING_KEYS` (JSON object of `{logical_key_id: kms_key_id}`)
+    - `RELEASEGATE_AWS_KMS_SIGNING_ALGORITHM` (default `EDDSA`)
+- Live AWS contract test:
+  - opt-in with `RELEASEGATE_RUN_AWS_KMS_CONTRACT_TESTS=1`
+  - provide `RELEASEGATE_AWS_KMS_CONTRACT_KEY_ID` (or reuse `RELEASEGATE_KMS_KEY_ID`)
 
 ## Request Signatures (Webhook Security)
 
@@ -76,9 +111,11 @@ ReleaseGate is built as Jira-native governance infrastructure. This document des
 ## Rate Limiting And Abuse Controls
 
 - Per-IP and per-tenant rate limits are enforced.
+- Webhook transition checks also enforce per-issue burst limits to prevent transition spam loops.
 - Webhook request flow:
   - per-IP pre-limit is applied before signature verification
   - per-tenant limit is applied after key lookup and before nonce writes
+- Default limits are profile-based (`default`, `heavy`, `webhook`) and configurable with `RELEASEGATE_RATE_LIMIT_*` environment overrides.
 - Higher-sensitivity endpoints use stricter limits:
   - replay
   - simulation

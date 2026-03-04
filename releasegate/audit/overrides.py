@@ -153,8 +153,10 @@ def list_overrides(
     if pr is not None:
         query += " AND pr_number = ?"
         params.append(pr)
-    direction = "ASC" if ascending else "DESC"
-    query += f" ORDER BY created_at {direction} LIMIT ?"
+    if ascending:
+        query += " ORDER BY created_at ASC LIMIT ?"
+    else:
+        query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     return storage.fetchall(query, params)
 

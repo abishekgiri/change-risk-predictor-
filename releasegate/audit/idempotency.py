@@ -150,6 +150,24 @@ def complete_idempotency(
     )
 
 
+def cancel_idempotency_claim(
+    *,
+    tenant_id: str,
+    operation: str,
+    idem_key: str,
+) -> None:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    storage.execute(
+        """
+        DELETE FROM idempotency_keys
+        WHERE tenant_id = ? AND operation = ? AND idem_key = ? AND status = ?
+        """,
+        (effective_tenant, operation, idem_key, "in_progress"),
+    )
+
+
 def wait_for_idempotency_response(
     *,
     tenant_id: str,

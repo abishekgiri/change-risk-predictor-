@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -36,15 +36,28 @@ def _dsse_pae(payload_type: str, payload_bytes: bytes) -> bytes:
 
 
 def wrap_dsse(payload_json: Dict[str, Any], signing_key: Ed25519PrivateKey, key_id: str) -> Dict[str, Any]:
+    return wrap_dsse_with_signer(
+        payload_json,
+        signer=lambda message: (
+            signing_key.sign(message),
+            str(key_id or "").strip(),
+        ),
+    )
+
+
+def wrap_dsse_with_signer(
+    payload_json: Dict[str, Any],
+    *,
+    signer: Callable[[bytes], Tuple[bytes, str]],
+) -> Dict[str, Any]:
     if not isinstance(payload_json, dict):
         raise ValueError("payload_json must be a JSON object")
-    effective_key_id = str(key_id or "").strip()
-    if not effective_key_id:
-        raise ValueError("key_id is required")
-
     payload_bytes = canonicalize_jcs_bytes(payload_json)
     payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
-    signature = signing_key.sign(_dsse_pae(DSSE_PAYLOAD_TYPE, payload_bytes))
+    signature, effective_key_id = signer(_dsse_pae(DSSE_PAYLOAD_TYPE, payload_bytes))
+    effective_key_id = str(effective_key_id or "").strip()
+    if not effective_key_id:
+        raise ValueError("key_id is required")
     signature_b64 = base64.b64encode(signature).decode("ascii")
 
     return {

@@ -7,6 +7,34 @@ from datetime import datetime, timedelta, timezone
 from releasegate.hotspots import file_risk
 
 
+def test_parse_timestamp_accepts_none_empty_and_datetime_inputs():
+    assert file_risk._parse_timestamp(None) is None
+    assert file_risk._parse_timestamp("") is None
+    assert file_risk._parse_timestamp("   ") is None
+
+    dt = datetime(2026, 3, 3, 12, 34, 56, tzinfo=timezone.utc)
+    parsed = file_risk._parse_timestamp(dt)
+    assert parsed == dt
+
+
+def test_parse_timestamp_normalizes_supported_formats_to_utc():
+    sqlite_ts = "2026-03-03 12:34:56"
+    iso_z_ts = "2026-03-03T12:34:56Z"
+    iso_offset_ts = "2026-03-03T07:34:56-05:00"
+
+    parsed_sqlite = file_risk._parse_timestamp(sqlite_ts)
+    parsed_iso_z = file_risk._parse_timestamp(iso_z_ts)
+    parsed_iso_offset = file_risk._parse_timestamp(iso_offset_ts)
+
+    assert parsed_sqlite is not None
+    assert parsed_iso_z is not None
+    assert parsed_iso_offset is not None
+    assert parsed_sqlite.tzinfo == timezone.utc
+    assert parsed_iso_z.tzinfo == timezone.utc
+    assert parsed_iso_offset.tzinfo == timezone.utc
+    assert parsed_sqlite == parsed_iso_z == parsed_iso_offset
+
+
 def test_recent_churn_uses_datetime_comparison_for_mixed_timestamp_formats(tmp_path):
     db_path = tmp_path / "hotspots.db"
     conn = sqlite3.connect(str(db_path))
