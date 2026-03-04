@@ -24,7 +24,7 @@ export default async function PolicyDiffPage({
           Compare active vs staged policy contracts for tenant: {scope.tenantId}
         </p>
       </div>
-      <PolicyDiffWorkbench tenantId={scope.tenantId} />
+      <PolicyDiffWorkbench tenantId={scope.tenantId} fromTs={scope.fromTs} toTs={scope.toTs} />
     </div>
   );
 }

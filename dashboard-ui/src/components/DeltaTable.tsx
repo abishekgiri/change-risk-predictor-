@@ -3,12 +3,22 @@ import React from "react";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import type { Severity } from "@/lib/types";
 
+type DisplaySeverity = Severity | "unknown";
+
+function normalizeSeverity(value: unknown): DisplaySeverity {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "high" || raw === "medium" || raw === "low") {
+    return raw;
+  }
+  return "unknown";
+}
+
 export function DeltaTable({
   title,
   rows,
 }: {
   title: string;
-  rows: Array<Record<string, unknown> & { severity: Severity }>;
+  rows: Array<Record<string, unknown> & { severity?: Severity | "unknown" }>;
 }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -21,7 +31,7 @@ export function DeltaTable({
             <li key={`${title}-${idx}`} className="rounded-lg border border-slate-100 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs font-medium text-slate-500">{String(row.path ?? "-")}</span>
-                <SeverityBadge severity={row.severity} />
+                <SeverityBadge severity={normalizeSeverity(row.severity)} />
               </div>
               <pre className="overflow-x-auto rounded-md bg-slate-50 p-2 text-xs text-slate-700">
                 {JSON.stringify(row, null, 2)}
