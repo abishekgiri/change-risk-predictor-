@@ -2570,6 +2570,71 @@ def _migration_20260310_034_signal_attestations(cursor) -> None:
         """
     )
 
+def _migration_20260311_035_governance_query_indexes(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_created_decision
+        ON audit_decisions(tenant_id, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decisions_tenant_release_created_decision
+        ON audit_decisions(tenant_id, release_status, created_at DESC, decision_id DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_actor_created
+        ON decision_transition_links(tenant_id, actor, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_decision_links_tenant_transition_created
+        ON decision_transition_links(tenant_id, transition_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_decision_created
+        ON audit_overrides(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_actor_created
+        ON audit_overrides(tenant_id, actor, created_at DESC)
+        """
+    )
+
+
+def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            integrity_score REAL NOT NULL,
+            drift_index REAL NOT NULL,
+            override_rate REAL NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2740,6 +2805,16 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260310_034_signal_attestations",
         description="Add append-only signal attestation records with freshness and integrity metadata.",
         apply=_migration_20260310_034_signal_attestations,
+    ),
+    Migration(
+        migration_id="20260311_035_governance_query_indexes",
+        description="Add governance query indexes for decision explorer and compliance exports.",
+        apply=_migration_20260311_035_governance_query_indexes,
+    ),
+    Migration(
+        migration_id="20260312_036_governance_dashboard_rollups",
+        description="Add tenant-scoped governance daily rollups for dashboard trend APIs.",
+        apply=_migration_20260312_036_governance_dashboard_rollups,
     ),
 ]
 
