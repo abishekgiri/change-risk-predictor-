@@ -108,9 +108,21 @@ def _init_postgres_schema() -> str:
             idempotency_key TEXT,
             previous_hash TEXT,
             event_hash TEXT NOT NULL,
+            ttl_seconds INTEGER,
+            expires_at TIMESTAMPTZ,
+            requested_by TEXT,
+            approved_by TEXT,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, override_id)
         )
+        """
+    )
+    # Existing Postgres deployments may have an older override table shape.
+    # Ensure expires_at exists before creating indexes that depend on it.
+    cur.execute(
+        """
+        ALTER TABLE audit_overrides
+        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ
         """
     )
     cur.execute(
@@ -145,6 +157,22 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = ANY(current_schemas(false))
+                  AND table_name = 'audit_overrides'
+                  AND column_name = 'expires_at'
+            ) THEN
+                EXECUTE 'CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at ON audit_overrides(tenant_id, expires_at)';
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
         ON audit_overrides(tenant_id, repo, previous_hash)
         """
@@ -174,6 +202,41 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_audit_decision_refs_tenant_repo_pr_created
         ON audit_decision_refs(tenant_id, repo, pr_number, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS decision_transition_links (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            jira_issue_id TEXT NOT NULL,
+            transition_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            source_status TEXT NOT NULL,
+            target_status TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            policy_version TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            context_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            consumed BOOLEAN NOT NULL DEFAULT FALSE,
+            consumed_at TIMESTAMPTZ,
+            consumed_by_request_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_issue_transition
+        ON decision_transition_links(tenant_id, jira_issue_id, transition_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dtl_tenant_expires
+        ON decision_transition_links(tenant_id, expires_at)
         """
     )
     cur.execute(
@@ -262,6 +325,82 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_lock_checkpoints (
+            tenant_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            cadence TEXT NOT NULL,
+            period_id TEXT NOT NULL,
+            period_end TIMESTAMPTZ NOT NULL,
+            head_seq INTEGER NOT NULL,
+            head_hash TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            signature_algorithm TEXT NOT NULL,
+            signature_value TEXT NOT NULL,
+            path TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, checkpoint_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_lock_checkpoints_scope
+        ON audit_lock_checkpoints(tenant_id, chain_id, cadence, period_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_lock_checkpoints_tenant_chain_created
+        ON audit_lock_checkpoints(tenant_id, chain_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_lock_checkpoint_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Lock checkpoints are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_lock_checkpoints_update'
+            ) THEN
+                CREATE TRIGGER prevent_lock_checkpoints_update
+                BEFORE UPDATE ON audit_lock_checkpoints
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_lock_checkpoint_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_lock_checkpoints_delete'
+            ) THEN
+                CREATE TRIGGER prevent_lock_checkpoints_delete
+                BEFORE DELETE ON audit_lock_checkpoints
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_lock_checkpoint_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoint_tenant_scope
         ON audit_checkpoints(tenant_id, repo, cadence, period_id, pr_number)
         """
@@ -306,6 +445,10 @@ def _init_postgres_schema() -> str:
             algorithm TEXT NOT NULL,
             signed_payload_hash TEXT NOT NULL,
             attestation_json JSONB NOT NULL,
+            compromised BOOLEAN NOT NULL DEFAULT FALSE,
+            compromised_reason TEXT,
+            compromised_at TIMESTAMPTZ,
+            superseded_by_resign_id TEXT,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, attestation_id)
         )
@@ -315,6 +458,20 @@ def _init_postgres_schema() -> str:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
         ON audit_attestations(tenant_id, decision_id)
+        """
+    )
+    # Existing Postgres deployments may have an older attestation table shape.
+    # Ensure compromise columns exist before creating indexes that reference them.
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised BOOLEAN DEFAULT FALSE")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
+    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
+    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
+        ON audit_attestations(tenant_id, compromised, created_at)
         """
     )
     cur.execute(
@@ -418,6 +575,84 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS audit_external_root_anchors (
+            tenant_id TEXT NOT NULL,
+            anchor_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            external_ref TEXT,
+            receipt_json JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, anchor_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_external_root_anchor_target
+        ON audit_external_root_anchors(tenant_id, provider, date_utc, root_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_external_root_anchor_tenant_date
+        ON audit_external_root_anchors(tenant_id, date_utc, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq BIGINT NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TIMESTAMPTZ NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            submitted_at TIMESTAMPTZ,
+            confirmed_at TIMESTAMPTZ,
+            PRIMARY KEY (tenant_id, job_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash
+        ON anchor_jobs(tenant_id, root_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt
+        ON anchor_jobs(tenant_id, status, next_attempt_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt
+        ON anchor_jobs(status, next_attempt_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at
+        ON anchor_jobs(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at
+        ON anchor_jobs(tenant_id, confirmed_at DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE OR REPLACE FUNCTION releasegate_prevent_transparency_mutation()
         RETURNS trigger AS $$
         BEGIN
@@ -438,6 +673,16 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_external_root_anchor_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'External root anchors are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -449,6 +694,40 @@ def _init_postgres_schema() -> str:
                 BEFORE UPDATE ON audit_transparency_log
                 FOR EACH ROW
                 EXECUTE FUNCTION releasegate_prevent_transparency_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_external_root_anchor_update'
+            ) THEN
+                CREATE TRIGGER prevent_external_root_anchor_update
+                BEFORE UPDATE ON audit_external_root_anchors
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_external_root_anchor_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_external_root_anchor_delete'
+            ) THEN
+                CREATE TRIGGER prevent_external_root_anchor_delete
+                BEFORE DELETE ON audit_external_root_anchors
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_external_root_anchor_mutation();
             END IF;
         END $$;
         """
@@ -521,11 +800,27 @@ def _init_postgres_schema() -> str:
             override_expires_at TIMESTAMPTZ,
             override_reason TEXT,
             actor TEXT,
+            chain_id TEXT,
+            seq INTEGER,
+            prev_hash TEXT,
+            event_hash TEXT,
+            ttl_seconds INTEGER,
+            expires_at TIMESTAMPTZ,
+            justification TEXT,
+            context_json JSONB,
             created_at TIMESTAMPTZ NOT NULL,
             PRIMARY KEY (tenant_id, event_id)
         )
         """
     )
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS chain_id TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS seq INTEGER")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS prev_hash TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS event_hash TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS justification TEXT")
+    cur.execute("ALTER TABLE jira_lock_events ADD COLUMN IF NOT EXISTS context_json JSONB")
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_issue_created
@@ -536,6 +831,24 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_created
         ON jira_lock_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_seq
+        ON jira_lock_events(tenant_id, chain_id, seq)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_jira_lock_events_tenant_chain_prev_hash
+        ON jira_lock_events(tenant_id, chain_id, prev_hash)
         """
     )
     cur.execute(
@@ -630,6 +943,449 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS policy_resolved_snapshots (
+            tenant_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            snapshot_json JSONB NOT NULL,
+            schema_version TEXT NOT NULL,
+            compiler_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, snapshot_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_resolved_snapshots_tenant_hash
+        ON policy_resolved_snapshots(tenant_id, policy_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_resolved_snapshots_tenant_created
+        ON policy_resolved_snapshots(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_override_metrics_daily (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            chain_id TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            overrides_total INTEGER NOT NULL,
+            locks_total INTEGER NOT NULL,
+            unlocks_total INTEGER NOT NULL,
+            override_expires_total INTEGER NOT NULL,
+            high_risk_overrides_total INTEGER NOT NULL,
+            distinct_issues_total INTEGER NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, date_utc, chain_id, actor)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_date
+        ON governance_override_metrics_daily(tenant_id, date_utc)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_override_metrics_daily_tenant_actor
+        ON governance_override_metrics_daily(tenant_id, actor, date_utc DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc DATE NOT NULL,
+            integrity_score DOUBLE PRECISION NOT NULL,
+            drift_index DOUBLE PRECISION NOT NULL,
+            override_rate DOUBLE PRECISION NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_decision_records (
+            tenant_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            issue_key TEXT,
+            transition_id TEXT,
+            actor_id TEXT,
+            snapshot_id TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason_codes_json JSONB NOT NULL,
+            signal_bundle_hash TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, decision_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_decision_records_tenant_snapshot
+        ON policy_decision_records(tenant_id, snapshot_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_releases (
+            tenant_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            state TEXT NOT NULL,
+            effective_at TIMESTAMPTZ,
+            activated_at TIMESTAMPTZ,
+            created_by TEXT,
+            change_ticket TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, release_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_releases_tenant_scope_state
+        ON policy_releases(tenant_id, policy_id, target_env, state, effective_at, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS active_policy_pointers (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            active_release_id TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, policy_id, target_env)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_release_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            release_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_release_events_tenant_release_created
+        ON policy_release_events(tenant_id, release_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollouts (
+            tenant_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            target_env TEXT NOT NULL,
+            from_release_id TEXT,
+            to_release_id TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'FULL',
+            canary_percent INTEGER NOT NULL DEFAULT 100,
+            state TEXT NOT NULL DEFAULT 'PLANNED',
+            rollback_to_release_id TEXT,
+            created_by TEXT,
+            started_at TIMESTAMPTZ NOT NULL,
+            completed_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, rollout_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollouts_tenant_policy_env_state
+        ON policy_rollouts(tenant_id, policy_id, target_env, state, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_rollouts_running_scope
+        ON policy_rollouts(tenant_id, policy_id, target_env)
+        WHERE state = 'RUNNING'
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_rollout_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            rollout_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_rollout_events_tenant_rollout_created
+        ON policy_rollout_events(tenant_id, rollout_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_simulation_events (
+            tenant_id TEXT NOT NULL,
+            simulation_id TEXT NOT NULL,
+            actor_id TEXT,
+            policy_id TEXT,
+            policy_version INTEGER,
+            policy_hash TEXT,
+            environment TEXT,
+            input_hash TEXT,
+            result_status TEXT NOT NULL,
+            allow INTEGER NOT NULL,
+            reason_codes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, simulation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_simulation_events_tenant_created
+        ON policy_simulation_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_registry_entries (
+            tenant_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            policy_json JSONB NOT NULL,
+            policy_hash TEXT NOT NULL,
+            lint_errors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            lint_warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            rollout_percentage INTEGER NOT NULL DEFAULT 100,
+            rollout_scope TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            created_by TEXT,
+            activated_at TIMESTAMPTZ,
+            activated_by TEXT,
+            archived_at TIMESTAMPTZ,
+            supersedes_policy_id TEXT,
+            PRIMARY KEY (tenant_id, policy_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_scope_version
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, version)
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_policy_registry_active_scope
+        ON policy_registry_entries(tenant_id, scope_type, scope_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_scope_status_created
+        ON policy_registry_entries(tenant_id, scope_type, scope_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_hash
+        ON policy_registry_entries(tenant_id, policy_hash, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS policy_registry_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            policy_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            actor_id TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_events_tenant_policy_created
+        ON policy_registry_events(tenant_id, policy_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_registry_payload_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            IF
+                NEW.scope_type IS DISTINCT FROM OLD.scope_type OR
+                NEW.scope_id IS DISTINCT FROM OLD.scope_id OR
+                NEW.version IS DISTINCT FROM OLD.version OR
+                NEW.policy_json IS DISTINCT FROM OLD.policy_json OR
+                NEW.policy_hash IS DISTINCT FROM OLD.policy_hash OR
+                NEW.lint_errors_json IS DISTINCT FROM OLD.lint_errors_json OR
+                NEW.lint_warnings_json IS DISTINCT FROM OLD.lint_warnings_json OR
+                NEW.rollout_percentage IS DISTINCT FROM OLD.rollout_percentage OR
+                NEW.rollout_scope IS DISTINCT FROM OLD.rollout_scope OR
+                NEW.created_at IS DISTINCT FROM OLD.created_at OR
+                NEW.created_by IS DISTINCT FROM OLD.created_by
+            THEN
+                RAISE EXCEPTION 'Policy registry payload is immutable: create a new version instead';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_registry_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy registry events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_rollout_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy rollout events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_policy_simulation_events_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy simulation events are immutable: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_payload_mutation'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_payload_mutation
+                BEFORE UPDATE ON policy_registry_entries
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_payload_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_events_update
+                BEFORE UPDATE ON policy_registry_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_registry_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_registry_events_delete
+                BEFORE DELETE ON policy_registry_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_registry_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_rollout_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_rollout_events_update
+                BEFORE UPDATE ON policy_rollout_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_rollout_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_rollout_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_rollout_events_delete
+                BEFORE DELETE ON policy_rollout_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_rollout_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_simulation_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_policy_simulation_events_update
+                BEFORE UPDATE ON policy_simulation_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_simulation_events_mutation();
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_policy_simulation_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_policy_simulation_events_delete
+                BEFORE DELETE ON policy_simulation_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_policy_simulation_events_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS metrics_events (
             tenant_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
@@ -645,6 +1401,230 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_metrics_events_tenant_metric_time
         ON metrics_events(tenant_id, metric_name, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_decision_replays (
+            tenant_id TEXT NOT NULL,
+            replay_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            match BOOLEAN NOT NULL,
+            status TEXT NOT NULL DEFAULT 'COMPLETED',
+            diff_json JSONB NOT NULL,
+            old_output_hash TEXT,
+            new_output_hash TEXT,
+            old_policy_hash TEXT,
+            new_policy_hash TEXT,
+            old_input_hash TEXT,
+            new_input_hash TEXT,
+            ran_engine_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, replay_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_decision_created
+        ON audit_decision_replays(tenant_id, decision_id, created_at DESC)
+        """
+    )
+    cur.execute("ALTER TABLE audit_decision_replays ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'COMPLETED'")
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_decision_replays_tenant_status_created
+        ON audit_decision_replays(tenant_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_decision_replay_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Decision replay ledger is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_decision_replays_update'
+            ) THEN
+                CREATE TRIGGER prevent_decision_replays_update
+                BEFORE UPDATE ON audit_decision_replays
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_decision_replay_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_decision_replays_delete'
+            ) THEN
+                CREATE TRIGGER prevent_decision_replays_delete
+                BEFORE DELETE ON audit_decision_replays
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_decision_replay_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_nodes (
+            tenant_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            ref TEXT NOT NULL,
+            hash TEXT,
+            payload_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, node_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_nodes_tenant_type_ref
+        ON evidence_nodes(tenant_id, type, ref)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_nodes_tenant_type_created
+        ON evidence_nodes(tenant_id, type, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_evidence_node_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Evidence nodes are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_nodes_update'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_nodes_update
+                BEFORE UPDATE ON evidence_nodes
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_node_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_nodes_delete'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_nodes_delete
+                BEFORE DELETE ON evidence_nodes
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_node_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence_edges (
+            tenant_id TEXT NOT NULL,
+            edge_id TEXT NOT NULL,
+            from_node_id TEXT NOT NULL,
+            to_node_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, edge_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_evidence_edges_tenant_from_to_type
+        ON evidence_edges(tenant_id, from_node_id, to_node_id, type)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_from_created
+        ON evidence_edges(tenant_id, from_node_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_evidence_edges_tenant_to_created
+        ON evidence_edges(tenant_id, to_node_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_evidence_edge_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Evidence edges are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_edges_update'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_edges_update
+                BEFORE UPDATE ON evidence_edges
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_edge_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_evidence_edges_delete'
+            ) THEN
+                CREATE TRIGGER prevent_evidence_edges_delete
+                BEFORE DELETE ON evidence_edges
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_evidence_edge_mutation();
+            END IF;
+        END $$;
         """
     )
     cur.execute(
@@ -763,6 +1743,9 @@ def _init_postgres_schema() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             encrypted_key TEXT NOT NULL,
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
             key_hash TEXT NOT NULL,
             created_by TEXT,
             created_at TIMESTAMPTZ NOT NULL,
@@ -776,6 +1759,125 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created
         ON checkpoint_signing_keys(tenant_id, is_active, created_at)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL DEFAULT '',
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
+            signing_mode TEXT NOT NULL DEFAULT 'envelope',
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            rotated_at TIMESTAMPTZ,
+            revoked_at TIMESTAMPTZ,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active
+        ON tenant_signing_keys(tenant_id)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created
+        ON tenant_signing_keys(tenant_id, status, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_access_log (
+            tenant_id TEXT NOT NULL,
+            access_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            actor TEXT,
+            purpose TEXT,
+            metadata_json JSONB,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, access_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_key_created
+        ON key_access_log(tenant_id, key_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_access_log_tenant_operation_created
+        ON key_access_log(tenant_id, operation, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_key_compromise_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            revoked_key_id TEXT NOT NULL,
+            replacement_key_id TEXT NOT NULL,
+            compromise_start TIMESTAMPTZ NOT NULL,
+            compromise_end TIMESTAMPTZ NOT NULL,
+            reason TEXT,
+            actor TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            affected_count INTEGER NOT NULL DEFAULT 0,
+            affected_attestation_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_created
+        ON tenant_key_compromise_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_key_compromise_events_tenant_revoked
+        ON tenant_key_compromise_events(tenant_id, revoked_key_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS attestation_resignatures (
+            tenant_id TEXT NOT NULL,
+            resign_id TEXT NOT NULL,
+            attestation_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            new_key_id TEXT NOT NULL,
+            supersedes_attestation_id TEXT NOT NULL,
+            attestation_json JSONB NOT NULL,
+            created_by TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, resign_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_attestation_created
+        ON attestation_resignatures(tenant_id, attestation_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_attestation_resignatures_tenant_decision_created
+        ON attestation_resignatures(tenant_id, decision_id, created_at DESC)
         """
     )
     cur.execute(
@@ -808,9 +1910,145 @@ def _init_postgres_schema() -> str:
         ON idempotency_keys(expires_at)
         """
     )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_key_access_log_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Key access log is append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_key_access_log_update'
+            ) THEN
+                CREATE TRIGGER prevent_key_access_log_update
+                BEFORE UPDATE ON key_access_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_key_access_log_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_key_access_log_delete'
+            ) THEN
+                CREATE TRIGGER prevent_key_access_log_delete
+                BEFORE DELETE ON key_access_log
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_key_access_log_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Tenant key compromise events are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_tenant_key_compromise_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_key_compromise_events_update
+                BEFORE UPDATE ON tenant_key_compromise_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_tenant_key_compromise_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_key_compromise_events_delete
+                BEFORE DELETE ON tenant_key_compromise_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_key_compromise_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_attestation_resignature_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Attestation re-signatures are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestation_resignatures_update'
+            ) THEN
+                CREATE TRIGGER prevent_attestation_resignatures_update
+                BEFORE UPDATE ON attestation_resignatures
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_resignature_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestation_resignatures_delete'
+            ) THEN
+                CREATE TRIGGER prevent_attestation_resignatures_delete
+                BEFORE DELETE ON attestation_resignatures
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_attestation_resignature_mutation();
+            END IF;
+        END $$;
+        """
+    )
     # Ensure existing Postgres deployments are hardened to tenant-scoped PKs.
     cur.execute("ALTER TABLE audit_decisions ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS tenant_id TEXT")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS ttl_seconds INTEGER")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS requested_by TEXT")
+    cur.execute("ALTER TABLE audit_overrides ADD COLUMN IF NOT EXISTS approved_by TEXT")
     cur.execute("ALTER TABLE audit_checkpoints ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("ALTER TABLE audit_proof_packs ADD COLUMN IF NOT EXISTS tenant_id TEXT")
     cur.execute("UPDATE audit_decisions SET tenant_id = 'default' WHERE tenant_id IS NULL OR btrim(tenant_id) = ''")
@@ -867,6 +2105,198 @@ def _init_postgres_schema() -> str:
     cur.execute("UPDATE webhook_nonces SET key_id = COALESCE(NULLIF(btrim(key_id), ''), 'legacy')")
     cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN integration_id SET NOT NULL")
     cur.execute("ALTER TABLE webhook_nonces ALTER COLUMN key_id SET NOT NULL")
+    cur.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS encrypted_data_key TEXT")
+    cur.execute("ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS kms_key_id TEXT")
+    cur.execute(
+        "ALTER TABLE checkpoint_signing_keys ADD COLUMN IF NOT EXISTS encryption_mode TEXT DEFAULT 'legacy_fernet'"
+    )
+    cur.execute(
+        "UPDATE checkpoint_signing_keys SET encryption_mode = COALESCE(NULLIF(btrim(encryption_mode), ''), 'legacy_fernet')"
+    )
+    cur.execute("ALTER TABLE checkpoint_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
+    cur.execute("ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS encrypted_data_key TEXT")
+    cur.execute("ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS kms_key_id TEXT")
+    cur.execute(
+        "ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS encryption_mode TEXT DEFAULT 'legacy_fernet'"
+    )
+    cur.execute(
+        "ALTER TABLE tenant_signing_keys ADD COLUMN IF NOT EXISTS signing_mode TEXT DEFAULT 'envelope'"
+    )
+    cur.execute(
+        "UPDATE tenant_signing_keys SET encryption_mode = COALESCE(NULLIF(btrim(encryption_mode), ''), 'legacy_fernet')"
+    )
+    cur.execute("UPDATE tenant_signing_keys SET signing_mode = COALESCE(NULLIF(btrim(signing_mode), ''), 'envelope')")
+    cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN encryption_mode SET NOT NULL")
+    cur.execute("ALTER TABLE tenant_signing_keys ALTER COLUMN signing_mode SET NOT NULL")
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_governance_settings (
+            tenant_id TEXT PRIMARY KEY,
+            max_decisions_per_month INTEGER,
+            max_anchors_per_day INTEGER,
+            max_overrides_per_month INTEGER,
+            quota_enforcement_mode TEXT NOT NULL DEFAULT 'HARD',
+            security_state TEXT NOT NULL DEFAULT 'normal',
+            security_reason TEXT,
+            security_since TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL,
+            updated_by TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_governance_settings_security_state
+        ON tenant_governance_settings(security_state, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_usage_counters (
+            tenant_id TEXT NOT NULL,
+            period_type TEXT NOT NULL,
+            period_start TEXT NOT NULL,
+            decisions_count INTEGER NOT NULL DEFAULT 0,
+            anchors_count INTEGER NOT NULL DEFAULT 0,
+            overrides_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, period_type, period_start)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_tenant_updated
+        ON tenant_usage_counters(tenant_id, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_period
+        ON tenant_usage_counters(period_type, period_start)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_anomaly_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            operation TEXT,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_anomaly_events_signal_created
+        ON tenant_security_anomaly_events(tenant_id, signal_type, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_security_state_events (
+            tenant_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state TEXT NOT NULL,
+            reason TEXT,
+            source TEXT,
+            actor TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, event_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_security_state_events_created
+        ON tenant_security_state_events(tenant_id, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_tenant_security_anomaly_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Tenant security anomaly events are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'prevent_tenant_security_anomaly_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_security_anomaly_events_update
+                BEFORE UPDATE ON tenant_security_anomaly_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_security_anomaly_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'prevent_tenant_security_anomaly_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_security_anomaly_events_delete
+                BEFORE DELETE ON tenant_security_anomaly_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_security_anomaly_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        CREATE OR REPLACE FUNCTION releasegate_prevent_tenant_security_state_event_mutation()
+        RETURNS trigger AS $$
+        BEGIN
+            RAISE EXCEPTION 'Tenant security state events are append-only: % not allowed', TG_OP;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'prevent_tenant_security_state_events_update'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_security_state_events_update
+                BEFORE UPDATE ON tenant_security_state_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_security_state_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_trigger WHERE tgname = 'prevent_tenant_security_state_events_delete'
+            ) THEN
+                CREATE TRIGGER prevent_tenant_security_state_events_delete
+                BEFORE DELETE ON tenant_security_state_events
+                FOR EACH ROW
+                EXECUTE FUNCTION releasegate_prevent_tenant_security_state_event_mutation();
+            END IF;
+        END $$;
+        """
+    )
     cur.execute(
         """
         DO $$
@@ -890,6 +2320,12 @@ def _init_postgres_schema() -> str:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_overrides_chain_prev
         ON audit_overrides(tenant_id, repo, previous_hash)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_overrides_tenant_expires_at
+        ON audit_overrides(tenant_id, expires_at)
         """
     )
     cur.execute(
@@ -1000,6 +2436,22 @@ def init_db() -> str:
     Initialize SQLite schema and apply forward-only migrations.
     Returns current schema version identifier.
     """
+    # If we're already inside an active storage transaction, schema bootstrap has
+    # already happened on entry. Re-initializing via a separate connection can
+    # deadlock (notably on SQLite BEGIN IMMEDIATE), so short-circuit.
+    try:
+        from releasegate.storage import get_storage_backend as _get_storage_backend
+
+        active_backend = _get_storage_backend()
+        active_getter = getattr(active_backend, "_active_tx", None)
+        if callable(active_getter):
+            tx_state = active_getter()
+            if tx_state is not None:
+                return SCHEMA_VERSION
+    except Exception:
+        # Fallback to normal init path.
+        pass
+
     backend = (os.getenv("RELEASEGATE_STORAGE_BACKEND") or "sqlite").strip().lower()
     if backend == "postgres":
         return _init_postgres_schema()
@@ -1182,6 +2634,10 @@ def init_db() -> str:
             idempotency_key TEXT,
             previous_hash TEXT,
             event_hash TEXT NOT NULL,
+            ttl_seconds INTEGER,
+            expires_at TEXT,
+            requested_by TEXT,
+            approved_by TEXT,
             created_at TIMESTAMP NOT NULL,
             PRIMARY KEY (tenant_id, override_id)
         )
@@ -1356,12 +2812,57 @@ def init_db() -> str:
             tenant_id TEXT NOT NULL,
             key_id TEXT NOT NULL,
             encrypted_key TEXT NOT NULL,
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
             key_hash TEXT NOT NULL,
             created_by TEXT,
             created_at TEXT NOT NULL,
             rotated_at TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_signing_keys (
+            tenant_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL DEFAULT '',
+            encrypted_data_key TEXT,
+            kms_key_id TEXT,
+            encryption_mode TEXT NOT NULL DEFAULT 'legacy_fernet',
+            signing_mode TEXT NOT NULL DEFAULT 'envelope',
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            rotated_at TEXT,
+            revoked_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, key_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchor_jobs (
+            tenant_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            root_hash TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            ledger_head_seq INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            last_error TEXT,
+            external_anchor_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            submitted_at TEXT,
+            confirmed_at TEXT,
+            PRIMARY KEY (tenant_id, job_id)
         )
         """
     )
@@ -1414,6 +2915,27 @@ def init_db() -> str:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at ON idempotency_keys(expires_at)")
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_checkpoint_keys_tenant_active_created ON checkpoint_signing_keys(tenant_id, is_active, created_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_signing_keys_one_active ON tenant_signing_keys(tenant_id) WHERE status = 'ACTIVE'"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_signing_keys_tenant_status_created ON tenant_signing_keys(tenant_id, status, created_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_anchor_jobs_tenant_root_hash ON anchor_jobs(tenant_id, root_hash)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_status_next_attempt ON anchor_jobs(tenant_id, status, next_attempt_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_status_next_attempt ON anchor_jobs(status, next_attempt_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_created_at ON anchor_jobs(tenant_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at ON anchor_jobs(tenant_id, confirmed_at)"
     )
 
     cursor.execute(

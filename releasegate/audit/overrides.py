@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from releasegate.overrides.state import OverrideState, resolve_override_state
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
@@ -25,6 +27,11 @@ def _get_last_hash(repo: str, tenant_id: str) -> Optional[str]:
     return row.get("event_hash") if row else None
 
 
+def _require_expires_at() -> bool:
+    raw = str(os.getenv("RELEASEGATE_OVERRIDE_REQUIRE_EXPIRES_AT", "true") or "true").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def record_override(
     repo: str,
     pr_number: Optional[int] = None,
@@ -36,6 +43,10 @@ def record_override(
     tenant_id: Optional[str] = None,
     target_type: Optional[str] = None,
     target_id: Optional[str] = None,
+    ttl_seconds: Optional[int] = None,
+    expires_at: Optional[str] = None,
+    requested_by: Optional[str] = None,
+    approved_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Append-only tenant-scoped override ledger record with hash chaining.
@@ -64,6 +75,14 @@ def record_override(
         }
         if idempotency_key is not None:
             payload["idempotency_key"] = idempotency_key
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = int(ttl_seconds)
+        if expires_at is not None:
+            payload["expires_at"] = str(expires_at)
+        if requested_by is not None:
+            payload["requested_by"] = str(requested_by)
+        if approved_by is not None:
+            payload["approved_by"] = str(approved_by)
         event_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
         override_id = hashlib.sha256(f"{effective_tenant}:{repo}:{now}:{event_hash}".encode()).hexdigest()[:32]
 
@@ -71,8 +90,9 @@ def record_override(
             storage.execute(
                 """
                 INSERT INTO audit_overrides (
-                    override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id,
+                    idempotency_key, previous_hash, event_hash, created_at, ttl_seconds, expires_at, requested_by, approved_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     override_id,
@@ -89,6 +109,10 @@ def record_override(
                     prev_hash,
                     event_hash,
                     now,
+                    int(ttl_seconds) if ttl_seconds is not None else None,
+                    str(expires_at) if expires_at is not None else None,
+                    str(requested_by) if requested_by is not None else None,
+                    str(approved_by) if approved_by is not None else None,
                 ),
             )
             payload["override_id"] = override_id
@@ -129,8 +153,10 @@ def list_overrides(
     if pr is not None:
         query += " AND pr_number = ?"
         params.append(pr)
-    direction = "ASC" if ascending else "DESC"
-    query += f" ORDER BY created_at {direction} LIMIT ?"
+    if ascending:
+        query += " ORDER BY created_at ASC LIMIT ?"
+    else:
+        query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     return storage.fetchall(query, params)
 
@@ -164,11 +190,13 @@ def get_active_override(
     tenant_id: Optional[str],
     target_type: str,
     target_id: str,
+    at_time: Optional[datetime] = None,
+    include_expired: bool = False,
 ) -> Optional[Dict[str, Any]]:
     init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
-    return storage.fetchone(
+    row = storage.fetchone(
         """
         SELECT *
         FROM audit_overrides
@@ -178,6 +206,20 @@ def get_active_override(
         """,
         (effective_tenant, target_type, target_id),
     )
+    if not row:
+        return None
+    enriched = dict(row)
+    state = resolve_override_state(
+        enriched,
+        now_utc=at_time,
+        require_expires_at=_require_expires_at(),
+    )
+    expired = state != OverrideState.ACTIVE
+    enriched["state"] = state.value
+    enriched["expired"] = expired
+    if expired and not include_expired:
+        return None
+    return enriched
 
 
 def verify_override_chain(repo: str, pr: Optional[int] = None, tenant_id: Optional[str] = None) -> Dict[str, Any]:
@@ -189,7 +231,8 @@ def verify_override_chain(repo: str, pr: Optional[int] = None, tenant_id: Option
     effective_tenant = resolve_tenant_id(tenant_id)
 
     query = """
-        SELECT override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id, idempotency_key, previous_hash, event_hash, created_at
+        SELECT override_id, tenant_id, decision_id, repo, pr_number, issue_key, actor, reason, target_type, target_id,
+               idempotency_key, previous_hash, event_hash, created_at, ttl_seconds, expires_at, requested_by, approved_by
         FROM audit_overrides
         WHERE tenant_id = ? AND repo = ?
     """
@@ -229,6 +272,14 @@ def verify_override_chain(repo: str, pr: Optional[int] = None, tenant_id: Option
         }
         if row.get("idempotency_key") is not None:
             payload["idempotency_key"] = row.get("idempotency_key")
+        if row.get("ttl_seconds") is not None:
+            payload["ttl_seconds"] = row.get("ttl_seconds")
+        if row.get("expires_at") is not None:
+            payload["expires_at"] = row.get("expires_at")
+        if row.get("requested_by") is not None:
+            payload["requested_by"] = row.get("requested_by")
+        if row.get("approved_by") is not None:
+            payload["approved_by"] = row.get("approved_by")
         expected_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
         if expected_hash != row.get("event_hash"):
             return {

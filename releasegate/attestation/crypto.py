@@ -4,7 +4,7 @@ import base64
 import json
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -128,15 +128,149 @@ def parse_public_key(value: str) -> Ed25519PublicKey:
     return _load_public_key_from_raw(value)
 
 
-def load_public_keys_map(*, key_file: Optional[str] = None) -> Dict[str, str]:
+def sign_message_for_tenant(
+    tenant_id: Optional[str],
+    message: bytes,
+    *,
+    purpose: str = "attestation_signing",
+    actor: str = "system:attestation",
+) -> Tuple[bytes, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    payload = bytes(message or b"")
+    if effective_tenant:
+        from releasegate.tenants.keys import get_active_tenant_signing_key_record
+
+        record = get_active_tenant_signing_key_record(
+            effective_tenant,
+            actor=actor,
+            purpose=purpose,
+            access_operation="sign",
+        )
+        if isinstance(record, dict):
+            key_id = str(record.get("key_id") or "").strip()
+            signing_mode = str(record.get("signing_mode") or "envelope").strip().lower()
+            if key_id and signing_mode == "kms_direct":
+                from releasegate.crypto.kms_client import get_kms_client
+                from releasegate.security.key_access import log_key_access
+
+                signature = get_kms_client().sign(key_id=key_id, payload=payload)
+                log_key_access(
+                    tenant_id=effective_tenant,
+                    key_id=key_id,
+                    operation="sign",
+                    actor=actor,
+                    purpose=purpose,
+                    metadata={
+                        "signing_mode": signing_mode,
+                        "encryption_mode": str(record.get("encryption_mode") or ""),
+                        "kms_key_id": str(record.get("kms_key_id") or ""),
+                    },
+                )
+                return signature, key_id
+
+            private_key = str(record.get("private_key") or "").strip()
+            if key_id and private_key:
+                loaded = _load_ed25519_private_key_from_text(
+                    private_key,
+                    env_var_name=f"tenant_signing_keys[{effective_tenant}]",
+                )
+                return loaded.sign(payload), key_id
+            if key_id and not private_key:
+                raise MissingSigningKeyError(
+                    "MISSING_SIGNING_KEY: active tenant signing key has no local private key material "
+                    f"(signing_mode={signing_mode or 'unknown'})."
+                )
+
+    private_key = load_private_key_from_env()
+    return private_key.sign(payload), current_key_id()
+
+
+def load_private_key_for_tenant(tenant_id: Optional[str]) -> Tuple[Ed25519PrivateKey, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    if effective_tenant:
+        from releasegate.tenants.keys import get_active_tenant_signing_key_record
+
+        record = get_active_tenant_signing_key_record(
+            effective_tenant,
+            actor="system:attestation",
+            purpose="attestation_signing",
+            access_operation="sign",
+        )
+        if isinstance(record, dict):
+            key_id = str(record.get("key_id") or "").strip()
+            signing_mode = str(record.get("signing_mode") or "envelope").strip().lower()
+            private_key = str(record.get("private_key") or "").strip()
+            if key_id and private_key:
+                loaded = _load_ed25519_private_key_from_text(
+                    private_key,
+                    env_var_name=f"tenant_signing_keys[{effective_tenant}]",
+                )
+                return loaded, key_id
+            if key_id and not private_key:
+                raise MissingSigningKeyError(
+                    "MISSING_SIGNING_KEY: active tenant signing key has no local private key material "
+                    f"(signing_mode={signing_mode or 'unknown'}). Use sign_message_for_tenant()."
+                )
+    return load_private_key_from_env(), current_key_id()
+
+
+def _load_keys_from_tenant_store(
+    *,
+    tenant_id: Optional[str],
+    include_verify_only: bool,
+    include_revoked: bool,
+) -> Dict[str, str]:
+    effective_tenant = str(tenant_id or "").strip()
+    if not effective_tenant:
+        return {}
+    try:
+        from releasegate.tenants.keys import get_tenant_signing_public_keys_with_status
+
+        key_records = get_tenant_signing_public_keys_with_status(
+            tenant_id=effective_tenant,
+            include_verify_only=include_verify_only,
+            include_revoked=include_revoked,
+        )
+    except Exception:
+        return {}
+    key_map: Dict[str, str] = {}
+    for key_id, item in key_records.items():
+        if not isinstance(item, dict):
+            continue
+        public_key = str(item.get("public_key") or "").strip()
+        if not public_key:
+            continue
+        key_map[str(key_id)] = public_key
+    return key_map
+
+
+def load_public_keys_map(
+    *,
+    key_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    include_verify_only: bool = True,
+    include_revoked: bool = False,
+) -> Dict[str, str]:
     """
     Returns mapping: key_id -> public_key_material.
     public_key_material can be PEM or base64/raw 32-byte representation.
+    Resolution order:
+      1) tenant signing keys (if tenant_id provided and keys exist)
+      2) explicit key_file
+      3) RELEASEGATE_ATTESTATION_PUBLIC_KEYS / default file fallback
     """
     key_map: Dict[str, str] = {}
 
     configured = (os.getenv("RELEASEGATE_ATTESTATION_PUBLIC_KEYS") or "").strip()
     key_id = current_key_id()
+
+    tenant_keys = _load_keys_from_tenant_store(
+        tenant_id=tenant_id,
+        include_verify_only=include_verify_only,
+        include_revoked=include_revoked,
+    )
+    if tenant_keys:
+        return tenant_keys
 
     def _consume_payload(raw_text: str) -> None:
         text = raw_text.strip()

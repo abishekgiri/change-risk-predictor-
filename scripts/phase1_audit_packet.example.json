@@ -1,0 +1,125 @@
+{
+  "base_url": "https://change-risk-predictor.onrender.com",
+  "default_headers": {
+    "Authorization": "Bearer <replace-me>"
+  },
+  "scenarios": {
+    "allow": {
+      "endpoint": "/gate/deploy/check",
+      "method": "POST",
+      "expected_status": 200,
+      "required_response_fields": [
+        "decision_id",
+        "status",
+        "reason_code"
+      ],
+      "request": {
+        "tenant_id": "tenant-test",
+        "decision_id": "<allowed-decision-id>",
+        "issue_key": "RG-1",
+        "correlation_id": "<valid-correlation-id>",
+        "deploy_id": "deploy-allow-1",
+        "repo": "abishekgiri/change-risk-predictor-",
+        "env": "prod",
+        "commit_sha": "<approved-commit-sha>"
+      }
+    },
+    "expired_override_deny": {
+      "endpoint": "/integrations/jira/transition/check",
+      "method": "POST",
+      "expected_status": 200,
+      "required_response_fields": [
+        "decision_id",
+        "status",
+        "reason_code"
+      ],
+      "request": {
+        "issue_key": "RG-1",
+        "transition_id": "2",
+        "source_status": "Ready for Release",
+        "target_status": "Done",
+        "actor_account_id": "acct-override-approver",
+        "actor_email": "approver@example.com",
+        "environment": "PRODUCTION",
+        "project_key": "RG",
+        "issue_type": "Task",
+        "tenant_id": "tenant-test",
+        "context_overrides": {
+          "repo": "abishekgiri/change-risk-predictor-",
+          "pr_number": 28,
+          "override": true,
+          "override_reason": "Emergency override for smoke evidence",
+          "override_expires_at": "2000-01-01T00:00:00Z",
+          "override_ttl_seconds": 300
+        }
+      }
+    },
+    "sod_deny": {
+      "endpoint": "/audit/overrides",
+      "method": "POST",
+      "expected_status": 403,
+      "required_response_fields": [],
+      "request": {
+        "repo": "abishekgiri/change-risk-predictor-",
+        "pr_number": 28,
+        "issue_key": "RG-1",
+        "decision_id": "<decision-id>",
+        "reason": "Emergency override with SoD conflict for smoke evidence",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": "abishekgiri/change-risk-predictor-#28",
+        "override_requested_by": "approver@example.com"
+      }
+    },
+    "strict_timeout_deny": {
+      "endpoint": "/gate/deploy/check",
+      "method": "POST",
+      "expected_status": 200,
+      "required_response_fields": [
+        "status",
+        "reason_code"
+      ],
+      "request": {
+        "tenant_id": "tenant-test",
+        "decision_id": "<decision-id>",
+        "issue_key": "RG-1",
+        "correlation_id": "<correlation-id>",
+        "deploy_id": "deploy-strict-timeout-1",
+        "repo": "abishekgiri/change-risk-predictor-",
+        "env": "prod",
+        "commit_sha": "<approved-commit-sha>",
+        "policy_overrides": {
+          "strict_fail_closed": true
+        }
+      }
+    },
+    "idempotency_conflict": {
+      "endpoint": "/gate/deploy/check",
+      "method": "POST",
+      "idempotency_key": "phase1-idem-conflict-1",
+      "first_expected_status": 200,
+      "expected_status": 409,
+      "headers": {},
+      "request_a": {
+        "tenant_id": "tenant-test",
+        "decision_id": "<decision-id>",
+        "issue_key": "RG-1",
+        "correlation_id": "<correlation-id>",
+        "deploy_id": "deploy-idem-a",
+        "repo": "abishekgiri/change-risk-predictor-",
+        "env": "prod",
+        "commit_sha": "<approved-commit-sha>"
+      },
+      "request_b": {
+        "tenant_id": "tenant-test",
+        "decision_id": "<decision-id>",
+        "issue_key": "RG-1",
+        "correlation_id": "<correlation-id>",
+        "deploy_id": "deploy-idem-b",
+        "repo": "abishekgiri/change-risk-predictor-",
+        "env": "prod",
+        "commit_sha": "<approved-commit-sha>"
+      }
+    }
+  }
+}

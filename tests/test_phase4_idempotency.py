@@ -126,6 +126,7 @@ def test_manual_override_endpoint_is_idempotent_with_header_key():
         "issue_key": "PHASE4-401",
         "decision_id": stored.decision_id,
         "reason": "emergency override approved",
+        "ttl_seconds": 3600,
         "target_type": "pr",
         "target_id": f"{repo}#401",
     }
@@ -162,6 +163,124 @@ def test_manual_override_endpoint_is_idempotent_with_header_key():
         assert row[0] == "completed"
     finally:
         conn.close()
+
+
+def test_manual_override_endpoint_rejects_missing_ttl():
+    repo = f"phase4-override-no-ttl-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 405)
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"]),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 405,
+        "issue_key": "PHASE4-405",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "target_type": "pr",
+        "target_id": f"{repo}#405",
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "OVERRIDE_TTL_REQUIRED"
+
+
+def test_manual_override_endpoint_rejects_missing_justification():
+    repo = f"phase4-override-no-justification-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 407)
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"]),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 407,
+        "issue_key": "PHASE4-407",
+        "decision_id": stored.decision_id,
+        "reason": "   ",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#407",
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "OVERRIDE_JUSTIFICATION_REQUIRED"
+
+
+def test_manual_override_endpoint_requires_admin_role():
+    repo = f"phase4-override-no-admin-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 406)
+    headers = {
+        **jwt_headers(roles=["operator"], scopes=["override:write"]),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 406,
+        "issue_key": "PHASE4-406",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#406",
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 403
+
+
+def test_manual_override_endpoint_blocks_sod_requester_equals_approver():
+    repo = f"phase4-override-sod-requester-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 408)
+    requester = "approver@example.com"
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"], principal_id=requester),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 408,
+        "issue_key": "PHASE4-408",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#408",
+        "override_requested_by": requester,
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "SOD_REQUESTER_APPROVER_CONFLICT"
+    assert response.json()["detail"]["left"] == "override_requested_by"
+    assert response.json()["detail"]["right"] == "override_approved_by"
+    assert requester in response.json()["detail"]["conflicting_principals"]
+
+
+def test_manual_override_endpoint_blocks_sod_pr_author_equals_approver():
+    repo = f"phase4-override-sod-author-{uuid.uuid4().hex[:8]}"
+    stored = _record_decision(repo, 409)
+    approver = "approver2@example.com"
+    headers = {
+        **jwt_headers(roles=["admin"], scopes=["override:write"], principal_id=approver),
+        "Idempotency-Key": f"idem-{uuid.uuid4().hex}",
+    }
+    payload = {
+        "repo": repo,
+        "pr_number": 409,
+        "issue_key": "PHASE4-409",
+        "decision_id": stored.decision_id,
+        "reason": "emergency override approved by release governance",
+        "ttl_seconds": 900,
+        "target_type": "pr",
+        "target_id": f"{repo}#409",
+        "pr_author": approver,
+    }
+    response = client.post("/audit/overrides", json=payload, params={"tenant_id": "tenant-test"}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "SOD_PR_AUTHOR_APPROVER_CONFLICT"
+    assert response.json()["detail"]["left"] == "pr_author"
+    assert response.json()["detail"]["right"] == "override_approved_by"
+    assert approver in response.json()["detail"]["conflicting_principals"]
 
 
 def test_parallel_override_recording_with_same_key_produces_single_row():
