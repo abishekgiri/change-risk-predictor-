@@ -1,5 +1,57 @@
 import { createRequestId } from "@/lib/request-id";
-import { requiredEnv } from "@/lib/env";
+import { optionalEnv, requiredEnv } from "@/lib/env";
+
+function looksLikeJwt(token: string): boolean {
+  return token.trim().split(".").length === 3;
+}
+
+function resolveAuthHeaders(token: string): Record<string, string> {
+  const mode = optionalEnv("DASHBOARD_API_AUTH_MODE", "auto").toLowerCase();
+  if (mode === "bearer") {
+    return { Authorization: `Bearer ${token}` };
+  }
+  if (mode === "api_key") {
+    return { "X-API-Key": token };
+  }
+  return looksLikeJwt(token) ? { Authorization: `Bearer ${token}` } : { "X-API-Key": token };
+}
+
+function extractErrorMessage(payload: unknown, status: number): string {
+  if (typeof payload === "string" && payload.trim()) {
+    return payload;
+  }
+
+  if (payload && typeof payload === "object") {
+    const data = payload as Record<string, unknown>;
+    const detail = data.detail;
+    if (typeof detail === "string" && detail.trim()) {
+      return detail;
+    }
+    if (detail && typeof detail === "object") {
+      const detailObj = detail as Record<string, unknown>;
+      if (typeof detailObj.message === "string" && detailObj.message.trim()) {
+        return detailObj.message;
+      }
+      return JSON.stringify(detailObj);
+    }
+
+    const error = data.error;
+    if (typeof error === "string" && error.trim()) {
+      return error;
+    }
+    if (error && typeof error === "object") {
+      const errorObj = error as Record<string, unknown>;
+      if (typeof errorObj.message === "string" && errorObj.message.trim()) {
+        return errorObj.message;
+      }
+      return JSON.stringify(errorObj);
+    }
+
+    return JSON.stringify(data);
+  }
+
+  return `Backend request failed: ${status}`;
+}
 
 export async function backendFetch<T>(
   path: string,
@@ -15,11 +67,12 @@ export async function backendFetch<T>(
   }
 
   const requestId = createRequestId();
+  const authHeaders = resolveAuthHeaders(token);
   const response = await fetch(url.toString(), {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...authHeaders,
       "X-Request-Id": requestId,
       ...(init.headers ?? {}),
     },
@@ -27,12 +80,21 @@ export async function backendFetch<T>(
   });
 
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  const traceId = payload?.trace_id ?? response.headers.get("X-Request-Id");
+  let payload: unknown = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text;
+    }
+  }
+
+  const payloadObj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const traceId = payloadObj.trace_id ?? response.headers.get("X-Request-Id");
 
   if (!response.ok) {
-    const message = payload?.detail ?? payload?.error ?? `Backend request failed: ${response.status}`;
-    throw new Error(`${message} (trace_id=${traceId ?? "n/a"})`);
+    const message = extractErrorMessage(payload, response.status);
+    throw new Error(`HTTP ${response.status}: ${message} (trace_id=${traceId ?? "n/a"})`);
   }
 
   return {
