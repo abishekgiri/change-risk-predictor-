@@ -263,7 +263,7 @@ class JiraClient:
                 {
                     "project_key": project_key,
                     "name": str(row.get("name") or project_key),
-                    "project_id": str(row.get("id") or "") or None,
+                    "project_id": str(project_id) if (project_id := row.get("id")) else None,
                 }
             )
         projects.sort(key=lambda item: item.get("project_key") or "")
