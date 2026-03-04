@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi.testclient import TestClient
 
+from releasegate.audit.overrides import record_override
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.correlation.enforcement import compute_release_correlation_id
 from releasegate.config import DB_PATH
@@ -106,6 +107,22 @@ def _seed_allowed_decision(
     return AuditRecorder.record_with_context(decision, repo=repo, pr_number=pr_number)
 
 
+def _deployment_link_row(tenant_id: str, deployment_event_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT contract_verdict, contract_mode, violation_codes_json
+            FROM deployment_decision_links
+            WHERE tenant_id = ? AND deployment_event_id = ?
+            """,
+            (tenant_id, deployment_event_id),
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
 def test_deploy_gate_allows_when_decision_and_correlation_match(monkeypatch):
     repo = f"corr-{uuid.uuid4().hex[:8]}"
     issue_key = "RG-501"
@@ -113,7 +130,7 @@ def test_deploy_gate_allows_when_decision_and_correlation_match(monkeypatch):
     decision = _seed_allowed_decision(repo, 28, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -152,7 +169,7 @@ def test_deploy_gate_blocks_when_correlation_id_missing_by_default(monkeypatch):
     decision = _seed_allowed_decision(repo, 31, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -183,7 +200,7 @@ def test_deploy_gate_can_derive_correlation_when_policy_override_enabled(monkeyp
     decision = _seed_allowed_decision(repo, 32, issue_key, commit_sha)
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -215,7 +232,7 @@ def test_deploy_gate_blocks_on_commit_mismatch(monkeypatch):
     decision = _seed_allowed_decision(repo, 29, issue_key, "1111111111111111111111111111111111111111")
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -254,7 +271,7 @@ def test_deploy_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -278,6 +295,161 @@ def test_deploy_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
     assert body["allow"] is False
     assert body["status"] == "BLOCKED"
     assert body["reason_code"] == "SIGNAL_STALE"
+
+
+def test_correlation_authorize_strict_mode_blocks_missing_ticket(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_CORRELATION_STRICT", "true")
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    commit_sha = "f" * 40
+    decision = _seed_allowed_decision(repo, 90, "RG-620", commit_sha)
+    deployment_event_id = f"deploy-{uuid.uuid4().hex}"
+
+    resp = client.post(
+        "/correlation/deployments/authorize",
+        json={
+            "tenant_id": "tenant-test",
+            "deployment_event_id": deployment_event_id,
+            "repo": repo,
+            "environment": "prod",
+            "service": "payments-api",
+            "decision_id": decision.decision_id,
+            "commit_sha": commit_sha,
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "MISSING_JIRA_TICKET"
+    assert body["contract_mode"] == "STRICT"
+    assert body["contract_verdict"] == "DENY"
+    assert "MISSING_JIRA_TICKET" in body["violations"]
+    assert _deployment_link_row("tenant-test", deployment_event_id) is not None
+
+
+def test_correlation_ingest_audit_mode_records_violations_without_blocking(monkeypatch):
+    monkeypatch.delenv("RELEASEGATE_CORRELATION_STRICT", raising=False)
+    monkeypatch.delenv("CORRELATION_STRICT", raising=False)
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-621"
+    commit_sha = "e" * 40
+    decision = _seed_allowed_decision(repo, 91, issue_key, commit_sha)
+    deployment_event_id = f"deploy-{uuid.uuid4().hex}"
+
+    resp = client.post(
+        "/correlation/deployments/ingest",
+        json={
+            "tenant_id": "tenant-test",
+            "deployment_event_id": deployment_event_id,
+            "repo": repo,
+            "environment": "prod",
+            "service": "payments-api",
+            "decision_id": decision.decision_id,
+            "jira_issue_id": issue_key,
+            "jira_ticket_approved": False,
+            "commit_sha": commit_sha,
+            "source": "github-actions",
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["allow"] is True
+    assert body["status"] == "ALLOWED"
+    assert body["reason_code"] == "CORRELATION_CONTRACT_VIOLATION"
+    assert body["contract_mode"] == "AUDIT"
+    assert body["contract_verdict"] == "VIOLATION"
+    assert "JIRA_TICKET_NOT_APPROVED" in body["violations"]
+
+    row = _deployment_link_row("tenant-test", deployment_event_id)
+    assert row is not None
+    assert row[0] == "VIOLATION"
+    assert row[1] == "AUDIT"
+
+
+def test_correlation_authorize_blocks_when_active_override_exists(monkeypatch):
+    monkeypatch.setenv("RELEASEGATE_CORRELATION_STRICT", "true")
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-622"
+    commit_sha = "d" * 40
+    decision = _seed_allowed_decision(repo, 92, issue_key, commit_sha)
+    record_override(
+        repo=repo,
+        pr_number=92,
+        issue_key=issue_key,
+        decision_id=decision.decision_id,
+        actor="override-user",
+        reason="Temporary override",
+        idempotency_key=f"idem-{uuid.uuid4().hex}",
+        tenant_id="tenant-test",
+        target_type="issue",
+        target_id=issue_key,
+        ttl_seconds=3600,
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        requested_by="override-user",
+        approved_by="override-user",
+    )
+    deployment_event_id = f"deploy-{uuid.uuid4().hex}"
+
+    resp = client.post(
+        "/correlation/deployments/authorize",
+        json={
+            "tenant_id": "tenant-test",
+            "deployment_event_id": deployment_event_id,
+            "repo": repo,
+            "environment": "prod",
+            "service": "payments-api",
+            "decision_id": decision.decision_id,
+            "jira_issue_id": issue_key,
+            "jira_ticket_approved": True,
+            "commit_sha": commit_sha,
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "OVERRIDE_ACTIVE"
+    assert body["contract_verdict"] == "DENY"
+
+
+def test_correlation_ingest_idempotent_replay_for_same_deployment_event(monkeypatch):
+    monkeypatch.delenv("RELEASEGATE_CORRELATION_STRICT", raising=False)
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-623"
+    commit_sha = "c" * 40
+    decision = _seed_allowed_decision(repo, 93, issue_key, commit_sha)
+    deployment_event_id = f"deploy-{uuid.uuid4().hex}"
+    body = {
+        "tenant_id": "tenant-test",
+        "deployment_event_id": deployment_event_id,
+        "repo": repo,
+        "environment": "prod",
+        "service": "payments-api",
+        "decision_id": decision.decision_id,
+        "jira_issue_id": issue_key,
+        "jira_ticket_approved": True,
+        "commit_sha": commit_sha,
+        "source": "github-actions",
+    }
+
+    first = client.post(
+        "/correlation/deployments/ingest",
+        json=body,
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    second = client.post(
+        "/correlation/deployments/ingest",
+        json=body,
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["allow"] is True
+    assert first.json()["replayed"] is False
+    assert second.json()["replayed"] is True
 
 
 def test_incident_close_gate_blocks_when_deploy_history_missing():
@@ -326,7 +498,7 @@ def test_incident_close_gate_blocks_stale_signal_in_strict_mode(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -365,7 +537,7 @@ def test_incident_close_gate_allows_with_valid_deploy_history(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -444,7 +616,7 @@ def test_deploy_gate_idempotency_replays_same_response(monkeypatch):
         env="prod",
     )
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -540,7 +712,7 @@ def test_deploy_gate_idempotency_key_conflict_returns_409(monkeypatch):
         env="prod",
     )
     monkeypatch.setattr(
-        "releasegate.correlation.enforcement.get_active_policy_release",
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
         lambda **kwargs: {"active_release_id": "release-1"},
     )
 
@@ -596,7 +768,7 @@ def test_deploy_gate_strict_fail_closed_on_policy_lookup_timeout(monkeypatch):
     def _timeout(**kwargs):
         raise TimeoutError("policy lookup timeout")
 
-    monkeypatch.setattr("releasegate.correlation.enforcement.get_active_policy_release", _timeout)
+    monkeypatch.setattr("releasegate.correlation.enforcement.resolve_effective_policy_release", _timeout)
 
     resp = client.post(
         "/gate/deploy/check",
@@ -618,6 +790,48 @@ def test_deploy_gate_strict_fail_closed_on_policy_lookup_timeout(monkeypatch):
     assert body["allow"] is False
     assert body["status"] == "BLOCKED"
     assert body["reason_code"] == "PROVIDER_TIMEOUT"
+
+
+def test_deploy_gate_blocks_when_signal_attestation_required(monkeypatch):
+    repo = f"corr-{uuid.uuid4().hex[:8]}"
+    issue_key = "RG-516"
+    commit_sha = "cccccccccccccccccccccccccccccccccccccccc"
+    decision = _seed_allowed_decision(repo, 40, issue_key, commit_sha)
+    correlation_id = compute_release_correlation_id(
+        issue_key=issue_key,
+        repo=repo,
+        commit_sha=commit_sha,
+        env="prod",
+    )
+
+    monkeypatch.setattr(
+        "releasegate.correlation.enforcement.resolve_effective_policy_release",
+        lambda **kwargs: {"active_release_id": "release-1"},
+    )
+
+    resp = client.post(
+        "/gate/deploy/check",
+        json={
+            "tenant_id": "tenant-test",
+            "decision_id": decision.decision_id,
+            "issue_key": issue_key,
+            "correlation_id": correlation_id,
+            "deploy_id": "deploy-signal-required",
+            "repo": repo,
+            "env": "prod",
+            "commit_sha": commit_sha,
+            "policy_overrides": {
+                "strict_fail_closed": True,
+                "signals": {"require_attestation_record": True},
+            },
+        },
+        headers=jwt_headers(scopes=["enforcement:write"]),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allow"] is False
+    assert body["status"] == "BLOCKED"
+    assert body["reason_code"] == "MISSING_SIGNAL"
 
 
 def test_incident_gate_strict_fail_closed_on_evidence_lookup_timeout(monkeypatch):

@@ -20,9 +20,13 @@ from releasegate.governance.signal_freshness import (
     evaluate_risk_signal_freshness,
     resolve_signal_freshness_policy,
 )
+from releasegate.signals.attestation import (
+    evaluate_signal_attestation,
+    resolve_signal_attestation_policy,
+)
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
-from releasegate.policy.releases import get_active_policy_release
+from releasegate.rollout.rollout_service import resolve_effective_policy_release
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.utils.canonical import sha256_json
 
@@ -441,6 +445,38 @@ def evaluate_deploy_gate(
             env=normalized_env,
         ).to_dict()
 
+    attestation_policy = resolve_signal_attestation_policy(
+        policy_overrides=overrides.get("signals") if isinstance(overrides.get("signals"), dict) else None,
+        strict_enabled=strict_fail_closed,
+    )
+    attestation_report = evaluate_signal_attestation(
+        tenant_id=effective_tenant,
+        signal_type="risk_eval",
+        subject_type="jira_issue",
+        subject_id=str(bound_issue or ""),
+        inline_signal={
+            "signal_source": risk_meta.get("signal_source") or risk_meta.get("source"),
+            "computed_at": risk_meta.get("computed_at"),
+            "expires_at": risk_meta.get("expires_at") or risk_meta.get("expiration"),
+            "signal_hash": risk_meta.get("signal_hash"),
+            "payload": risk_meta,
+        },
+        policy=attestation_policy,
+    )
+    if attestation_report.get("stale") and attestation_report.get("should_block"):
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(attestation_report.get("reason_code") or "STALE_SIGNAL"),
+            reason=f"Deployment blocked due to invalid signal attestation: {attestation_report.get('reason')}",
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=bound_issue,
+            correlation_id=correlation_id,
+            repo=bound_repo or normalized_repo,
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=bound_commit,
+            env=normalized_env,
+        ).to_dict()
+
     if str(decision_row.get("release_status") or "").upper() != "ALLOWED":
         denied = _deny(
             tenant_id=effective_tenant,
@@ -513,10 +549,11 @@ def evaluate_deploy_gate(
         return denied.to_dict()
 
     try:
-        active_release = get_active_policy_release(
+        active_release = resolve_effective_policy_release(
             tenant_id=effective_tenant,
             policy_id="releasegate.default",
             target_env=normalized_env,
+            rollout_key=str(correlation_id or issue_key or deploy_id or commit_sha or ""),
         )
     except TimeoutError:
         strict_result = apply_strict_fail_closed(
@@ -757,6 +794,38 @@ def evaluate_incident_close_gate(
             tenant_id=effective_tenant,
             reason_code=str(freshness.get("reason_code") or "SIGNAL_STALE"),
             reason=f"Incident closure blocked due to stale risk signal: {freshness.get('reason')}",
+            decision_id=str(decision_row.get("decision_id") or ""),
+            issue_key=issue_key,
+            correlation_id=correlation_id,
+            repo=repo or decision_row.get("repo"),
+            pr_number=decision_row.get("pr_number"),
+            commit_sha=None,
+            env=env,
+        ).to_dict()
+
+    attestation_policy = resolve_signal_attestation_policy(
+        policy_overrides=overrides.get("signals") if isinstance(overrides.get("signals"), dict) else None,
+        strict_enabled=strict_fail_closed,
+    )
+    attestation_report = evaluate_signal_attestation(
+        tenant_id=effective_tenant,
+        signal_type="risk_eval",
+        subject_type="jira_issue",
+        subject_id=str(issue_key or _extract_issue_key(payload) or ""),
+        inline_signal={
+            "signal_source": risk_meta.get("signal_source") or risk_meta.get("source"),
+            "computed_at": risk_meta.get("computed_at"),
+            "expires_at": risk_meta.get("expires_at") or risk_meta.get("expiration"),
+            "signal_hash": risk_meta.get("signal_hash"),
+            "payload": risk_meta,
+        },
+        policy=attestation_policy,
+    )
+    if attestation_report.get("stale") and attestation_report.get("should_block"):
+        return _deny(
+            tenant_id=effective_tenant,
+            reason_code=str(attestation_report.get("reason_code") or "STALE_SIGNAL"),
+            reason=f"Incident closure blocked due to invalid signal attestation: {attestation_report.get('reason')}",
             decision_id=str(decision_row.get("decision_id") or ""),
             issue_key=issue_key,
             correlation_id=correlation_id,

@@ -348,6 +348,8 @@ def bulk_resign_compromised_attestations(
     if not active:
         raise ValueError("active tenant signing key not found")
     new_key_id = str(active.get("key_id") or "").strip()
+    if not new_key_id:
+        raise ValueError("active tenant signing key id missing")
 
     rows = storage.fetchall(
         """
