@@ -1013,3 +1013,5 @@ See [docs/architecture.md](docs/architecture.md) for design principles.
 For issues, questions, or feature requests, please open an issue on GitHub:
 
 https://github.com/abishekgiri/change-risk-predictor-/issues
+
+<!-- allow-path-validation-pr -->
