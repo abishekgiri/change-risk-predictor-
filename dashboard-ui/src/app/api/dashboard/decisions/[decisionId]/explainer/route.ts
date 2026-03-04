@@ -8,5 +8,5 @@ export async function GET(
 ) {
   const params = await context.params;
   const path = `/dashboard/decisions/${encodeURIComponent(params.decisionId)}/explainer`;
-  return proxyGet(request, path, ["tenant_id"]);
+  return proxyGet(request, path, ["tenant_id", "from", "to"]);
 }

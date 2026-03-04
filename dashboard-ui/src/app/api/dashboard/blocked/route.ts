@@ -3,5 +3,5 @@ import { NextRequest } from "next/server";
 import { proxyGet } from "@/lib/proxy";
 
 export async function GET(request: NextRequest) {
-  return proxyGet(request, "/dashboard/blocked", ["tenant_id", "limit", "cursor"]);
+  return proxyGet(request, "/dashboard/blocked", ["tenant_id", "from", "to", "limit", "cursor"]);
 }

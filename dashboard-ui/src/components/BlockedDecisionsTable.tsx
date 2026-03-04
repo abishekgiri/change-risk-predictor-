@@ -13,11 +13,29 @@ interface BlockedResponse {
 
 interface Props {
   tenantId: string;
+  fromTs?: string | null;
+  toTs?: string | null;
   initialItems: BlockedDecisionItem[];
   initialCursor?: string | null;
 }
 
-export function BlockedDecisionsTable({ tenantId, initialItems, initialCursor = null }: Props) {
+function scopedDecisionHref(decisionId: string, tenantId: string, fromTs?: string | null, toTs?: string | null): string {
+  const params = new URLSearchParams();
+  if (tenantId) params.set("tenant_id", tenantId);
+  if (fromTs) params.set("from", fromTs);
+  if (toTs) params.set("to", toTs);
+  const query = params.toString();
+  if (!query) return `/decisions/${decisionId}`;
+  return `/decisions/${decisionId}?${query}`;
+}
+
+export function BlockedDecisionsTable({
+  tenantId,
+  fromTs = null,
+  toTs = null,
+  initialItems,
+  initialCursor = null,
+}: Props) {
   const [items, setItems] = useState<BlockedDecisionItem[]>(initialItems);
   const [cursor, setCursor] = useState<string | null>(initialCursor);
   const [loading, setLoading] = useState(false);
@@ -51,7 +69,7 @@ export function BlockedDecisionsTable({ tenantId, initialItems, initialCursor = 
                 <td className="py-2">
                   <a
                     className="text-indigo-600 hover:underline"
-                    href={`/decisions/${item.decision_id}`}
+                    href={scopedDecisionHref(item.decision_id, tenantId, fromTs, toTs)}
                     data-testid="blocked-row-link"
                   >
                     View
@@ -75,8 +93,15 @@ export function BlockedDecisionsTable({ tenantId, initialItems, initialCursor = 
               setLoading(true);
               setError(null);
               try {
+                const params = new URLSearchParams({
+                  tenant_id: tenantId,
+                  limit: "25",
+                  cursor,
+                });
+                if (fromTs) params.set("from", fromTs);
+                if (toTs) params.set("to", toTs);
                 const next = await callDashboardApi<BlockedResponse>(
-                  `/api/dashboard/blocked?tenant_id=${encodeURIComponent(tenantId)}&limit=25&cursor=${encodeURIComponent(cursor)}`,
+                  `/api/dashboard/blocked?${params.toString()}`,
                 );
                 setItems((prev) => [...prev, ...(next.items ?? [])]);
                 setCursor(next.next_cursor || null);

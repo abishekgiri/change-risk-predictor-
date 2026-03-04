@@ -3,7 +3,7 @@ import { KpiCard } from "@/components/KpiCard";
 import { LineChartCard } from "@/components/LineChartCard";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
-import { resolveTenantId } from "@/lib/tenant";
+import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DashboardAlerts, DashboardIntegrity } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -11,18 +11,24 @@ export const dynamic = "force-dynamic";
 export default async function IntegrityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tenant_id?: string | string[] }>;
+  searchParams: Promise<{
+    tenant_id?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+    window_days?: string | string[];
+  }>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
+  const scope = resolveDashboardScope(resolvedSearchParams);
+  const baseQuery = scopeToQuery(scope);
 
   const integrity = await backendFetch<DashboardIntegrity>("/dashboard/integrity", {
     method: "GET",
-    query: { tenant_id: tenantId, window_days: 30 },
+    query: baseQuery,
   });
   const alerts = await backendFetch<DashboardAlerts>("/dashboard/alerts", {
     method: "GET",
-    query: { tenant_id: tenantId, window_days: 30 },
+    query: baseQuery,
   });
 
   const latest = integrity.data.trend[integrity.data.trend.length - 1];
@@ -40,7 +46,7 @@ export default async function IntegrityPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Integrity Trends</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {tenantId}</p>
+          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
         <TraceInfo traceId={integrity.data.trace_id ?? integrity.traceId} />
       </div>

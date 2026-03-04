@@ -1,25 +1,30 @@
 import { PolicyDiffWorkbench } from "@/components/PolicyDiffWorkbench";
-import { resolveTenantId } from "@/lib/tenant";
+import { resolveDashboardScope } from "@/lib/dashboard-scope";
 
 export const dynamic = "force-dynamic";
 
 export default async function PolicyDiffPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tenant_id?: string | string[] }>;
+  searchParams: Promise<{
+    tenant_id?: string | string[];
+    from?: string | string[];
+    to?: string | string[];
+    window_days?: string | string[];
+  }>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
+  const scope = resolveDashboardScope(resolvedSearchParams);
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-slate-900">Policy Diff</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Compare active vs staged policy contracts for tenant: {tenantId}
+          Compare active vs staged policy contracts for tenant: {scope.tenantId}
         </p>
       </div>
-      <PolicyDiffWorkbench tenantId={tenantId} />
+      <PolicyDiffWorkbench tenantId={scope.tenantId} />
     </div>
   );
 }

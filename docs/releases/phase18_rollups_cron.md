@@ -20,3 +20,9 @@ Run nightly rollup backfill to keep dashboard trends current.
 
 - `days=2` is intentional to include late-arriving events.
 - The endpoint is idempotent and safe to retry.
+
+## Production Runtime Requirements
+
+- `RELEASEGATE_ALLOWED_ORIGINS` must be set to a comma-separated allowlist for browser clients.
+- `RELEASEGATE_INTERNAL_SERVICE_KEY` must be set for service-to-service dashboard access.
+- `RELEASEGATE_JWT_SECRET` and `RELEASEGATE_KEY_ENCRYPTION_SECRET` must be set for production startup.
