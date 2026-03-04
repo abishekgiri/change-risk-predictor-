@@ -708,6 +708,26 @@ class OnboardingSetupResponse(BaseModel):
     data: OnboardingStatusData
 
 
+class OnboardingActivationRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    mode: str = "simulation"
+    canary_pct: Optional[int] = None
+
+
+class OnboardingActivationData(BaseModel):
+    tenant_id: str
+    mode: str = "simulation"
+    canary_pct: Optional[int] = None
+    applied: bool = False
+    updated_at: Optional[str] = None
+
+
+class OnboardingActivationResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingActivationData
+
+
 class SimulationRunRequest(BaseModel):
     tenant_id: Optional[str] = None
     lookback_days: int = 30
@@ -3008,6 +3028,79 @@ def onboarding_setup_endpoint(
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
         "data": status_payload,
+    }
+
+
+@app.get("/onboarding/activation", response_model=OnboardingActivationResponse)
+def onboarding_activation_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import get_onboarding_activation
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    payload = get_onboarding_activation(tenant_id=effective_tenant)
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": payload,
+    }
+
+
+@app.post("/onboarding/activation", response_model=OnboardingActivationResponse)
+def onboarding_activation_update_endpoint(
+    request: Request,
+    response: Response,
+    payload: OnboardingActivationRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import save_onboarding_activation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        activation_payload = save_onboarding_activation(
+            tenant_id=effective_tenant,
+            mode=payload.mode,
+            canary_pct=payload.canary_pct,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="onboarding_activation_apply",
+        target_type="onboarding",
+        target_id=effective_tenant,
+        metadata={
+            "mode": activation_payload.get("mode"),
+            "canary_pct": activation_payload.get("canary_pct"),
+        },
+    )
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": activation_payload,
     }
 
 

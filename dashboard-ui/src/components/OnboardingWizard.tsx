@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import type {
+  OnboardingActivation,
   JiraProject,
   JiraProjectsDiscoveryResponse,
   JiraTransitionsDiscoveryResponse,
@@ -41,11 +42,14 @@ export function OnboardingWizard() {
   const [busyWorkflows, setBusyWorkflows] = useState(false);
   const [busyTransitions, setBusyTransitions] = useState(false);
   const [simulationLoading, setSimulationLoading] = useState(false);
+  const [activationLoading, setActivationLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
+  const [activationError, setActivationError] = useState<string | null>(null);
 
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
+  const [activationStatus, setActivationStatus] = useState<OnboardingActivation | null>(null);
   const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
   const [projects, setProjects] = useState<JiraProject[]>([]);
   const [workflows, setWorkflows] = useState<JiraWorkflow[]>([]);
@@ -59,6 +63,14 @@ export function OnboardingWizard() {
   const [canaryPct, setCanaryPct] = useState<number>(10);
 
   const onboardingCompleted = Boolean(status?.onboarding_completed);
+  const activeMode = activationStatus?.mode || status?.config.mode || "simulation";
+  const activeCanaryPct =
+    activationStatus?.mode === "canary"
+      ? activationStatus?.canary_pct
+      : status?.config.mode === "canary"
+        ? status?.config.canary_pct
+        : null;
+  const activationUpdatedAt = activationStatus?.updated_at || status?.config.updated_at || null;
 
   const loadLastSimulation = async () => {
     try {
@@ -68,6 +80,17 @@ export function OnboardingWizard() {
       setSimulationResult(payload);
     } catch {
       setSimulationResult(null);
+    }
+  };
+
+  const loadActivationStatus = async () => {
+    try {
+      const payload = await fetchJson<OnboardingActivation>(
+        `/api/dashboard/onboarding/activation?tenant_id=${encodeURIComponent(tenantId)}`,
+      );
+      setActivationStatus(payload);
+    } catch {
+      setActivationStatus(null);
     }
   };
 
@@ -160,6 +183,7 @@ export function OnboardingWizard() {
         await loadTransitions(statusData.config.workflow_ids);
       }
       await loadLastSimulation();
+      await loadActivationStatus();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load onboarding state");
     } finally {
@@ -190,6 +214,13 @@ export function OnboardingWizard() {
         }),
       });
       setStatus(payload);
+      setActivationStatus({
+        tenant_id: payload.tenant_id,
+        mode: payload.config.mode,
+        canary_pct: payload.config.canary_pct,
+        applied: payload.onboarding_completed,
+        updated_at: payload.config.updated_at,
+      });
       setSuccess("Onboarding configuration saved.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save onboarding setup");
@@ -217,6 +248,57 @@ export function OnboardingWizard() {
       setSimulationError(runError instanceof Error ? runError.message : "Failed to run historical simulation");
     } finally {
       setSimulationLoading(false);
+    }
+  };
+
+  const applyActivation = async () => {
+    setActivationError(null);
+    setSuccess(null);
+
+    if (mode === "canary" && (!Number.isFinite(canaryPct) || canaryPct < 1 || canaryPct > 100)) {
+      setActivationError("Canary percentage must be between 1 and 100.");
+      return;
+    }
+
+    if (typeof window !== "undefined" && mode !== "simulation") {
+      const confirmed = window.confirm(
+        mode === "strict"
+          ? "Strict mode enforces 100% of protected transitions. Continue?"
+          : `Canary mode enforces ${canaryPct}% of protected transitions. Continue?`,
+      );
+      if (!confirmed) return;
+    }
+
+    setActivationLoading(true);
+    try {
+      const payload = await fetchJson<OnboardingActivation>("/api/dashboard/onboarding/activation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenant_id: tenantId,
+          mode,
+          canary_pct: mode === "canary" ? canaryPct : null,
+        }),
+      });
+      setActivationStatus(payload);
+      setStatus((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          onboarding_completed: true,
+          config: {
+            ...current.config,
+            mode: payload.mode,
+            canary_pct: payload.canary_pct,
+            updated_at: payload.updated_at || current.config.updated_at,
+          },
+        };
+      });
+      setSuccess("Activation mode applied.");
+    } catch (applyError) {
+      setActivationError(applyError instanceof Error ? applyError.message : "Failed to apply activation mode");
+    } finally {
+      setActivationLoading(false);
     }
   };
 
@@ -453,6 +535,33 @@ export function OnboardingWizard() {
         ) : (
           <p className="mt-3 text-sm text-slate-500">No historical simulation run yet.</p>
         )}
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">7. Activation Ladder</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Apply the selected mode to transition from dry-run to controlled enforcement.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void applyActivation()}
+            disabled={activationLoading}
+            className="rounded-md border border-slate-300 bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
+          >
+            {activationLoading ? "Applying..." : "Apply activation mode"}
+          </button>
+        </div>
+        <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+          <p>
+            Current mode: <span className="font-medium text-slate-900">{activeMode}</span>
+            {activeMode === "canary" && activeCanaryPct ? ` (${activeCanaryPct}%)` : ""}
+          </p>
+          {activationUpdatedAt ? <p className="mt-1 text-xs text-slate-500">Last updated: {activationUpdatedAt}</p> : null}
+        </div>
+        {activationError ? <p className="mt-3 text-sm text-rose-700">{activationError}</p> : null}
       </section>
 
       <div className="flex items-center gap-3">
