@@ -17,6 +17,9 @@ DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 90
 DEFAULT_BLOCKED_LIMIT = 25
 MAX_BLOCKED_LIMIT = 100
+DEFAULT_OVERRIDES_GROUP_BY = "actor"
+DEFAULT_OVERRIDES_LIMIT = 25
+MAX_OVERRIDES_LIMIT = 100
 ALERT_BASELINE_DAYS = 7
 OVERRIDE_SPIKE_MULTIPLIER = 2.0
 DRIFT_SPIKE_MULTIPLIER = 2.0
@@ -63,6 +66,20 @@ def _normalize_limit(limit: int) -> int:
     parsed = int(limit or DEFAULT_BLOCKED_LIMIT)
     if parsed < 1 or parsed > MAX_BLOCKED_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_BLOCKED_LIMIT}")
+    return parsed
+
+
+def _normalize_overrides_group_by(group_by: str) -> str:
+    normalized = str(group_by or DEFAULT_OVERRIDES_GROUP_BY).strip().lower()
+    if normalized not in {"actor", "workflow", "rule"}:
+        raise ValueError("group_by must be one of actor, workflow, rule")
+    return normalized
+
+
+def _normalize_overrides_limit(limit: int) -> int:
+    parsed = int(limit or DEFAULT_OVERRIDES_LIMIT)
+    if parsed < 1 or parsed > MAX_OVERRIDES_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_OVERRIDES_LIMIT}")
     return parsed
 
 
@@ -128,6 +145,44 @@ def _coerce_date_utc(value: date | datetime | str) -> date:
         return date.fromisoformat(raw)
     except ValueError as exc:
         raise ValueError("date_utc must be an ISO-8601 date") from exc
+
+
+def _parse_required_datetime(value: str, *, field_name: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp")
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_override_window(
+    *,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+) -> Tuple[datetime, datetime]:
+    now = _utc_now()
+    from_dt = _parse_required_datetime(from_ts, field_name="from") if str(from_ts or "").strip() else None
+    to_dt = _parse_required_datetime(to_ts, field_name="to") if str(to_ts or "").strip() else None
+
+    if from_dt is None and to_dt is None:
+        to_dt = now
+        from_dt = to_dt - timedelta(days=DEFAULT_WINDOW_DAYS)
+    elif from_dt is None and to_dt is not None:
+        from_dt = to_dt - timedelta(days=DEFAULT_WINDOW_DAYS)
+    elif from_dt is not None and to_dt is None:
+        to_dt = now
+
+    if from_dt is None or to_dt is None:
+        raise ValueError("invalid override window")
+    if from_dt > to_dt:
+        raise ValueError("from must be before to")
+    return from_dt, to_dt
 
 
 def _override_rate_from_counts(*, override_count: int, decision_count: int) -> float:
@@ -333,6 +388,55 @@ def _collect_alert_counts(alerts: List[Dict[str, Any]]) -> Dict[str, int]:
         if severity in counts:
             counts[severity] += 1
     return counts
+
+
+def _extract_policy_binding(payload: Dict[str, Any]) -> Dict[str, Any]:
+    bindings = payload.get("policy_bindings")
+    if isinstance(bindings, list):
+        for item in bindings:
+            if isinstance(item, dict):
+                return item
+    return {}
+
+
+def _derive_override_actor(row: Dict[str, Any]) -> str:
+    for key in ("actor", "requested_by", "approved_by"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def _derive_override_workflow_key(row: Dict[str, Any], payload: Dict[str, Any], request: Dict[str, Any]) -> str:
+    overrides = request.get("context_overrides") if isinstance(request.get("context_overrides"), dict) else {}
+    for value in (
+        overrides.get("workflow_id"),
+        request.get("workflow_id"),
+        row.get("transition_id"),
+        request.get("transition_id"),
+        row.get("target_id") if str(row.get("target_type") or "").strip() == "transition" else None,
+    ):
+        candidate = str(value or "").strip()
+        if candidate:
+            return candidate
+    return "unknown"
+
+
+def _derive_override_rule_key(row: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    binding = _extract_policy_binding(payload)
+    policy_id = str(binding.get("policy_id") or row.get("policy_id") or "").strip()
+    policy_version = str(binding.get("policy_version") or row.get("policy_version") or "").strip()
+    if policy_id and policy_version:
+        return f"{policy_id}:{policy_version}"
+    if policy_id:
+        return policy_id
+    policy_hash = str(binding.get("policy_hash") or row.get("policy_hash") or "").strip()
+    if policy_hash:
+        return policy_hash
+    reason_code = str(payload.get("reason_code") or "").strip()
+    if reason_code:
+        return f"reason:{reason_code}"
+    return "unknown"
 
 
 def _encode_blocked_cursor(*, created_at: str, decision_id: str) -> str:
