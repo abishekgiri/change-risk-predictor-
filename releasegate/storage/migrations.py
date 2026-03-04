@@ -2610,6 +2610,33 @@ def _migration_20260311_035_governance_query_indexes(cursor) -> None:
     )
 
 
+def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_daily_metrics (
+            tenant_id TEXT NOT NULL,
+            date_utc TEXT NOT NULL,
+            integrity_score REAL NOT NULL,
+            drift_index REAL NOT NULL,
+            override_rate REAL NOT NULL,
+            blocked_count INTEGER NOT NULL,
+            strict_mode_count INTEGER NOT NULL DEFAULT 0,
+            override_count INTEGER NOT NULL DEFAULT 0,
+            decision_count INTEGER NOT NULL DEFAULT 0,
+            computed_at TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, date_utc)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_daily_metrics_tenant_date
+        ON governance_daily_metrics(tenant_id, date_utc DESC)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2785,6 +2812,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260311_035_governance_query_indexes",
         description="Add governance query indexes for decision explorer and compliance exports.",
         apply=_migration_20260311_035_governance_query_indexes,
+    ),
+    Migration(
+        migration_id="20260312_036_governance_dashboard_rollups",
+        description="Add tenant-scoped governance daily rollups for dashboard trend APIs.",
+        apply=_migration_20260312_036_governance_dashboard_rollups,
     ),
 ]
 

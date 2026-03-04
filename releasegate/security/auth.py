@@ -422,7 +422,7 @@ def _authenticate_internal_service(request: Request, *, rate_profile: str) -> Au
     request.state.pre_tenant_rate_limited = True
 
     roles = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_ROLES", "operator")) or ["operator"]
-    scopes = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "enforcement:write"))
+    scopes = _split_csv(os.getenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "enforcement:write,policy:read"))
     return AuthContext(
         tenant_id=tenant_id,
         principal_id="internal_service",

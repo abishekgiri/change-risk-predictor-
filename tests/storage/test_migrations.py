@@ -52,6 +52,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260309_033_approval_orchestration" in migration_ids
         assert "20260310_034_signal_attestations" in migration_ids
         assert "20260311_035_governance_query_indexes" in migration_ids
+        assert "20260312_036_governance_dashboard_rollups" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -592,6 +593,30 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "high_risk_overrides_total",
         } <= metrics_cols
         assert metrics_pk == ["tenant_id", "date_utc", "chain_id", "actor"]
+
+        cur.execute("PRAGMA table_info(governance_daily_metrics)")
+        dashboard_metrics_info = cur.fetchall()
+        dashboard_metrics_cols = {row[1] for row in dashboard_metrics_info}
+        dashboard_metrics_pk = [
+            row[1] for row in sorted((r for r in dashboard_metrics_info if r[5] > 0), key=lambda r: r[5])
+        ]
+        assert {
+            "tenant_id",
+            "date_utc",
+            "integrity_score",
+            "drift_index",
+            "override_rate",
+            "blocked_count",
+            "strict_mode_count",
+            "override_count",
+            "decision_count",
+            "computed_at",
+            "details_json",
+        } <= dashboard_metrics_cols
+        assert dashboard_metrics_pk == ["tenant_id", "date_utc"]
+        cur.execute("PRAGMA index_list(governance_daily_metrics)")
+        dashboard_metrics_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_governance_daily_metrics_tenant_date" in dashboard_metrics_indexes
 
         cur.execute("PRAGMA table_info(audit_decision_replays)")
         replay_info = cur.fetchall()
