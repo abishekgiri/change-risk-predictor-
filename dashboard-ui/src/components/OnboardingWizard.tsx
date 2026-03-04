@@ -74,10 +74,14 @@ export function OnboardingWizard() {
     setBusyWorkflows(true);
     try {
       const workflowMap = new Map<string, JiraWorkflow>();
-      for (const projectKey of projectKeys) {
-        const data = await fetchJson<JiraWorkflowsDiscoveryResponse>(
-          `/api/dashboard/integrations/jira/workflows?tenant_id=${encodeURIComponent(tenantId)}&project_key=${encodeURIComponent(projectKey)}`,
-        );
+      const responses = await Promise.all(
+        projectKeys.map((projectKey) =>
+          fetchJson<JiraWorkflowsDiscoveryResponse>(
+            `/api/dashboard/integrations/jira/workflows?tenant_id=${encodeURIComponent(tenantId)}&project_key=${encodeURIComponent(projectKey)}`,
+          ),
+        ),
+      );
+      for (const data of responses) {
         for (const workflow of data.items || []) {
           workflowMap.set(workflow.workflow_id, workflow);
         }
