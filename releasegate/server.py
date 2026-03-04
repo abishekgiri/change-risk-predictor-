@@ -1799,7 +1799,8 @@ def audit_proof_pack(
                 date_utc=anchor_date,
                 tenant_id=effective_tenant,
             )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to fetch external anchor for decision %s: %s", decision_id, exc)
         external_anchor = None
 
     proof_pack_id = record_proof_pack_generation(
