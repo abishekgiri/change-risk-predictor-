@@ -6069,8 +6069,11 @@ def verify_release_attestation(
                 tenant_id=tenant_hint,
                 attestation_id=attestation_id,
             )
-        except Exception:
-            superseding_resign = None
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Attestation re-signature check failed",
+            ) from exc
     superseding_available = isinstance(superseding_resign, dict) and bool(superseding_resign)
     superseding_signature_valid = False
     superseding_key_id = ""
