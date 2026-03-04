@@ -150,8 +150,7 @@ class HttpTransparencyAnchorProvider:
     def _timeout_seconds(self) -> float:
         raw = str(os.getenv("RELEASEGATE_ANCHOR_HTTP_TIMEOUT_SECONDS") or "5").strip()
         try:
-            return max(0.1, float(raw))
-        except Exception:
+        except (ValueError, TypeError):
             return 5.0
 
     def _headers(self) -> Dict[str, str]:
