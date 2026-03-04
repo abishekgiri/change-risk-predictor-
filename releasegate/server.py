@@ -668,6 +668,46 @@ class DashboardOverridesBreakdownResponse(BaseModel):
     data: DashboardOverridesBreakdownData
 
 
+class OnboardingConfigData(BaseModel):
+    tenant_id: str
+    jira_instance_id: Optional[str] = None
+    project_keys: List[str] = Field(default_factory=list)
+    workflow_ids: List[str] = Field(default_factory=list)
+    transition_ids: List[str] = Field(default_factory=list)
+    mode: str = "simulation"
+    canary_pct: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class OnboardingStatusData(BaseModel):
+    tenant_id: str
+    onboarding_completed: bool = False
+    config: OnboardingConfigData
+
+
+class OnboardingStatusResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingStatusData
+
+
+class OnboardingSetupRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    jira_instance_id: Optional[str] = None
+    project_keys: List[str] = Field(default_factory=list)
+    workflow_ids: List[str] = Field(default_factory=list)
+    transition_ids: List[str] = Field(default_factory=list)
+    mode: str = "simulation"
+    canary_pct: Optional[int] = None
+
+
+class OnboardingSetupResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingStatusData
+
+
 # --- Config ---
 # Use user's preferred default
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -2881,6 +2921,69 @@ def dashboard_rollups_backfill_endpoint(
     return {
         "ok": True,
         **result,
+    }
+
+
+@app.get("/onboarding/status", response_model=OnboardingStatusResponse)
+def onboarding_status_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import get_onboarding_status
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    payload = get_onboarding_status(tenant_id=effective_tenant)
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": payload,
+    }
+
+
+@app.post("/onboarding/setup", response_model=OnboardingSetupResponse)
+def onboarding_setup_endpoint(
+    request: Request,
+    response: Response,
+    payload: OnboardingSetupRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import save_onboarding_config
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        status_payload = save_onboarding_config(
+            tenant_id=effective_tenant,
+            jira_instance_id=payload.jira_instance_id,
+            project_keys=payload.project_keys,
+            workflow_ids=payload.workflow_ids,
+            transition_ids=payload.transition_ids,
+            mode=payload.mode,
+            canary_pct=payload.canary_pct,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": status_payload,
     }
 
 

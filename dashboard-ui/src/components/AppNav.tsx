@@ -12,6 +12,7 @@ import {
 } from "@/lib/dashboard-scope";
 
 const links = [
+  { href: "/onboarding", label: "Onboarding" },
   { href: "/overview", label: "Overview" },
   { href: "/integrity", label: "Integrity" },
   { href: "/overrides", label: "Overrides" },

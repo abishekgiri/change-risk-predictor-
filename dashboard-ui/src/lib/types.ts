@@ -159,3 +159,64 @@ export interface DashboardOverridesBreakdown {
   total_overrides: number;
   rows: OverrideBreakdownRow[];
 }
+
+export type OnboardingMode = "simulation" | "canary" | "strict";
+
+export interface JiraProject {
+  project_key: string;
+  name: string;
+  project_id?: string | null;
+}
+
+export interface JiraWorkflow {
+  workflow_id: string;
+  workflow_name: string;
+  project_keys: string[];
+}
+
+export interface JiraWorkflowTransition {
+  transition_id: string;
+  transition_name: string;
+  workflow_id: string;
+  workflow_name: string;
+  project_keys: string[];
+}
+
+export interface OnboardingConfig {
+  tenant_id: string;
+  jira_instance_id: string | null;
+  project_keys: string[];
+  workflow_ids: string[];
+  transition_ids: string[];
+  mode: OnboardingMode;
+  canary_pct: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface OnboardingStatus {
+  tenant_id: string;
+  onboarding_completed: boolean;
+  config: OnboardingConfig;
+}
+
+export interface JiraProjectsDiscoveryResponse {
+  tenant_id: string;
+  source: string;
+  items: JiraProject[];
+}
+
+export interface JiraWorkflowsDiscoveryResponse {
+  tenant_id: string;
+  project_key: string | null;
+  source: string;
+  items: JiraWorkflow[];
+}
+
+export interface JiraTransitionsDiscoveryResponse {
+  tenant_id: string;
+  workflow_id: string;
+  project_key: string | null;
+  source: string;
+  items: JiraWorkflowTransition[];
+}
