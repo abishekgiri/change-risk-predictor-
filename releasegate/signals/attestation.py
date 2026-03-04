@@ -53,7 +53,6 @@ def resolve_signal_attestation_policy(
     overrides = policy_overrides if isinstance(policy_overrides, dict) else {}
     max_age_raw = (
         overrides.get("max_age_seconds")
-        or os.getenv("RELEASEGATE_MAX_SIGNAL_AGE_SECONDS")
         or os.getenv("RELEASEGATE_SIGNAL_MAX_AGE_SECONDS")
         or "86400"
     )
@@ -231,7 +230,7 @@ def get_latest_signal_attestation(
             parsed = json.loads(payload_raw)
             if isinstance(parsed, dict):
                 payload_json = parsed
-        except Exception:
+        except json.JSONDecodeError:
             payload_json = {}
     enriched = dict(row)
     enriched["payload_json"] = payload_json

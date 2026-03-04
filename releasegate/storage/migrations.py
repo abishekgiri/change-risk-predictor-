@@ -2570,7 +2570,6 @@ def _migration_20260310_034_signal_attestations(cursor) -> None:
         """
     )
 
-
 def _migration_20260311_035_governance_query_indexes(cursor) -> None:
     cursor.execute(
         """
@@ -2635,7 +2634,6 @@ def _migration_20260312_036_governance_dashboard_rollups(cursor) -> None:
         ON governance_daily_metrics(tenant_id, date_utc DESC)
         """
     )
-
 
 MIGRATIONS: List[Migration] = [
     Migration(
