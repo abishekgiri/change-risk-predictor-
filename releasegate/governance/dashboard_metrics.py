@@ -20,6 +20,7 @@ MAX_BLOCKED_LIMIT = 100
 DEFAULT_OVERRIDES_GROUP_BY = "actor"
 DEFAULT_OVERRIDES_LIMIT = 25
 MAX_OVERRIDES_LIMIT = 100
+SAMPLE_OVERRIDE_IDS_LIMIT = 3
 ALERT_BASELINE_DAYS = 7
 OVERRIDE_SPIKE_MULTIPLIER = 2.0
 DRIFT_SPIKE_MULTIPLIER = 2.0
@@ -437,6 +438,142 @@ def _derive_override_rule_key(row: Dict[str, Any], payload: Dict[str, Any]) -> s
     if reason_code:
         return f"reason:{reason_code}"
     return "unknown"
+
+
+def get_dashboard_overrides_breakdown(
+    *,
+    tenant_id: str,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    group_by: str = DEFAULT_OVERRIDES_GROUP_BY,
+    limit: int = DEFAULT_OVERRIDES_LIMIT,
+) -> Dict[str, Any]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_group_by = _normalize_overrides_group_by(group_by)
+    bounded_limit = _normalize_overrides_limit(limit)
+    from_dt, to_dt = _parse_override_window(from_ts=from_ts, to_ts=to_ts)
+
+    rows = storage.fetchall(
+        """
+        SELECT
+            o.override_id,
+            o.decision_id,
+            o.actor,
+            o.requested_by,
+            o.approved_by,
+            o.target_type,
+            o.target_id,
+            o.created_at,
+            d.full_decision_json,
+            d.policy_hash AS decision_policy_hash,
+            l.transition_id AS link_transition_id,
+            l.policy_id AS link_policy_id,
+            l.policy_version AS link_policy_version,
+            l.policy_hash AS link_policy_hash
+        FROM audit_overrides o
+        LEFT JOIN audit_decisions d
+          ON d.tenant_id = o.tenant_id
+         AND d.decision_id = o.decision_id
+        LEFT JOIN decision_transition_links l
+          ON l.tenant_id = o.tenant_id
+         AND l.decision_id = o.decision_id
+        WHERE o.tenant_id = ?
+          AND o.created_at >= ?
+          AND o.created_at <= ?
+        ORDER BY o.created_at DESC, o.override_id ASC
+        """,
+        (
+            effective_tenant,
+            from_dt.isoformat(),
+            to_dt.isoformat(),
+        ),
+    )
+
+    buckets: Dict[str, Dict[str, Any]] = {}
+    total_overrides = 0
+    for row in rows:
+        override_id = str(row.get("override_id") or "").strip()
+        if not override_id:
+            continue
+        total_overrides += 1
+
+        payload = _parse_json(row.get("full_decision_json"))
+        request = _request_from_decision_payload(payload)
+        enriched_row = dict(row)
+        enriched_row["transition_id"] = str(row.get("link_transition_id") or "").strip()
+        enriched_row["policy_id"] = str(row.get("link_policy_id") or "").strip()
+        enriched_row["policy_version"] = str(row.get("link_policy_version") or "").strip()
+        enriched_row["policy_hash"] = (
+            str(row.get("link_policy_hash") or "").strip()
+            or str(row.get("decision_policy_hash") or "").strip()
+        )
+
+        actor_key = _derive_override_actor(enriched_row)
+        workflow_key = _derive_override_workflow_key(enriched_row, payload, request)
+        rule_key = _derive_override_rule_key(enriched_row, payload)
+        if normalized_group_by == "actor":
+            aggregate_key = actor_key
+        elif normalized_group_by == "workflow":
+            aggregate_key = workflow_key
+        else:
+            aggregate_key = rule_key
+
+        created_at_iso = _iso_datetime_or_none(row.get("created_at")) or str(row.get("created_at") or "").strip()
+        created_at_dt = _parse_iso_datetime(created_at_iso)
+
+        bucket = buckets.setdefault(
+            aggregate_key,
+            {
+                "key": aggregate_key,
+                "count": 0,
+                "workflows": set(),
+                "rules": set(),
+                "actors": set(),
+                "last_seen": None,
+                "last_seen_dt": None,
+                "sample_override_ids": [],
+            },
+        )
+        bucket["count"] += 1
+        bucket["workflows"].add(workflow_key)
+        bucket["rules"].add(rule_key)
+        bucket["actors"].add(actor_key)
+        if len(bucket["sample_override_ids"]) < SAMPLE_OVERRIDE_IDS_LIMIT:
+            bucket["sample_override_ids"].append(override_id)
+        if bucket["last_seen_dt"] is None or created_at_dt > bucket["last_seen_dt"]:
+            bucket["last_seen_dt"] = created_at_dt
+            bucket["last_seen"] = created_at_iso or created_at_dt.isoformat()
+
+    normalized_rows: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        normalized_rows.append(
+            {
+                "key": str(bucket.get("key") or "unknown"),
+                "count": int(bucket.get("count") or 0),
+                "workflows": len(bucket.get("workflows") or ()),
+                "rules": len(bucket.get("rules") or ()),
+                "actors": len(bucket.get("actors") or ()),
+                "last_seen": str(bucket.get("last_seen") or ""),
+                "sample_override_ids": list(bucket.get("sample_override_ids") or []),
+            }
+        )
+    normalized_rows.sort(
+        key=lambda item: (
+            -int(item.get("count") or 0),
+            str(item.get("key") or ""),
+        ),
+    )
+
+    return {
+        "tenant": effective_tenant,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "group_by": normalized_group_by,
+        "total_overrides": int(total_overrides),
+        "rows": normalized_rows[:bounded_limit],
+    }
 
 
 def _encode_blocked_cursor(*, created_at: str, decision_id: str) -> str:

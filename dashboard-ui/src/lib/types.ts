@@ -137,3 +137,25 @@ export interface PolicyDiffResponse {
   role_deltas: Array<Record<string, unknown> & { severity: Severity }>;
   sod_deltas: Array<Record<string, unknown> & { severity: Severity }>;
 }
+
+export type OverridesGroupBy = "actor" | "workflow" | "rule";
+
+export interface OverrideBreakdownRow {
+  key: string;
+  count: number;
+  workflows: number;
+  rules: number;
+  actors: number;
+  last_seen: string | null;
+  sample_override_ids: string[];
+}
+
+export interface DashboardOverridesBreakdown {
+  trace_id: string;
+  tenant: string;
+  from: string;
+  to: string;
+  group_by: OverridesGroupBy;
+  total_overrides: number;
+  rows: OverrideBreakdownRow[];
+}
