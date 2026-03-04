@@ -53,7 +53,6 @@ def resolve_signal_attestation_policy(
     overrides = policy_overrides if isinstance(policy_overrides, dict) else {}
     max_age_raw = (
         overrides.get("max_age_seconds")
-        or os.getenv("RELEASEGATE_MAX_SIGNAL_AGE_SECONDS")
         or os.getenv("RELEASEGATE_SIGNAL_MAX_AGE_SECONDS")
         or "86400"
     )
