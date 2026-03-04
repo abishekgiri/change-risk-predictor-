@@ -18,11 +18,10 @@ function normalizeGroupBy(value: string | string[] | undefined): OverridesGroupB
 export default async function OverridesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ tenant_id?: string | string[]; group_by?: string | string[] }>;
+  searchParams: { tenant_id?: string | string[]; group_by?: string | string[] };
 }) {
-  const resolvedSearchParams = await searchParams;
-  const tenantId = resolveTenantId(resolvedSearchParams.tenant_id);
-  const groupBy = normalizeGroupBy(resolvedSearchParams.group_by);
+  const tenantId = resolveTenantId(searchParams.tenant_id);
+  const groupBy = normalizeGroupBy(searchParams.group_by);
 
   const breakdown = await backendFetch<DashboardOverridesBreakdown>("/dashboard/overrides/breakdown", {
     method: "GET",
