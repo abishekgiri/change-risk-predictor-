@@ -161,7 +161,7 @@ def _parse_json_column(row: Dict[str, Any], key: str) -> None:
             return
         try:
             parsed = json.loads(raw)
-        except Exception:
+        except json.JSONDecodeError:
             return
         if isinstance(parsed, (dict, list)):
             row[key] = parsed
