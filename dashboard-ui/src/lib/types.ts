@@ -200,6 +200,23 @@ export interface OnboardingStatus {
   config: OnboardingConfig;
 }
 
+export interface SimulationResult {
+  tenant_id: string;
+  lookback_days: number;
+  total_transitions: number;
+  allowed: number;
+  blocked: number;
+  blocked_pct: number;
+  override_required: number;
+  risk_distribution: {
+    low: number;
+    medium: number;
+    high: number;
+  };
+  ran_at: string | null;
+  has_run: boolean;
+}
+
 export interface JiraProjectsDiscoveryResponse {
   tenant_id: string;
   source: string;

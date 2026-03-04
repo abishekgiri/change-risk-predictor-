@@ -9,9 +9,10 @@ function firstParam(value: string | string[] | null): string | undefined {
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { workflowId: string } },
+  { params }: { params: Promise<{ workflowId: string }> },
 ) {
-  const workflowId = encodeURIComponent(params.workflowId);
+  const resolvedParams = await params;
+  const workflowId = encodeURIComponent(resolvedParams.workflowId);
 
   try {
     const query: Record<string, string> = {};

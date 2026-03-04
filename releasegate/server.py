@@ -708,6 +708,30 @@ class OnboardingSetupResponse(BaseModel):
     data: OnboardingStatusData
 
 
+class SimulationRunRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    lookback_days: int = 30
+
+
+class SimulationResultData(BaseModel):
+    tenant_id: str
+    lookback_days: int = 30
+    total_transitions: int = 0
+    allowed: int = 0
+    blocked: int = 0
+    blocked_pct: float = 0.0
+    override_required: int = 0
+    risk_distribution: Dict[str, int] = Field(default_factory=lambda: {"low": 0, "medium": 0, "high": 0})
+    ran_at: Optional[str] = None
+    has_run: bool = False
+
+
+class SimulationRunResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: SimulationResultData
+
+
 # --- Config ---
 # Use user's preferred default
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -2984,6 +3008,88 @@ def onboarding_setup_endpoint(
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
         "data": status_payload,
+    }
+
+
+@app.post("/simulation/run", response_model=SimulationRunResponse)
+def simulation_run_endpoint(
+    request: Request,
+    response: Response,
+    payload: SimulationRunRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="heavy",
+    ),
+):
+    from releasegate.onboarding.simulation import run_historical_simulation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        result = run_historical_simulation(
+            tenant_id=effective_tenant,
+            lookback_days=payload.lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="onboarding_simulation_run",
+        target_type="onboarding",
+        target_id=effective_tenant,
+        metadata={
+            "lookback_days": int(result.get("lookback_days") or payload.lookback_days),
+            "total_transitions": int(result.get("total_transitions") or 0),
+            "blocked": int(result.get("blocked") or 0),
+            "override_required": int(result.get("override_required") or 0),
+        },
+    )
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": result,
+    }
+
+
+@app.get("/simulation/last", response_model=SimulationRunResponse)
+def simulation_last_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    lookback_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.simulation import get_last_historical_simulation
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        result = get_last_historical_simulation(
+            tenant_id=effective_tenant,
+            lookback_days=lookback_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": result,
     }
 
 
