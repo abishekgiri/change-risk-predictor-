@@ -9,9 +9,8 @@ function firstParam(value: string | string[] | null): string | undefined {
 
 export async function GET(
   request: NextRequest,
-  context: { params: Promise<{ workflowId: string }> },
+  { params }: { params: { workflowId: string } },
 ) {
-  const params = await context.params;
   const workflowId = encodeURIComponent(params.workflowId);
 
   try {
