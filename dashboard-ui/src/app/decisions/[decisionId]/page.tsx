@@ -9,6 +9,23 @@ import type { DecisionExplainer } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+function safeUrl(url?: string | null): string | null {
+  if (!url) return null;
+
+  try {
+    const parsed = new URL(url, "http://localhost");
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return url;
+    }
+    if (url.startsWith("/")) {
+      return url;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default async function DecisionPage({
   params,
   searchParams,
@@ -53,6 +70,7 @@ export default async function DecisionPage({
       ? `${replayPath}${replayPath.includes("?") ? "&" : "?"}token=${encodeURIComponent(replayToken)}`
       : replayPath
     : "";
+  const safeReplay = safeUrl(replayUrl);
 
   const copyBundle = [
     `decision_id=${decision.decision_id || ""}`,
@@ -89,8 +107,13 @@ export default async function DecisionPage({
             <Link href={scopedHref("/overrides")} className="text-indigo-700 hover:underline">
               View overrides
             </Link>
-            {replayUrl ? (
-              <a href={replayUrl} className="text-indigo-700 hover:underline">
+            {safeReplay ? (
+              <a
+                href={safeReplay}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-700 hover:underline"
+              >
                 Replay decision
               </a>
             ) : null}
@@ -169,22 +192,30 @@ export default async function DecisionPage({
           <h3 className="text-sm font-semibold text-slate-800">Evidence & Replay</h3>
           <div className="mt-3 space-y-2 text-sm">
             {explainer.data.evidence_links.length ? (
-              explainer.data.evidence_links.map((link, idx) => (
-                <div key={`${link.id}-${idx}`} className="rounded-md border border-slate-100 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium text-slate-900">{link.label || link.id || "evidence"}</p>
-                    {link.path ? <CopyButton value={link.path} label="Copy path" compact /> : null}
+              explainer.data.evidence_links.map((link, idx) => {
+                const safePath = safeUrl(link.path);
+                return (
+                  <div key={`${link.id}-${idx}`} className="rounded-md border border-slate-100 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium text-slate-900">{link.label || link.id || "evidence"}</p>
+                      {link.path ? <CopyButton value={link.path} label="Copy path" compact /> : null}
+                    </div>
+                    <p className="mt-1 text-xs text-slate-600">
+                      {link.type} • {link.id}
+                    </p>
+                    {safePath ? (
+                      <a
+                        href={safePath}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-1 inline-block text-xs text-indigo-700 hover:underline"
+                      >
+                        Open
+                      </a>
+                    ) : null}
                   </div>
-                  <p className="mt-1 text-xs text-slate-600">
-                    {link.type} • {link.id}
-                  </p>
-                  {link.path ? (
-                    <a href={link.path} className="mt-1 inline-block text-xs text-indigo-700 hover:underline">
-                      Open
-                    </a>
-                  ) : null}
-                </div>
-              ))
+                );
+              })
             ) : (
               <p className="text-slate-500">No evidence links.</p>
             )}
@@ -193,15 +224,17 @@ export default async function DecisionPage({
             <p className="text-sm font-medium text-slate-800">Replay</p>
             <p className="mt-1 text-xs text-slate-600">Expires: {explainer.data.replay.expires_at || "-"}</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              {replayUrl ? (
+              {safeReplay ? (
                 <a
-                  href={replayUrl}
+                  href={safeReplay}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="inline-flex rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
                 >
                   Open replay
                 </a>
               ) : null}
-              {replayUrl ? <CopyButton value={replayUrl} label="Copy replay URL" /> : null}
+              {safeReplay ? <CopyButton value={safeReplay} label="Copy replay URL" /> : null}
             </div>
           </div>
         </div>
