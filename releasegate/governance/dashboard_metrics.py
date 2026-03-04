@@ -17,6 +17,10 @@ DEFAULT_WINDOW_DAYS = 30
 MAX_WINDOW_DAYS = 90
 DEFAULT_BLOCKED_LIMIT = 25
 MAX_BLOCKED_LIMIT = 100
+DEFAULT_OVERRIDES_GROUP_BY = "actor"
+DEFAULT_OVERRIDES_LIMIT = 25
+MAX_OVERRIDES_LIMIT = 100
+SAMPLE_OVERRIDE_IDS_LIMIT = 3
 ALERT_BASELINE_DAYS = 7
 OVERRIDE_SPIKE_MULTIPLIER = 2.0
 DRIFT_SPIKE_MULTIPLIER = 2.0
@@ -63,6 +67,20 @@ def _normalize_limit(limit: int) -> int:
     parsed = int(limit or DEFAULT_BLOCKED_LIMIT)
     if parsed < 1 or parsed > MAX_BLOCKED_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_BLOCKED_LIMIT}")
+    return parsed
+
+
+def _normalize_overrides_group_by(group_by: str) -> str:
+    normalized = str(group_by or DEFAULT_OVERRIDES_GROUP_BY).strip().lower()
+    if normalized not in {"actor", "workflow", "rule"}:
+        raise ValueError("group_by must be one of actor, workflow, rule")
+    return normalized
+
+
+def _normalize_overrides_limit(limit: int) -> int:
+    parsed = int(limit or DEFAULT_OVERRIDES_LIMIT)
+    if parsed < 1 or parsed > MAX_OVERRIDES_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_OVERRIDES_LIMIT}")
     return parsed
 
 
@@ -128,6 +146,44 @@ def _coerce_date_utc(value: date | datetime | str) -> date:
         return date.fromisoformat(raw)
     except ValueError as exc:
         raise ValueError("date_utc must be an ISO-8601 date") from exc
+
+
+def _parse_required_datetime(value: str, *, field_name: str) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp")
+    candidate = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_override_window(
+    *,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+) -> Tuple[datetime, datetime]:
+    now = _utc_now()
+    from_dt = _parse_required_datetime(from_ts, field_name="from") if str(from_ts or "").strip() else None
+    to_dt = _parse_required_datetime(to_ts, field_name="to") if str(to_ts or "").strip() else None
+
+    if from_dt is None and to_dt is None:
+        to_dt = now
+        from_dt = to_dt - timedelta(days=DEFAULT_WINDOW_DAYS)
+    elif from_dt is None and to_dt is not None:
+        from_dt = to_dt - timedelta(days=DEFAULT_WINDOW_DAYS)
+    elif from_dt is not None and to_dt is None:
+        to_dt = now
+
+    if from_dt is None or to_dt is None:
+        raise ValueError("invalid override window")
+    if from_dt > to_dt:
+        raise ValueError("from must be before to")
+    return from_dt, to_dt
 
 
 def _override_rate_from_counts(*, override_count: int, decision_count: int) -> float:
@@ -333,6 +389,191 @@ def _collect_alert_counts(alerts: List[Dict[str, Any]]) -> Dict[str, int]:
         if severity in counts:
             counts[severity] += 1
     return counts
+
+
+def _extract_policy_binding(payload: Dict[str, Any]) -> Dict[str, Any]:
+    bindings = payload.get("policy_bindings")
+    if isinstance(bindings, list):
+        for item in bindings:
+            if isinstance(item, dict):
+                return item
+    return {}
+
+
+def _derive_override_actor(row: Dict[str, Any]) -> str:
+    for key in ("actor", "requested_by", "approved_by"):
+        value = str(row.get(key) or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def _derive_override_workflow_key(row: Dict[str, Any], payload: Dict[str, Any], request: Dict[str, Any]) -> str:
+    overrides = request.get("context_overrides") if isinstance(request.get("context_overrides"), dict) else {}
+    for value in (
+        overrides.get("workflow_id"),
+        request.get("workflow_id"),
+        row.get("transition_id"),
+        request.get("transition_id"),
+        row.get("target_id") if str(row.get("target_type") or "").strip() == "transition" else None,
+    ):
+        candidate = str(value or "").strip()
+        if candidate:
+            return candidate
+    return "unknown"
+
+
+def _derive_override_rule_key(row: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    binding = _extract_policy_binding(payload)
+    policy_id = str(binding.get("policy_id") or row.get("policy_id") or "").strip()
+    policy_version = str(binding.get("policy_version") or row.get("policy_version") or "").strip()
+    if policy_id and policy_version:
+        return f"{policy_id}:{policy_version}"
+    if policy_id:
+        return policy_id
+    policy_hash = str(binding.get("policy_hash") or row.get("policy_hash") or "").strip()
+    if policy_hash:
+        return policy_hash
+    reason_code = str(payload.get("reason_code") or "").strip()
+    if reason_code:
+        return f"reason:{reason_code}"
+    return "unknown"
+
+
+def get_dashboard_overrides_breakdown(
+    *,
+    tenant_id: str,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    group_by: str = DEFAULT_OVERRIDES_GROUP_BY,
+    limit: int = DEFAULT_OVERRIDES_LIMIT,
+) -> Dict[str, Any]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_group_by = _normalize_overrides_group_by(group_by)
+    bounded_limit = _normalize_overrides_limit(limit)
+    from_dt, to_dt = _parse_override_window(from_ts=from_ts, to_ts=to_ts)
+
+    rows = storage.fetchall(
+        """
+        SELECT
+            o.override_id,
+            o.decision_id,
+            o.actor,
+            o.requested_by,
+            o.approved_by,
+            o.target_type,
+            o.target_id,
+            o.created_at,
+            d.full_decision_json,
+            d.policy_hash AS decision_policy_hash,
+            l.transition_id AS link_transition_id,
+            l.policy_id AS link_policy_id,
+            l.policy_version AS link_policy_version,
+            l.policy_hash AS link_policy_hash
+        FROM audit_overrides o
+        LEFT JOIN audit_decisions d
+          ON d.tenant_id = o.tenant_id
+         AND d.decision_id = o.decision_id
+        LEFT JOIN decision_transition_links l
+          ON l.tenant_id = o.tenant_id
+         AND l.decision_id = o.decision_id
+        WHERE o.tenant_id = ?
+          AND o.created_at >= ?
+          AND o.created_at <= ?
+        ORDER BY o.created_at DESC, o.override_id ASC
+        """,
+        (
+            effective_tenant,
+            from_dt.isoformat(),
+            to_dt.isoformat(),
+        ),
+    )
+
+    buckets: Dict[str, Dict[str, Any]] = {}
+    total_overrides = 0
+    for row in rows:
+        override_id = str(row.get("override_id") or "").strip()
+        if not override_id:
+            continue
+        total_overrides += 1
+
+        payload = _parse_json(row.get("full_decision_json"))
+        request = _request_from_decision_payload(payload)
+        enriched_row = dict(row)
+        enriched_row["transition_id"] = str(row.get("link_transition_id") or "").strip()
+        enriched_row["policy_id"] = str(row.get("link_policy_id") or "").strip()
+        enriched_row["policy_version"] = str(row.get("link_policy_version") or "").strip()
+        enriched_row["policy_hash"] = (
+            str(row.get("link_policy_hash") or "").strip()
+            or str(row.get("decision_policy_hash") or "").strip()
+        )
+
+        actor_key = _derive_override_actor(enriched_row)
+        workflow_key = _derive_override_workflow_key(enriched_row, payload, request)
+        rule_key = _derive_override_rule_key(enriched_row, payload)
+        if normalized_group_by == "actor":
+            aggregate_key = actor_key
+        elif normalized_group_by == "workflow":
+            aggregate_key = workflow_key
+        else:
+            aggregate_key = rule_key
+
+        created_at_iso = _iso_datetime_or_none(row.get("created_at")) or str(row.get("created_at") or "").strip()
+        created_at_dt = _parse_iso_datetime(created_at_iso)
+
+        bucket = buckets.setdefault(
+            aggregate_key,
+            {
+                "key": aggregate_key,
+                "count": 0,
+                "workflows": set(),
+                "rules": set(),
+                "actors": set(),
+                "last_seen": None,
+                "last_seen_dt": None,
+                "sample_override_ids": [],
+            },
+        )
+        bucket["count"] += 1
+        bucket["workflows"].add(workflow_key)
+        bucket["rules"].add(rule_key)
+        bucket["actors"].add(actor_key)
+        if len(bucket["sample_override_ids"]) < SAMPLE_OVERRIDE_IDS_LIMIT:
+            bucket["sample_override_ids"].append(override_id)
+        if bucket["last_seen_dt"] is None or created_at_dt > bucket["last_seen_dt"]:
+            bucket["last_seen_dt"] = created_at_dt
+            bucket["last_seen"] = created_at_iso or created_at_dt.isoformat()
+
+    normalized_rows: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        normalized_rows.append(
+            {
+                "key": str(bucket.get("key") or "unknown"),
+                "count": int(bucket.get("count") or 0),
+                "workflows": len(bucket.get("workflows") or ()),
+                "rules": len(bucket.get("rules") or ()),
+                "actors": len(bucket.get("actors") or ()),
+                "last_seen": str(bucket.get("last_seen") or ""),
+                "sample_override_ids": list(bucket.get("sample_override_ids") or []),
+            }
+        )
+    normalized_rows.sort(
+        key=lambda item: (
+            -int(item.get("count") or 0),
+            str(item.get("key") or ""),
+        ),
+    )
+
+    return {
+        "tenant": effective_tenant,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "group_by": normalized_group_by,
+        "total_overrides": int(total_overrides),
+        "rows": normalized_rows[:bounded_limit],
+    }
 
 
 def _encode_blocked_cursor(*, created_at: str, decision_id: str) -> str:

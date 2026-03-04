@@ -17,7 +17,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 import requests
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.exception_handlers import (
     http_exception_handler as fastapi_http_exception_handler,
     request_validation_exception_handler as fastapi_request_validation_exception_handler,
@@ -28,7 +28,7 @@ from starlette.background import BackgroundTask
 import csv
 import io
 import zipfile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from releasegate.security.auth import require_access, tenant_from_request
@@ -549,6 +549,28 @@ class DashboardPolicyDiffData(BaseModel):
     legacy_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
+class DashboardOverridesBreakdownRow(BaseModel):
+    key: str
+    count: int = 0
+    workflows: int = 0
+    rules: int = 0
+    actors: int = 0
+    last_seen: Optional[str] = None
+    sample_override_ids: List[str] = Field(default_factory=list)
+
+
+class DashboardOverridesBreakdownData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    group_by: str = "actor"
+    total_overrides: int = 0
+    rows: List[DashboardOverridesBreakdownRow] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DashboardErrorDetail(BaseModel):
     code: str = Field(description="Stable canonical dashboard error code.")
     error_code: str = Field(description="Detailed service error code. Defaults to canonical code.")
@@ -605,6 +627,12 @@ class DashboardPolicyDiffResponse(BaseModel):
     generated_at: str
     trace_id: str
     data: DashboardPolicyDiffData
+
+
+class DashboardOverridesBreakdownResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardOverridesBreakdownData
 
 
 # --- Config ---
@@ -2512,6 +2540,61 @@ def dashboard_alerts_endpoint(
         endpoint="/dashboard/alerts",
         trace_id=trace_id,
         params={"window_days": int(window_days)},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/overrides/breakdown",
+    response_model=DashboardOverridesBreakdownResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_overrides_breakdown_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    group_by: str = "actor",
+    limit: int = 25,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_dashboard_overrides_breakdown
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_dashboard_overrides_breakdown(
+            tenant_id=effective_tenant,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            group_by=group_by,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_OVERRIDES_BREAKDOWN",
+        endpoint="/dashboard/overrides/breakdown",
+        trace_id=trace_id,
+        params={
+            "from": from_ts,
+            "to": to_ts,
+            "group_by": str(group_by or "actor"),
+            "limit": int(limit),
+        },
     )
     return _dashboard_response(
         response=response,
