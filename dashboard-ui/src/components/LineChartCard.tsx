@@ -24,6 +24,7 @@ interface LineChartCardProps {
   xKey?: string;
   series: Series[];
   height?: number;
+  showDots?: boolean;
 }
 
 export function LineChartCard({
@@ -32,6 +33,7 @@ export function LineChartCard({
   xKey = "date_utc",
   series,
   height = 260,
+  showDots = false,
 }: LineChartCardProps) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -40,7 +42,7 @@ export function LineChartCard({
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} />
+            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} padding={{ left: 16, right: 16 }} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip />
             <Legend />
@@ -52,7 +54,8 @@ export function LineChartCard({
                 name={entry.label}
                 stroke={entry.color}
                 strokeWidth={2}
-                dot={false}
+                dot={showDots}
+                activeDot={showDots ? { r: 5 } : false}
                 isAnimationActive={false}
               />
             ))}

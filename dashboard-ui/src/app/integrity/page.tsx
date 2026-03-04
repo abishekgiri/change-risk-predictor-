@@ -32,6 +32,8 @@ export default async function IntegrityPage({
     drift_index: row.drift_index,
     override_rate: row.override_rate,
   }));
+  const pointCount = chartRows.length;
+  const lastUpdated = latest?.date_utc ?? "—";
 
   return (
     <div className="space-y-6">
@@ -47,7 +49,7 @@ export default async function IntegrityPage({
         <KpiCard
           label="Current Integrity"
           value={(latest?.integrity_score ?? 0).toFixed(2)}
-          helper="Latest 30-day rollup"
+          helper={pointCount <= 1 ? `Last updated: ${lastUpdated}` : "Latest 30-day rollup"}
         />
         <KpiCard label="Current Drift" value={(latest?.drift_index ?? 0).toFixed(4)} />
         <KpiCard
@@ -57,16 +59,25 @@ export default async function IntegrityPage({
         />
       </section>
 
-      <LineChartCard
-        title="Integrity / Drift / Override Rate"
-        data={chartRows}
-        series={[
-          { key: "integrity_score", label: "Integrity", color: "#0f766e" },
-          { key: "drift_index", label: "Drift", color: "#dc2626" },
-          { key: "override_rate", label: "Override Rate", color: "#4338ca" },
-        ]}
-        height={320}
-      />
+      {pointCount === 0 ? (
+        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          <h3 className="text-base font-semibold text-slate-900">No integrity data yet</h3>
+          <p className="mt-2 text-sm text-slate-600">No events recorded for this tenant/date range.</p>
+          <p className="mt-1 text-sm text-slate-500">Try expanding the date range or generating transition activity.</p>
+        </div>
+      ) : (
+        <LineChartCard
+          title={pointCount === 1 ? "Integrity / Drift / Override Rate (single point)" : "Integrity / Drift / Override Rate"}
+          data={chartRows}
+          series={[
+            { key: "integrity_score", label: "Integrity", color: "#0f766e" },
+            { key: "drift_index", label: "Drift", color: "#dc2626" },
+            { key: "override_rate", label: "Override Rate", color: "#4338ca" },
+          ]}
+          height={320}
+          showDots={pointCount === 1}
+        />
+      )}
 
       <AlertsList alerts={alerts.data.alerts} />
     </div>
