@@ -18,6 +18,11 @@ import uuid
 from datetime import datetime, timezone
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import (
+    http_exception_handler as fastapi_http_exception_handler,
+    request_validation_exception_handler as fastapi_request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from starlette.background import BackgroundTask
 import csv
@@ -439,6 +444,165 @@ class GovernanceExportRequest(BaseModel):
     type: str = Field(min_length=1)
     year: int
     quarter: Optional[int] = None
+
+
+class DashboardTrendPoint(BaseModel):
+    date_utc: str
+    value: float = 0.0
+
+
+class DashboardOverrideRateTrendPoint(BaseModel):
+    date_utc: str
+    value: float = 0.0
+    override_count: int = 0
+    decision_count: int = 0
+
+
+class DashboardDriftPayload(BaseModel):
+    current: float = 0.0
+    breakdown: Optional[Dict[str, Any]] = None
+
+
+class DashboardOverviewData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    integrity_score: float = 0.0
+    integrity_trend: List[DashboardTrendPoint] = Field(default_factory=list)
+    drift_index: float = 0.0
+    drift_trend: List[DashboardTrendPoint] = Field(default_factory=list)
+    override_rate: float = 0.0
+    override_rate_trend: List[DashboardOverrideRateTrendPoint] = Field(default_factory=list)
+    drift: DashboardDriftPayload = Field(default_factory=DashboardDriftPayload)
+    active_strict_modes: List[Dict[str, Any]] = Field(default_factory=list)
+    recent_blocked: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardIntegrityTrendPoint(BaseModel):
+    date_utc: str
+    integrity_score: float = 0.0
+    drift_index: float = 0.0
+    override_rate: float = 0.0
+    override_count: int = 0
+    decision_count: int = 0
+    blocked_count: int = 0
+    drift_breakdown: Optional[Dict[str, Any]] = None
+    override_abuse_index: float = 0.0
+
+
+class DashboardIntegrityData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    trend: List[DashboardIntegrityTrendPoint] = Field(default_factory=list)
+
+
+class DashboardAlertsData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    window_days: int = 30
+    current_override_abuse_index: float = 0.0
+    alerts: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardBlockedData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    next_cursor: Optional[str] = None
+
+
+class DashboardStrictModesData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class DashboardDecisionExplainData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    decision_id: str
+    decision: Dict[str, Any] = Field(default_factory=dict)
+    snapshot_binding: Dict[str, Any] = Field(default_factory=dict)
+    evaluation_tree: Dict[str, Any] = Field(default_factory=dict)
+    signals: List[Dict[str, Any]] = Field(default_factory=list)
+    risk: Dict[str, Any] = Field(default_factory=dict)
+    evidence_links: List[Dict[str, Any]] = Field(default_factory=list)
+    replay: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardPolicyDiffData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    report_id: Optional[str] = None
+    report_trace_id: Optional[str] = None
+    overall: Optional[str] = None
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    threshold_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    condition_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    role_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    sod_deltas: List[Dict[str, Any]] = Field(default_factory=list)
+    active_policy: Dict[str, Any] = Field(default_factory=dict)
+    staged_policy: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
+    strengthening_signals: List[Dict[str, Any]] = Field(default_factory=list)
+    legacy_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardErrorDetail(BaseModel):
+    code: str
+    error_code: str
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    request_id: str
+
+
+class DashboardErrorResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    error: DashboardErrorDetail
+
+
+class DashboardOverviewResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardOverviewData
+
+
+class DashboardIntegrityResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardIntegrityData
+
+
+class DashboardAlertsResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardAlertsData
+
+
+class DashboardBlockedResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardBlockedData
+
+
+class DashboardStrictModesResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardStrictModesData
+
+
+class DashboardDecisionExplainResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardDecisionExplainData
+
+
+class DashboardPolicyDiffResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardPolicyDiffData
 
 
 # --- Config ---
@@ -2052,6 +2216,84 @@ def _dashboard_trace_id(request: Request) -> str:
     return uuid.uuid4().hex
 
 
+def _dashboard_generated_at() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _dashboard_error_code(status_code: int, detail: Any) -> str:
+    if isinstance(detail, dict):
+        existing = str(detail.get("error_code") or "").strip()
+        if existing:
+            return existing
+    if status_code == 401:
+        return "AUTH_REQUIRED"
+    if status_code == 403:
+        return "FORBIDDEN"
+    if status_code == 404:
+        return "NOT_FOUND"
+    if status_code == 409:
+        return "CONFLICT"
+    if status_code in {400, 422}:
+        return "VALIDATION_ERROR"
+    return "INTERNAL"
+
+
+def _dashboard_error_message(detail: Any, status_code: int) -> str:
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or "").strip()
+        if message:
+            return message
+        if "error_code" in detail and len(detail.keys()) == 1:
+            return f"Dashboard request failed with {status_code}"
+        serialized = json.dumps(detail, separators=(",", ":"), ensure_ascii=False)
+        return serialized if serialized else f"Dashboard request failed with {status_code}"
+    return f"Dashboard request failed with {status_code}"
+
+
+def _dashboard_error_response(
+    *,
+    request: Request,
+    status_code: int,
+    detail: Any,
+    headers: Optional[Dict[str, str]] = None,
+) -> JSONResponse:
+    trace_id = _dashboard_trace_id(request)
+    error_code = _dashboard_error_code(status_code, detail)
+    payload = {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "error": {
+            "code": error_code,
+            "error_code": error_code,
+            "message": _dashboard_error_message(detail, status_code),
+            "details": detail if isinstance(detail, dict) else {},
+            "request_id": trace_id,
+        },
+    }
+    response_headers = dict(headers or {})
+    response_headers["X-Request-Id"] = trace_id
+    response_headers["Cache-Control"] = "private, no-store"
+    return JSONResponse(
+        status_code=status_code,
+        content=payload,
+        headers=response_headers,
+    )
+
+
+def _dashboard_error_models() -> Dict[int, Dict[str, Any]]:
+    return {
+        400: {"model": DashboardErrorResponse},
+        401: {"model": DashboardErrorResponse},
+        403: {"model": DashboardErrorResponse},
+        404: {"model": DashboardErrorResponse},
+        409: {"model": DashboardErrorResponse},
+        422: {"model": DashboardErrorResponse},
+        500: {"model": DashboardErrorResponse},
+    }
+
+
 def _dashboard_response(
     *,
     response: Response,
@@ -2061,12 +2303,19 @@ def _dashboard_response(
 ) -> Dict[str, Any]:
     response.headers["X-Request-Id"] = trace_id
     response.headers["Cache-Control"] = cache_control
-    body = dict(payload)
-    existing_trace_id = body.get("trace_id")
+    data = dict(payload)
+    existing_trace_id = data.get("trace_id")
     if existing_trace_id and str(existing_trace_id) != str(trace_id):
-        body["report_trace_id"] = existing_trace_id
-    body["trace_id"] = trace_id
-    return body
+        data["report_trace_id"] = existing_trace_id
+    data["trace_id"] = trace_id
+    generated_at = data.get("generated_at")
+    if not generated_at:
+        generated_at = _dashboard_generated_at()
+    return {
+        "generated_at": generated_at,
+        "trace_id": trace_id,
+        "data": data,
+    }
 
 
 def _audit_dashboard_read(
@@ -2096,7 +2345,39 @@ def _audit_dashboard_read(
         logger.exception("Failed to write dashboard read audit event: action=%s", action)
 
 
-@app.get("/dashboard/overview")
+@app.exception_handler(HTTPException)
+async def releasegate_http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/dashboard/"):
+        header_map = dict(exc.headers or {})
+        return _dashboard_error_response(
+            request=request,
+            status_code=int(exc.status_code),
+            detail=exc.detail,
+            headers=header_map,
+        )
+    return await fastapi_http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def releasegate_request_validation_handler(request: Request, exc: RequestValidationError):
+    if request.url.path.startswith("/dashboard/"):
+        return _dashboard_error_response(
+            request=request,
+            status_code=422,
+            detail={
+                "error_code": "VALIDATION_ERROR",
+                "message": "Request validation failed",
+                "validation_errors": exc.errors(),
+            },
+        )
+    return await fastapi_request_validation_exception_handler(request, exc)
+
+
+@app.get(
+    "/dashboard/overview",
+    response_model=DashboardOverviewResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_overview_endpoint(
     request: Request,
     response: Response,
@@ -2141,7 +2422,11 @@ def dashboard_overview_endpoint(
     )
 
 
-@app.get("/dashboard/integrity")
+@app.get(
+    "/dashboard/integrity",
+    response_model=DashboardIntegrityResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_integrity_endpoint(
     request: Request,
     response: Response,
@@ -2185,7 +2470,11 @@ def dashboard_integrity_endpoint(
     )
 
 
-@app.get("/dashboard/alerts")
+@app.get(
+    "/dashboard/alerts",
+    response_model=DashboardAlertsResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_alerts_endpoint(
     request: Request,
     response: Response,
@@ -2225,7 +2514,11 @@ def dashboard_alerts_endpoint(
     )
 
 
-@app.get("/dashboard/blocked")
+@app.get(
+    "/dashboard/blocked",
+    response_model=DashboardBlockedResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_blocked_endpoint(
     request: Request,
     response: Response,
@@ -2275,7 +2568,11 @@ def dashboard_blocked_endpoint(
     )
 
 
-@app.get("/dashboard/strict-modes")
+@app.get(
+    "/dashboard/strict-modes",
+    response_model=DashboardStrictModesResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_strict_modes_endpoint(
     request: Request,
     response: Response,
@@ -2311,7 +2608,11 @@ def dashboard_strict_modes_endpoint(
     )
 
 
-@app.get("/dashboard/decisions/{decision_id}/explainer")
+@app.get(
+    "/dashboard/decisions/{decision_id}/explainer",
+    response_model=DashboardDecisionExplainResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_decision_explainer_endpoint(
     request: Request,
     response: Response,
@@ -2350,7 +2651,11 @@ def dashboard_decision_explainer_endpoint(
     )
 
 
-@app.post("/dashboard/policies/diff")
+@app.post(
+    "/dashboard/policies/diff",
+    response_model=DashboardPolicyDiffResponse,
+    responses=_dashboard_error_models(),
+)
 def dashboard_policy_diff_endpoint(
     request: Request,
     response: Response,

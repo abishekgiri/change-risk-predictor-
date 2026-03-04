@@ -16,6 +16,15 @@ from tests.auth_helpers import jwt_headers
 client = TestClient(app)
 
 
+def _unwrap_dashboard_envelope(response) -> tuple[dict, dict]:
+    body = response.json()
+    assert body["generated_at"]
+    assert body["trace_id"]
+    payload = body["data"]
+    assert isinstance(payload, dict)
+    return body, payload
+
+
 def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
@@ -103,9 +112,9 @@ def test_dashboard_alerts_emits_override_spike_from_rollup_history():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["trace_id"]
-    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    envelope, body = _unwrap_dashboard_envelope(response)
+    assert body["trace_id"] == envelope["trace_id"]
+    assert response.headers.get("X-Request-Id") == envelope["trace_id"]
     assert response.headers.get("Cache-Control") == "private, max-age=60"
     assert body["window_days"] == 30
     alert = next(item for item in body["alerts"] if item["code"] == "OVERRIDE_SPIKE")
@@ -150,9 +159,9 @@ def test_dashboard_alerts_emits_strict_mode_drop():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["trace_id"]
-    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    envelope, body = _unwrap_dashboard_envelope(response)
+    assert body["trace_id"] == envelope["trace_id"]
+    assert response.headers.get("X-Request-Id") == envelope["trace_id"]
     assert response.headers.get("Cache-Control") == "private, max-age=60"
     alerts = body["alerts"]
     strict_drop = next(item for item in alerts if item["code"] == "STRICT_MODE_DROP")

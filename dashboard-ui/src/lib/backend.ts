@@ -118,11 +118,34 @@ export async function backendFetch<T>(
     }
 
     const payloadObj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
-    const traceId = payloadObj.trace_id ?? response.headers.get("X-Request-Id");
+    const errorObj =
+      payloadObj.error && typeof payloadObj.error === "object" ? (payloadObj.error as Record<string, unknown>) : {};
+    const traceId =
+      payloadObj.trace_id ??
+      errorObj.request_id ??
+      response.headers.get("X-Request-Id");
 
     if (response.ok) {
+      let responsePayload = payload as T;
+      if (
+        payloadObj &&
+        Object.prototype.hasOwnProperty.call(payloadObj, "data") &&
+        payloadObj.data &&
+        typeof payloadObj.data === "object"
+      ) {
+        responsePayload = payloadObj.data as T;
+        if (responsePayload && typeof responsePayload === "object") {
+          const normalizedPayload = responsePayload as unknown as Record<string, unknown>;
+          if (!("trace_id" in normalizedPayload) && traceId) {
+            normalizedPayload.trace_id = String(traceId);
+          }
+          if (!("generated_at" in normalizedPayload) && typeof payloadObj.generated_at === "string") {
+            normalizedPayload.generated_at = payloadObj.generated_at;
+          }
+        }
+      }
       return {
-        data: payload as T,
+        data: responsePayload,
         traceId: traceId ? String(traceId) : null,
         status: response.status,
       };
@@ -130,7 +153,11 @@ export async function backendFetch<T>(
 
     const detail = payloadObj?.detail;
     const detailObj = detail && typeof detail === "object" ? (detail as Record<string, unknown>) : {};
-    const errorCode = typeof detailObj.error_code === "string" ? detailObj.error_code : "";
+    const errorCode =
+      (typeof detailObj.error_code === "string" && detailObj.error_code) ||
+      (typeof errorObj.error_code === "string" && errorObj.error_code) ||
+      (typeof errorObj.code === "string" && errorObj.code) ||
+      "";
     const shouldRetryAuthHeader =
       response.status === 401 && retryableAuthCodes.has(errorCode) && index < authHeaderCandidates.length - 1;
     if (shouldRetryAuthHeader) {
@@ -138,7 +165,9 @@ export async function backendFetch<T>(
     }
 
     const message = extractErrorMessage(payload, response.status);
-    lastError = new Error(`HTTP ${response.status}: ${message} (trace_id=${traceId ?? "n/a"})`);
+    lastError = new Error(
+      `HTTP ${response.status}: ${message} (trace_id=${traceId ?? "n/a"}, url=${url.toString()})`,
+    );
     break;
   }
 

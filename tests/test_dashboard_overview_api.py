@@ -16,6 +16,15 @@ from tests.auth_helpers import jwt_headers
 client = TestClient(app)
 
 
+def _unwrap_dashboard_envelope(response) -> tuple[dict, dict]:
+    body = response.json()
+    assert body["generated_at"]
+    assert body["trace_id"]
+    payload = body["data"]
+    assert isinstance(payload, dict)
+    return body, payload
+
+
 def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
@@ -252,9 +261,9 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    body = response.json()
+    envelope, body = _unwrap_dashboard_envelope(response)
     assert body["tenant_id"] == tenant_id
-    assert body["trace_id"]
+    assert body["trace_id"] == envelope["trace_id"]
     assert body["integrity_score"] == 92.0
     assert body["drift_index"] == 1.5
     assert body["override_rate"] == 0.09
@@ -268,7 +277,7 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
     assert "last_changed_at" in policy_strict
     assert body["drift"]["current"] == 1.5
     assert body["drift"]["breakdown"]["signal_totals"] == {"WEAKEN_APPROVAL_REQUIREMENT": 3}
-    assert response.headers.get("X-Request-Id") == body["trace_id"]
+    assert response.headers.get("X-Request-Id") == envelope["trace_id"]
     assert response.headers.get("Cache-Control") == "private, max-age=30"
 
     integrity_response = client.get(
@@ -277,9 +286,9 @@ def test_dashboard_overview_endpoint_returns_trends_and_blocked_items():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert integrity_response.status_code == 200, integrity_response.text
-    integrity_body = integrity_response.json()
-    assert integrity_body["trace_id"]
-    assert integrity_response.headers.get("X-Request-Id") == integrity_body["trace_id"]
+    integrity_envelope, integrity_body = _unwrap_dashboard_envelope(integrity_response)
+    assert integrity_body["trace_id"] == integrity_envelope["trace_id"]
+    assert integrity_response.headers.get("X-Request-Id") == integrity_envelope["trace_id"]
     assert integrity_response.headers.get("Cache-Control") == "private, max-age=60"
     trend = integrity_body["trend"]
     assert trend[-1]["override_count"] == 9
@@ -296,6 +305,10 @@ def test_dashboard_blocked_limit_validation():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 400
+    body = response.json()
+    assert body["generated_at"]
+    assert body["trace_id"]
+    assert body["error"]["error_code"] == "VALIDATION_ERROR"
 
 
 def test_dashboard_overview_fallback_returns_null_drift_breakdown():
@@ -307,7 +320,7 @@ def test_dashboard_overview_fallback_returns_null_drift_breakdown():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    body = response.json()
+    _, body = _unwrap_dashboard_envelope(response)
     assert body["drift"]["breakdown"] is None
 
 
@@ -328,8 +341,8 @@ def test_dashboard_blocked_cursor_pagination_returns_non_overlapping_pages():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert first.status_code == 200, first.text
-    first_body = first.json()
-    assert first_body["trace_id"]
+    first_envelope, first_body = _unwrap_dashboard_envelope(first)
+    assert first_body["trace_id"] == first_envelope["trace_id"]
     assert first.headers.get("Cache-Control") == "private, max-age=10"
     assert len(first_body["items"]) == 2
     assert first_body["next_cursor"]
@@ -340,7 +353,7 @@ def test_dashboard_blocked_cursor_pagination_returns_non_overlapping_pages():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert second.status_code == 200, second.text
-    second_body = second.json()
+    _, second_body = _unwrap_dashboard_envelope(second)
     assert len(second_body["items"]) == 2
 
     first_ids = {item["decision_id"] for item in first_body["items"]}
@@ -357,7 +370,8 @@ def test_dashboard_overview_read_is_audited_with_trace_id():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 200, response.text
-    trace_id = response.json()["trace_id"]
+    envelope, _ = _unwrap_dashboard_envelope(response)
+    trace_id = envelope["trace_id"]
     audit = _latest_security_audit(tenant_id=tenant_id, action="DASHBOARD_READ_OVERVIEW")
     assert audit["action"] == "DASHBOARD_READ_OVERVIEW"
     assert audit["metadata"]["trace_id"] == trace_id
@@ -378,9 +392,9 @@ def test_dashboard_overview_allows_internal_service_auth(monkeypatch):
         },
     )
     assert response.status_code == 200, response.text
-    body = response.json()
+    envelope, body = _unwrap_dashboard_envelope(response)
     assert body["tenant_id"] == tenant_id
-    assert body["trace_id"]
+    assert envelope["trace_id"] == body["trace_id"]
 
 
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():
