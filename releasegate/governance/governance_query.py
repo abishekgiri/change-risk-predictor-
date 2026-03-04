@@ -289,7 +289,7 @@ def _normalize_bool(value: Any) -> Optional[bool]:
         return True
     if raw in {"0", "false", "no", "off"}:
         return False
-    raise ValueError("override_used must be true or false")
+    raise ValueError("value must be a recognizable boolean string (e.g., 'true', 'false', '1', '0')")
 
 
 def search_decisions(
