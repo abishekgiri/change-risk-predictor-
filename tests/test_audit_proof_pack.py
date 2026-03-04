@@ -210,12 +210,22 @@ def test_export_proof_alias_includes_manifest_graph_and_replay_request(monkeypat
         assert "manifest.json" in names
         assert "evidence_graph.json" in names
         assert "replay_request.json" in names
+        assert "approvals.json" in names
+        assert "override_history.json" in names
+        assert "merkle_proof.json" in names
+        assert "external_anchor_ref.json" in names
+        assert "independent_checkpoint.json" in names
         assert "in_toto_statement.json" in names
         assert "dsse_envelope.json" in names
         manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
         file_names = {entry.get("filename") for entry in manifest.get("files", [])}
         assert "evidence_graph.json" in file_names
         assert "replay_request.json" in file_names
+        assert "approvals.json" in file_names
+        assert "override_history.json" in file_names
+        assert "merkle_proof.json" in file_names
+        assert "external_anchor_ref.json" in file_names
+        assert "independent_checkpoint.json" in file_names
         assert "in_toto_statement.json" in file_names
         assert "dsse_envelope.json" in file_names
         evidence_graph = json.loads(zf.read("evidence_graph.json").decode("utf-8"))

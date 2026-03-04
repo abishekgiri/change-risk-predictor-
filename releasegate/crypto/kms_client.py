@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 from abc import ABC, abstractmethod
@@ -214,6 +215,21 @@ def allow_legacy_key_material() -> bool:
     return not strict_kms_required()
 
 
+def _module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _validate_aws_runtime_configuration() -> None:
+    if not _module_available("boto3"):
+        raise RuntimeError(
+            "RELEASEGATE_KMS_MODE=aws requires boto3, but boto3 is not installed."
+        )
+    if not str(os.getenv("RELEASEGATE_KMS_KEY_ID") or "").strip():
+        raise RuntimeError(
+            "RELEASEGATE_KMS_MODE=aws requires RELEASEGATE_KMS_KEY_ID to be configured."
+        )
+
+
 def ensure_kms_runtime_policy() -> None:
     mode = _kms_mode()
     if strict_kms_required() and mode not in _CLOUD_KMS_MODES:
@@ -221,7 +237,10 @@ def ensure_kms_runtime_policy() -> None:
             "RELEASEGATE_STRICT_KMS is enabled but RELEASEGATE_KMS_MODE is not a cloud provider. "
             "Set RELEASEGATE_KMS_MODE to aws, gcp, or azure."
         )
-    if mode in _CLOUD_KMS_MODES:
+    if mode == "aws":
+        _validate_aws_runtime_configuration()
+        return
+    if mode in {"gcp", "azure"}:
         raise RuntimeError(
             f"RELEASEGATE_KMS_MODE={mode} is configured but cloud adapter is not implemented in this build."
         )
@@ -234,6 +253,10 @@ def get_kms_client() -> KMSClient:
     default_kms_key_id = str(os.getenv("RELEASEGATE_KMS_KEY_ID") or "releasegate-local-kms").strip()
     if mode in {"local", "mock"}:
         return LocalKMSClient(default_kms_key_id=default_kms_key_id)
+    if mode == "aws":
+        from releasegate.crypto.kms.aws_kms import AwsKMSClient
+
+        return AwsKMSClient(default_kms_key_id=default_kms_key_id)
     raise ValueError(f"Unsupported RELEASEGATE_KMS_MODE '{mode}'. Supported modes: local, mock, aws, gcp, azure.")
 
 

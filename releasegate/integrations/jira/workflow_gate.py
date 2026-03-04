@@ -26,6 +26,13 @@ from releasegate.integrations.jira.config import (
     load_transition_map,
     resolve_gate_policy_ids,
 )
+from releasegate.integrations.jira.approvals_orchestration import (
+    build_approval_scope_payload,
+    compute_approval_scope_hash,
+    evaluate_cab_groups,
+    list_active_scope_approvals,
+    normalize_cab_groups,
+)
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets, DecisionType, PolicyBinding
 from releasegate.policy.loader import PolicyLoader
@@ -37,6 +44,10 @@ from releasegate.utils.ttl_cache import TTLCache, file_fingerprint, stable_tuple
 from releasegate.governance.signal_freshness import (
     evaluate_risk_signal_freshness,
     resolve_signal_freshness_policy,
+)
+from releasegate.signals.attestation import (
+    evaluate_signal_attestation,
+    resolve_signal_attestation_policy,
 )
 from releasegate.governance.sod import evaluate_separation_of_duties
 from releasegate.governance.strict_mode import apply_strict_fail_closed, resolve_strict_fail_closed
@@ -397,6 +408,67 @@ class WorkflowGate:
                     tenant_id=tenant_id,
                 )
 
+            try:
+                from releasegate.quota import QUOTA_KIND_OVERRIDES, TenantQuotaExceededError, consume_tenant_quota
+
+                consume_tenant_quota(
+                    tenant_id=tenant_id,
+                    quota_kind=QUOTA_KIND_OVERRIDES,
+                    amount=1,
+                )
+            except TenantQuotaExceededError as exc:
+                try:
+                    from releasegate.security.anomaly_detector import record_anomaly_event
+
+                    record_anomaly_event(
+                        tenant_id=tenant_id,
+                        signal_type="quota_bypass_attempt",
+                        operation="jira_override",
+                        details=exc.to_http_detail(),
+                        actor=request.actor_account_id or request.actor_email,
+                    )
+                except Exception:
+                    pass
+                blocked = self._build_decision(
+                    request,
+                    release_status=DecisionType.BLOCKED,
+                    message="BLOCKED: tenant override quota exceeded",
+                    evaluation_key=f"{evaluation_key}:override-quota-exceeded",
+                    unlock_conditions=["Increase tenant override quota or wait for monthly reset."],
+                    reason_code="TENANT_QUOTA_EXCEEDED",
+                    inputs_present={"override_requested": True},
+                    policy_hash=self._current_policy_hash(),
+                    input_snapshot={"request": request.model_dump(mode="json")},
+                )
+                final_blocked = self._record_with_timeout(
+                    blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=strict_mode,
+                    dependency_context="storage",
+                )
+                self._track_status_metrics(final_blocked.release_status, tenant_id=tenant_id)
+                self._log_decision(
+                    event="jira.transition.override.quota_exceeded",
+                    request=request,
+                    decision=final_blocked,
+                    repo=repo,
+                    pr_number=pr_number,
+                    mode=strict_mode,
+                    gate=self._resolved_gate_hint,
+                )
+                return TransitionCheckResponse(
+                    allow=False,
+                    reason=final_blocked.message,
+                    decision_id=final_blocked.decision_id,
+                    status=final_blocked.release_status.value,
+                    reason_code=final_blocked.reason_code,
+                    unlock_conditions=final_blocked.unlock_conditions,
+                    policy_hash=final_blocked.policy_bundle_hash,
+                    tenant_id=tenant_id,
+                )
+
             decision = self._build_decision(
                 request,
                 release_status=DecisionType.ALLOWED,
@@ -716,6 +788,50 @@ class WorkflowGate:
                     "request": request.model_dump(mode="json"),
                     "risk_meta": risk_meta,
                     "signal_freshness": freshness,
+                },
+            )
+
+        attestation_policy = resolve_signal_attestation_policy(
+            policy_overrides=request.context_overrides.get("signals")
+            if isinstance(request.context_overrides.get("signals"), dict)
+            else None,
+            strict_enabled=strict_mode,
+        )
+        signal_report = evaluate_signal_attestation(
+            tenant_id=tenant_id,
+            signal_type="risk_eval",
+            subject_type="jira_issue",
+            subject_id=request.issue_key,
+            inline_signal={
+                "signal_source": risk_meta.get("signal_source") or risk_meta.get("source"),
+                "computed_at": risk_meta.get("computed_at"),
+                "expires_at": risk_meta.get("expires_at") or risk_meta.get("expiration"),
+                "signal_hash": risk_meta.get("signal_hash"),
+                "payload": risk_meta,
+            },
+            policy=attestation_policy,
+            now=datetime.now(timezone.utc),
+        )
+        if signal_report.get("stale") and signal_report.get("should_block"):
+            reason_code = str(signal_report.get("reason_code") or "STALE_SIGNAL")
+            return self._deny(
+                request,
+                evaluation_key=f"{evaluation_key}:attested-signal:{reason_code}",
+                repo=repo,
+                pr_number=pr_number,
+                tenant_id=tenant_id,
+                strict_mode=strict_mode,
+                reason_code=reason_code,
+                message=f"BLOCKED: required signal attestation invalid (`{reason_code}`)",
+                unlock_conditions=["Publish a fresh risk signal attestation and retry transition."],
+                event="jira.transition.signal_attestation_failed",
+                dependency="signals",
+                error_code=reason_code,
+                inputs_present={"releasegate_risk": True},
+                input_snapshot={
+                    "request": request.model_dump(mode="json"),
+                    "risk_meta": risk_meta,
+                    "signal_attestation": signal_report,
                 },
             )
         
@@ -1196,6 +1312,32 @@ class WorkflowGate:
                 )
                 for result in relevant_results
             )
+
+            approval_scope_payload = build_approval_scope_payload(
+                tenant_id=tenant_id,
+                issue_key=request.issue_key,
+                transition_id=request.transition_id,
+                source_status=request.source_status,
+                target_status=request.target_status,
+                environment=request.environment,
+                project_key=request.project_key,
+                policy_hash=policy_hash,
+                actor_account_id=request.actor_account_id,
+                commit_sha=str(request.context_overrides.get("commit_sha") or request.context_overrides.get("head_sha") or ""),
+                artifact_digest=str(request.context_overrides.get("artifact_digest") or ""),
+                risk_level=str(risk_level or ""),
+                risk_score=(float(risk_score) if isinstance(risk_score, (int, float)) else None),
+                risk_reason_codes=[
+                    str(code)
+                    for code in (
+                        (risk_meta.get("reason_codes") if isinstance(risk_meta.get("reason_codes"), list) else [])
+                        or ([str(run_result.reason)] if getattr(run_result, "reason", None) else [])
+                    )
+                    if str(code or "").strip()
+                ],
+            )
+            approval_scope_hash = compute_approval_scope_hash(approval_scope_payload)
+
             raw_approvals = request.context_overrides.get("approvals")
             core_approvals: List[CoreApprovalRecord] = []
             seen_approvals: set[tuple[str, str]] = set()
@@ -1217,6 +1359,27 @@ class WorkflowGate:
                         continue
                     seen_approvals.add(fingerprint)
                     core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
+
+            persisted_scope_approvals: List[Dict[str, Any]] = []
+            try:
+                persisted_scope_approvals = list_active_scope_approvals(
+                    tenant_id=tenant_id,
+                    approval_scope_hash=approval_scope_hash,
+                    limit=1000,
+                )
+            except Exception as e:
+                logger.warning("Failed to list active scope approvals: %s", e)
+                persisted_scope_approvals = []
+            for approval in persisted_scope_approvals:
+                actor_id = str(approval.get("approver_actor") or "").strip()
+                role = str(approval.get("approver_role") or "").strip()
+                if not actor_id:
+                    continue
+                fingerprint = (actor_id.lower(), role.lower())
+                if fingerprint in seen_approvals:
+                    continue
+                seen_approvals.add(fingerprint)
+                core_approvals.append(CoreApprovalRecord(actor_id=actor_id, role=role))
 
             raw_override_approvers = request.context_overrides.get("override_approvers")
             override_approvers: List[str] = []
@@ -1321,8 +1484,22 @@ class WorkflowGate:
                 )
             )
             status = DecisionType(core_decision.status)
+            decision_reason_code = str(core_decision.reason_code or "")
             blocking_policies = list(core_decision.blocking_policy_ids)
             requirements = list(core_decision.requirements)
+
+            cab_group_policy = normalize_cab_groups(registry_effective_policy)
+            cab_result = evaluate_cab_groups(
+                groups=cab_group_policy,
+                approvals=persisted_scope_approvals,
+                submitter_actor=request.actor_account_id,
+            )
+            if cab_result.get("required") and not cab_result.get("satisfied"):
+                if status == DecisionType.ALLOWED:
+                    status = DecisionType.CONDITIONAL
+                if not decision_reason_code or decision_reason_code == "POLICY_ALLOWED":
+                    decision_reason_code = "CAB_APPROVALS_REQUIRED"
+                requirements.extend([str(item) for item in (cab_result.get("missing_requirements") or []) if str(item).strip()])
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
@@ -1332,7 +1509,7 @@ class WorkflowGate:
                 evaluation_key=f"{evaluation_key}:evaluated",
                 unlock_conditions=requirements or ["None"],
                 matched_policies=blocking_policies, # Track what blocked
-                reason_code=core_decision.reason_code,
+                reason_code=decision_reason_code or core_decision.reason_code,
                 inputs_present={"releasegate_risk": True},
                 policy_hash=policy_hash,
                 policy_bindings=policy_bindings,
@@ -1352,6 +1529,12 @@ class WorkflowGate:
                     },
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
+                    "approval_scope": {
+                        "hash": approval_scope_hash,
+                        "payload": approval_scope_payload,
+                        "approval_count": len(persisted_scope_approvals),
+                    },
+                    "approval_groups": cab_result,
                     "engine_core": {
                         "status": core_decision.status,
                         "reason_code": core_decision.reason_code,
