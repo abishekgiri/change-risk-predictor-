@@ -344,6 +344,39 @@ def test_gate_defaults_to_strict_mode_when_config_missing(MockRecorder, base_req
 
 
 @patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
+def test_gate_blocks_when_zero_trust_signal_attestation_required(MockRecorder, base_request):
+    with patch.dict(
+        os.environ,
+        {
+            "RELEASEGATE_STRICT_MODE": "true",
+            "RELEASEGATE_REQUIRE_SIGNAL_ATTESTATION": "true",
+        },
+    ):
+        gate = WorkflowGate()
+    base_request.environment = "STAGING"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_decision = Decision(
+        decision_id="uuid-zt-signal",
+        timestamp=datetime.now(timezone.utc),
+        release_status="BLOCKED",
+        context_id="ctx-zt-signal",
+        message="BLOCKED: missing signal attestation",
+        reason_code="MISSING_SIGNAL",
+        policy_bundle_hash="abc",
+        enforcement_targets=EnforcementTargets(repository="r", ref="h"),
+    )
+    MockRecorder.record_with_context.return_value = mock_decision
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "MISSING_SIGNAL"
+
+
+@patch("releasegate.integrations.jira.workflow_gate.AuditRecorder")
 def test_gate_skips_when_no_policies_mapped(MockRecorder, base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
         gate = WorkflowGate()

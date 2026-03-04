@@ -45,6 +45,14 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260302_026_anchor_jobs" in migration_ids
         assert "20260303_027_kms_custody_and_compromise_playbook" in migration_ids
         assert "20260304_028_saas_operational_controls" in migration_ids
+        assert "20260305_029_policy_rollout_and_simulation" in migration_ids
+        assert "20260306_030_decision_transition_authority" in migration_ids
+        assert "20260307_031_cross_system_correlation_fabric" in migration_ids
+        assert "20260308_032_independent_daily_checkpoints" in migration_ids
+        assert "20260309_033_approval_orchestration" in migration_ids
+        assert "20260310_034_signal_attestations" in migration_ids
+        assert "20260311_035_governance_query_indexes" in migration_ids
+        assert "20260312_036_governance_dashboard_rollups" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -55,6 +63,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "policy_hash" in decision_cols
         assert "replay_hash" in decision_cols
         assert decision_pk == ["tenant_id", "decision_id"]
+        cur.execute("PRAGMA index_list(audit_decisions)")
+        decision_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_audit_decisions_tenant_created_decision" in decision_indexes
+        assert "idx_audit_decisions_tenant_release_created_decision" in decision_indexes
 
         cur.execute("PRAGMA table_info(audit_overrides)")
         override_info = cur.fetchall()
@@ -68,6 +80,10 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "approved_by",
         } <= override_cols
         assert override_pk == ["tenant_id", "override_id"]
+        cur.execute("PRAGMA index_list(audit_overrides)")
+        override_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_overrides_tenant_decision_created" in override_indexes
+        assert "idx_overrides_tenant_actor_created" in override_indexes
 
         cur.execute("PRAGMA table_info(audit_checkpoints)")
         checkpoint_info = cur.fetchall()
@@ -349,6 +365,127 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "decision_id", "repo", "ref_type", "ref_value"} <= ref_cols
         assert ref_pk == ["tenant_id", "decision_id", "ref_type", "ref_value"]
 
+        cur.execute("PRAGMA table_info(decision_transition_links)")
+        linkage_info = cur.fetchall()
+        linkage_cols = {row[1] for row in linkage_info}
+        linkage_pk = [row[1] for row in sorted((r for r in linkage_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "decision_id",
+            "jira_issue_id",
+            "transition_id",
+            "actor",
+            "source_status",
+            "target_status",
+            "policy_id",
+            "policy_version",
+            "policy_hash",
+            "context_hash",
+            "expires_at",
+            "consumed",
+            "consumed_at",
+            "consumed_by_request_id",
+            "created_at",
+        } <= linkage_cols
+        assert linkage_pk == ["tenant_id", "decision_id"]
+        cur.execute("PRAGMA index_list(decision_transition_links)")
+        linkage_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_decision_links_tenant_actor_created" in linkage_indexes
+        assert "idx_decision_links_tenant_transition_created" in linkage_indexes
+
+        cur.execute("PRAGMA table_info(deployment_decision_links)")
+        deploy_link_info = cur.fetchall()
+        deploy_link_cols = {row[1] for row in deploy_link_info}
+        deploy_link_pk = [row[1] for row in sorted((r for r in deploy_link_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "deployment_event_id",
+            "decision_id",
+            "jira_issue_id",
+            "correlation_id",
+            "environment",
+            "service",
+            "artifact_digest",
+            "risk_eval_id",
+            "risk_evaluated_at",
+            "override_state_at_deploy",
+            "override_id",
+            "deployed_at",
+            "source",
+            "contract_mode",
+            "contract_verdict",
+            "violation_codes_json",
+            "reason",
+            "created_at",
+        } <= deploy_link_cols
+        assert deploy_link_pk == ["tenant_id", "deployment_event_id"]
+
+        cur.execute("PRAGMA table_info(audit_independent_daily_checkpoints)")
+        daily_cp_info = cur.fetchall()
+        daily_cp_cols = {row[1] for row in daily_cp_info}
+        daily_cp_pk = [row[1] for row in sorted((r for r in daily_cp_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "checkpoint_id",
+            "date_utc",
+            "as_of_utc",
+            "ledger_root",
+            "ledger_size",
+            "prev_checkpoint_hash",
+            "checkpoint_hash",
+            "signature_algorithm",
+            "signature_value",
+            "signing_key_id",
+            "anchor_provider",
+            "anchor_ref",
+            "anchor_receipt_json",
+            "created_at",
+        } <= daily_cp_cols
+        assert daily_cp_pk == ["tenant_id", "checkpoint_id"]
+
+        cur.execute("PRAGMA table_info(decision_approvals)")
+        decision_approvals_info = cur.fetchall()
+        decision_approvals_cols = {row[1] for row in decision_approvals_info}
+        decision_approvals_pk = [row[1] for row in sorted((r for r in decision_approvals_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "approval_id",
+            "decision_id",
+            "approval_scope_hash",
+            "approval_scope_json",
+            "approval_group",
+            "approver_actor",
+            "approver_role",
+            "justification_json",
+            "justification_hash",
+            "request_id",
+            "created_at",
+            "revoked_at",
+            "revoked_reason",
+        } <= decision_approvals_cols
+        assert decision_approvals_pk == ["tenant_id", "approval_id"]
+
+        cur.execute("PRAGMA table_info(signal_attestations)")
+        signal_attest_info = cur.fetchall()
+        signal_attest_cols = {row[1] for row in signal_attest_info}
+        signal_attest_pk = [row[1] for row in sorted((r for r in signal_attest_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "signal_id",
+            "signal_type",
+            "signal_source",
+            "subject_type",
+            "subject_id",
+            "computed_at",
+            "expires_at",
+            "payload_json",
+            "signal_hash",
+            "sig_alg",
+            "signature",
+            "key_id",
+            "created_at",
+        } <= signal_attest_cols
+        assert signal_attest_pk == ["tenant_id", "signal_id"]
         cur.execute("PRAGMA table_info(policy_resolved_snapshots)")
         snap_info = cur.fetchall()
         snap_cols = {row[1] for row in snap_info}
@@ -377,6 +514,65 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert {"tenant_id", "policy_id", "target_env", "active_release_id"} <= pointers_cols
         assert pointers_pk == ["tenant_id", "policy_id", "target_env"]
 
+        cur.execute("PRAGMA table_info(policy_rollouts)")
+        rollouts_info = cur.fetchall()
+        rollouts_cols = {row[1] for row in rollouts_info}
+        rollouts_pk = [row[1] for row in sorted((r for r in rollouts_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "rollout_id",
+            "policy_id",
+            "target_env",
+            "from_release_id",
+            "to_release_id",
+            "mode",
+            "canary_percent",
+            "state",
+            "rollback_to_release_id",
+            "created_by",
+            "started_at",
+            "completed_at",
+            "updated_at",
+            "metadata_json",
+        } <= rollouts_cols
+        assert rollouts_pk == ["tenant_id", "rollout_id"]
+
+        cur.execute("PRAGMA table_info(policy_rollout_events)")
+        rollout_events_info = cur.fetchall()
+        rollout_events_cols = {row[1] for row in rollout_events_info}
+        rollout_events_pk = [row[1] for row in sorted((r for r in rollout_events_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "event_id",
+            "rollout_id",
+            "event_type",
+            "actor_id",
+            "metadata_json",
+            "created_at",
+        } <= rollout_events_cols
+        assert rollout_events_pk == ["tenant_id", "event_id"]
+
+        cur.execute("PRAGMA table_info(policy_simulation_events)")
+        simulation_info = cur.fetchall()
+        simulation_cols = {row[1] for row in simulation_info}
+        simulation_pk = [row[1] for row in sorted((r for r in simulation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "simulation_id",
+            "actor_id",
+            "policy_id",
+            "policy_version",
+            "policy_hash",
+            "environment",
+            "input_hash",
+            "result_status",
+            "allow",
+            "reason_codes_json",
+            "summary_json",
+            "created_at",
+        } <= simulation_cols
+        assert simulation_pk == ["tenant_id", "simulation_id"]
+
         cur.execute("PRAGMA table_info(audit_lock_checkpoints)")
         lock_cp_info = cur.fetchall()
         lock_cp_cols = {row[1] for row in lock_cp_info}
@@ -397,6 +593,30 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "high_risk_overrides_total",
         } <= metrics_cols
         assert metrics_pk == ["tenant_id", "date_utc", "chain_id", "actor"]
+
+        cur.execute("PRAGMA table_info(governance_daily_metrics)")
+        dashboard_metrics_info = cur.fetchall()
+        dashboard_metrics_cols = {row[1] for row in dashboard_metrics_info}
+        dashboard_metrics_pk = [
+            row[1] for row in sorted((r for r in dashboard_metrics_info if r[5] > 0), key=lambda r: r[5])
+        ]
+        assert {
+            "tenant_id",
+            "date_utc",
+            "integrity_score",
+            "drift_index",
+            "override_rate",
+            "blocked_count",
+            "strict_mode_count",
+            "override_count",
+            "decision_count",
+            "computed_at",
+            "details_json",
+        } <= dashboard_metrics_cols
+        assert dashboard_metrics_pk == ["tenant_id", "date_utc"]
+        cur.execute("PRAGMA index_list(governance_daily_metrics)")
+        dashboard_metrics_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_governance_daily_metrics_tenant_date" in dashboard_metrics_indexes
 
         cur.execute("PRAGMA table_info(audit_decision_replays)")
         replay_info = cur.fetchall()
