@@ -230,7 +230,7 @@ def get_latest_signal_attestation(
             parsed = json.loads(payload_raw)
             if isinstance(parsed, dict):
                 payload_json = parsed
-        except Exception:
+        except json.JSONDecodeError:
             payload_json = {}
     enriched = dict(row)
     enriched["payload_json"] = payload_json
