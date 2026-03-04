@@ -2590,8 +2590,8 @@ def dashboard_overrides_breakdown_endpoint(
         endpoint="/dashboard/overrides/breakdown",
         trace_id=trace_id,
         params={
-            "from": str(from_ts or "") or None,
-            "to": str(to_ts or "") or None,
+            "from": from_ts,
+            "to": to_ts,
             "group_by": str(group_by or "actor"),
             "limit": int(limit),
         },
