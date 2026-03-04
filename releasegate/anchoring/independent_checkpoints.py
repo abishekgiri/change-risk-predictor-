@@ -190,7 +190,7 @@ def _parse_json(raw: Any) -> Dict[str, Any]:
     if isinstance(raw, str):
         try:
             parsed = json.loads(raw)
-        except Exception:
+        except json.JSONDecodeError:
             return {}
         if isinstance(parsed, dict):
             return parsed
