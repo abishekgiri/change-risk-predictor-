@@ -363,6 +363,26 @@ def test_dashboard_overview_read_is_audited_with_trace_id():
     assert audit["metadata"]["trace_id"] == trace_id
 
 
+def test_dashboard_overview_allows_internal_service_auth(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-internal"
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "dashboard-internal-key")
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "policy:read,enforcement:write")
+
+    response = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers={
+            "X-Internal-Service-Key": "dashboard-internal-key",
+            "X-Tenant-Id": tenant_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenant_id"] == tenant_id
+    assert body["trace_id"]
+
+
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():
     _reset_db()
     tenant_id = "tenant-dashboard-rollup"

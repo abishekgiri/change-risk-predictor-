@@ -2106,6 +2106,7 @@ def dashboard_overview_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2149,6 +2150,7 @@ def dashboard_integrity_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2192,6 +2194,7 @@ def dashboard_alerts_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2232,6 +2235,7 @@ def dashboard_blocked_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2279,6 +2283,7 @@ def dashboard_strict_modes_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2315,6 +2320,7 @@ def dashboard_decision_explainer_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
@@ -2352,6 +2358,7 @@ def dashboard_policy_diff_endpoint(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):

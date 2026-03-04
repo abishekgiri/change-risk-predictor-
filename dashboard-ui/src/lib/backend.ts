@@ -5,15 +5,33 @@ function looksLikeJwt(token: string): boolean {
   return token.trim().split(".").length === 3;
 }
 
-function resolveAuthHeaders(token: string): Record<string, string> {
+function internalServiceHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = { "X-Internal-Service-Key": token };
+  const tenantId = optionalEnv("DASHBOARD_TENANT_ID");
+  if (tenantId) {
+    headers["X-Tenant-Id"] = tenantId;
+  }
+  return headers;
+}
+
+function resolveAuthHeaderCandidates(token: string): Array<Record<string, string>> {
   const mode = optionalEnv("DASHBOARD_API_AUTH_MODE", "auto").toLowerCase();
   if (mode === "bearer") {
-    return { Authorization: `Bearer ${token}` };
+    return [{ Authorization: `Bearer ${token}` }];
   }
   if (mode === "api_key") {
-    return { "X-API-Key": token };
+    return [{ "X-API-Key": token }];
   }
-  return looksLikeJwt(token) ? { Authorization: `Bearer ${token}` } : { "X-API-Key": token };
+  if (mode === "internal_service") {
+    return [internalServiceHeaders(token)];
+  }
+  if (looksLikeJwt(token)) {
+    return [{ Authorization: `Bearer ${token}` }];
+  }
+  if (token.startsWith("rgk_")) {
+    return [{ "X-API-Key": token }, internalServiceHeaders(token)];
+  }
+  return [internalServiceHeaders(token), { "X-API-Key": token }];
 }
 
 function extractErrorMessage(payload: unknown, status: number): string {
@@ -67,39 +85,65 @@ export async function backendFetch<T>(
   }
 
   const requestId = createRequestId();
-  const authHeaders = resolveAuthHeaders(token);
-  const response = await fetch(url.toString(), {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders,
-      "X-Request-Id": requestId,
-      ...(init.headers ?? {}),
-    },
-    cache: "no-store",
-  });
+  const authHeaderCandidates = resolveAuthHeaderCandidates(token);
+  const retryableAuthCodes = new Set([
+    "AUTH_API_KEY_INVALID",
+    "AUTH_INTERNAL_SERVICE_INVALID",
+    "AUTH_INTERNAL_SERVICE_FORBIDDEN",
+    "AUTH_REQUIRED",
+  ]);
 
-  const text = await response.text();
-  let payload: unknown = {};
-  if (text) {
-    try {
-      payload = JSON.parse(text);
-    } catch {
-      payload = text;
+  let lastError: Error | null = null;
+  for (let index = 0; index < authHeaderCandidates.length; index += 1) {
+    const authHeaders = authHeaderCandidates[index];
+    const response = await fetch(url.toString(), {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders,
+        "X-Request-Id": requestId,
+        ...(init.headers ?? {}),
+      },
+      cache: "no-store",
+    });
+
+    const text = await response.text();
+    let payload: unknown = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
     }
-  }
 
-  const payloadObj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
-  const traceId = payloadObj.trace_id ?? response.headers.get("X-Request-Id");
+    const payloadObj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+    const traceId = payloadObj.trace_id ?? response.headers.get("X-Request-Id");
 
-  if (!response.ok) {
+    if (response.ok) {
+      return {
+        data: payload as T,
+        traceId: traceId ? String(traceId) : null,
+        status: response.status,
+      };
+    }
+
+    const detail = payloadObj?.detail;
+    const detailObj = detail && typeof detail === "object" ? (detail as Record<string, unknown>) : {};
+    const errorCode = typeof detailObj.error_code === "string" ? detailObj.error_code : "";
+    const shouldRetryAuthHeader =
+      response.status === 401 && retryableAuthCodes.has(errorCode) && index < authHeaderCandidates.length - 1;
+    if (shouldRetryAuthHeader) {
+      continue;
+    }
+
     const message = extractErrorMessage(payload, response.status);
-    throw new Error(`HTTP ${response.status}: ${message} (trace_id=${traceId ?? "n/a"})`);
+    lastError = new Error(`HTTP ${response.status}: ${message} (trace_id=${traceId ?? "n/a"})`);
+    break;
   }
 
-  return {
-    data: payload as T,
-    traceId: traceId ? String(traceId) : null,
-    status: response.status,
-  };
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error("Backend request failed before authentication could be attempted");
 }
