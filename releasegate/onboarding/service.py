@@ -372,7 +372,7 @@ def _activation_state_from_status(status_payload: Dict[str, Any]) -> ActivationS
     return ActivationState(
         mode=mode,
         canary_pct=canary_pct,
-        updated_at=str(config.get("updated_at") or "") or None,
+        updated_at=config.get("updated_at"),
     )
 
 
