@@ -675,6 +675,90 @@ class DashboardMetricsDrilldownData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class CustomerSuccessRiskTrendPoint(BaseModel):
+    t: str
+    value: float
+    decision_count: int = 0
+
+
+class CustomerSuccessReleaseStabilityPoint(BaseModel):
+    t: str
+    value: float
+    block_rate: float = 0.0
+    override_rate: float = 0.0
+    blocked_count: int = 0
+    override_count: int = 0
+    decision_count: int = 0
+
+
+class DashboardCustomerSuccessRiskTrendData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    window_days: int = 30
+    risk_index: List[CustomerSuccessRiskTrendPoint] = Field(default_factory=list)
+    risk_delta_30d: float = 0.0
+    org_risk_reduction: float = 0.0
+    release_stability: List[CustomerSuccessReleaseStabilityPoint] = Field(default_factory=list)
+    release_stability_delta: float = 0.0
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CustomerSuccessTopOverrideUser(BaseModel):
+    user: str
+    overrides: int
+    share: float
+    last_override_at: Optional[str] = None
+
+
+class DashboardCustomerSuccessOverrideAnalysisData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    window_days: int = 30
+    total_overrides: int = 0
+    total_decisions: int = 0
+    top_users: List[CustomerSuccessTopOverrideUser] = Field(default_factory=list)
+    override_concentration_index: float = 0.0
+    policy_weakening_signal: bool = False
+    override_rate_baseline: float = 0.0
+    override_rate_recent: float = 0.0
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class CustomerSuccessRegressionItem(BaseModel):
+    policy_change_id: str
+    policy_id: str
+    event_type: str
+    changed_at: str
+    integrity_before: float
+    integrity_after: float
+    integrity_drop: float
+    integrity_drop_ratio: float
+    correlation_window_hours: int
+    affected_workflows: List[str] = Field(default_factory=list)
+    policy_diff_path: str = "/policies/diff"
+    decisions_path: str = "/observability?metric=block_frequency"
+
+
+class DashboardCustomerSuccessRegressionReportData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    window_days: int = 30
+    threshold_drop: float = 0.0
+    total_policy_changes: int = 0
+    regressions_detected: int = 0
+    regressions: List[CustomerSuccessRegressionItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DashboardErrorDetail(BaseModel):
     code: str = Field(description="Stable canonical dashboard error code.")
     error_code: str = Field(description="Detailed service error code. Defaults to canonical code.")
@@ -755,6 +839,24 @@ class DashboardMetricsDrilldownResponse(BaseModel):
     generated_at: str
     trace_id: str
     data: DashboardMetricsDrilldownData
+
+
+class DashboardCustomerSuccessRiskTrendResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardCustomerSuccessRiskTrendData
+
+
+class DashboardCustomerSuccessOverrideAnalysisResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardCustomerSuccessOverrideAnalysisData
+
+
+class DashboardCustomerSuccessRegressionReportResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardCustomerSuccessRegressionReportData
 
 
 class OnboardingConfigData(BaseModel):
@@ -3039,6 +3141,171 @@ def dashboard_metrics_drilldown_endpoint(
         response=response,
         trace_id=trace_id,
         cache_control="private, max-age=15",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/customer_success/risk_trend",
+    response_model=DashboardCustomerSuccessRiskTrendResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_customer_success_risk_trend_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.customer_success import get_customer_success_risk_trend
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_customer_success_risk_trend(
+            tenant_id=effective_tenant,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_CUSTOMER_SUCCESS_RISK_TREND",
+        endpoint="/dashboard/customer_success/risk_trend",
+        trace_id=trace_id,
+        params={
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/customer_success/override_analysis",
+    response_model=DashboardCustomerSuccessOverrideAnalysisResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_customer_success_override_analysis_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    top_users_limit: int = 10,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.customer_success import get_customer_success_override_analysis
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_customer_success_override_analysis(
+            tenant_id=effective_tenant,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+            top_users_limit=top_users_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_CUSTOMER_SUCCESS_OVERRIDE_ANALYSIS",
+        endpoint="/dashboard/customer_success/override_analysis",
+        trace_id=trace_id,
+        params={
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+            "top_users_limit": int(top_users_limit),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/customer_success/regression_report",
+    response_model=DashboardCustomerSuccessRegressionReportResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_customer_success_regression_report_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    correlation_window_hours: int = 48,
+    drop_threshold: float = 10.0,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.customer_success import get_customer_success_regression_report
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_customer_success_regression_report(
+            tenant_id=effective_tenant,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+            correlation_window_hours=correlation_window_hours,
+            drop_threshold=drop_threshold,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_CUSTOMER_SUCCESS_REGRESSION_REPORT",
+        endpoint="/dashboard/customer_success/regression_report",
+        trace_id=trace_id,
+        params={
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+            "correlation_window_hours": int(correlation_window_hours),
+            "drop_threshold": float(drop_threshold),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=60",
         payload=payload,
     )
 

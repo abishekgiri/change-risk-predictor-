@@ -15,6 +15,7 @@ const links = [
   { href: "/onboarding", label: "Onboarding" },
   { href: "/overview", label: "Overview" },
   { href: "/observability", label: "Observability" },
+  { href: "/customer-success", label: "Customer Success" },
   { href: "/integrity", label: "Integrity" },
   { href: "/overrides", label: "Overrides" },
   { href: "/policies/diff", label: "Policy Diff" },

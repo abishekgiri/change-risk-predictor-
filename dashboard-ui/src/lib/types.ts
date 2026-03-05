@@ -231,6 +231,84 @@ export interface DashboardMetricsDrilldown {
   items: DashboardMetricsDrilldownItem[];
 }
 
+export interface CustomerSuccessRiskPoint {
+  t: string;
+  value: number;
+  decision_count: number;
+}
+
+export interface CustomerSuccessReleaseStabilityPoint {
+  t: string;
+  value: number;
+  block_rate: number;
+  override_rate: number;
+  blocked_count: number;
+  override_count: number;
+  decision_count: number;
+}
+
+export interface DashboardCustomerSuccessRiskTrend {
+  trace_id: string;
+  tenant_id: string;
+  from: string;
+  to: string;
+  window_days: number;
+  risk_index: CustomerSuccessRiskPoint[];
+  risk_delta_30d: number;
+  org_risk_reduction: number;
+  release_stability: CustomerSuccessReleaseStabilityPoint[];
+  release_stability_delta: number;
+}
+
+export interface CustomerSuccessOverrideUser {
+  user: string;
+  overrides: number;
+  share: number;
+  last_override_at: string | null;
+}
+
+export interface DashboardCustomerSuccessOverrideAnalysis {
+  trace_id: string;
+  tenant_id: string;
+  from: string;
+  to: string;
+  window_days: number;
+  total_overrides: number;
+  total_decisions: number;
+  top_users: CustomerSuccessOverrideUser[];
+  override_concentration_index: number;
+  policy_weakening_signal: boolean;
+  override_rate_baseline: number;
+  override_rate_recent: number;
+}
+
+export interface CustomerSuccessRegressionItem {
+  policy_change_id: string;
+  policy_id: string;
+  event_type: string;
+  changed_at: string;
+  integrity_before: number;
+  integrity_after: number;
+  integrity_drop: number;
+  integrity_drop_ratio: number;
+  correlation_window_hours: number;
+  affected_workflows: string[];
+  policy_diff_path: string;
+  decisions_path: string;
+}
+
+export interface DashboardCustomerSuccessRegressionReport {
+  trace_id: string;
+  tenant_id: string;
+  from: string;
+  to: string;
+  window_days: number;
+  threshold_drop: number;
+  total_policy_changes: number;
+  regressions_detected: number;
+  regressions: CustomerSuccessRegressionItem[];
+}
+
 export type OnboardingMode = "simulation" | "canary" | "strict";
 
 export interface JiraProject {
