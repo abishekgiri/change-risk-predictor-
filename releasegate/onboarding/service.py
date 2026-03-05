@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -226,6 +227,13 @@ def _serialize_onboarding_row(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@dataclass
+class ActivationState:
+    mode: str
+    canary_pct: Optional[int]
+    updated_at: Optional[str]
+
+
 def get_onboarding_status(*, tenant_id: Optional[str]) -> Dict[str, Any]:
     init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
@@ -357,6 +365,99 @@ def _activation_payload_from_status(status_payload: Dict[str, Any]) -> Dict[str,
     }
 
 
+def _activation_state_from_status(status_payload: Dict[str, Any]) -> ActivationState:
+    config = status_payload.get("config") or {}
+    mode = normalize_onboarding_mode(str(config.get("mode") or "simulation"))
+    canary_pct = normalize_canary_pct(mode=mode, canary_pct=config.get("canary_pct"))
+    return ActivationState(
+        mode=mode,
+        canary_pct=canary_pct,
+        updated_at=config.get("updated_at"),
+    )
+
+
+def _serialize_activation_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    mode = normalize_onboarding_mode(str(row.get("mode") or "simulation"))
+    canary_pct = normalize_canary_pct(mode=mode, canary_pct=row.get("canary_pct"))
+    return {
+        "mode": mode,
+        "canary_pct": canary_pct,
+        "updated_at": row.get("saved_at"),
+    }
+
+
+def _record_activation_history(
+    *,
+    tenant_id: str,
+    state: ActivationState,
+) -> None:
+    if state.updated_at is None:
+        return
+    storage = get_storage_backend()
+    saved_at = _utc_now_iso()
+    storage.execute(
+        """
+        INSERT INTO tenant_onboarding_activation_history (
+            tenant_id,
+            mode,
+            canary_pct,
+            previous_updated_at,
+            saved_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            tenant_id,
+            state.mode,
+            state.canary_pct,
+            state.updated_at,
+            saved_at,
+        ),
+    )
+    # Keep only the most recent 10 entries per tenant.
+    storage.execute(
+        """
+        DELETE FROM tenant_onboarding_activation_history
+        WHERE tenant_id = ?
+          AND history_id NOT IN (
+              SELECT history_id
+              FROM tenant_onboarding_activation_history
+              WHERE tenant_id = ?
+              ORDER BY history_id DESC
+              LIMIT 10
+          )
+        """,
+        (tenant_id, tenant_id),
+    )
+
+
+def _pop_previous_activation(
+    *,
+    tenant_id: str,
+) -> Optional[Dict[str, Any]]:
+    storage = get_storage_backend()
+    row = storage.fetchone(
+        """
+        SELECT history_id, mode, canary_pct, saved_at
+        FROM tenant_onboarding_activation_history
+        WHERE tenant_id = ?
+        ORDER BY history_id DESC
+        LIMIT 1
+        """,
+        (tenant_id,),
+    )
+    if not row:
+        return None
+    history_id = int(row.get("history_id"))
+    storage.execute(
+        """
+        DELETE FROM tenant_onboarding_activation_history
+        WHERE tenant_id = ? AND history_id = ?
+        """,
+        (tenant_id, history_id),
+    )
+    return _serialize_activation_history_row(row)
+
+
 def get_onboarding_activation(*, tenant_id: Optional[str]) -> Dict[str, Any]:
     status_payload = get_onboarding_status(tenant_id=tenant_id)
     return _activation_payload_from_status(status_payload)
@@ -373,6 +474,13 @@ def save_onboarding_activation(
         raise ValueError("canary_pct is required when mode is canary")
     status_payload = get_onboarding_status(tenant_id=tenant_id)
     config = status_payload.get("config") or {}
+    previous_state = _activation_state_from_status(status_payload)
+    normalized_canary_pct = normalize_canary_pct(mode=normalized_mode, canary_pct=canary_pct)
+    if previous_state.mode != normalized_mode or previous_state.canary_pct != normalized_canary_pct:
+        _record_activation_history(
+            tenant_id=str(status_payload.get("tenant_id") or ""),
+            state=previous_state,
+        )
     updated_status = save_onboarding_config(
         tenant_id=tenant_id,
         jira_instance_id=config.get("jira_instance_id"),
@@ -380,6 +488,33 @@ def save_onboarding_activation(
         workflow_ids=list(config.get("workflow_ids") or []),
         transition_ids=list(config.get("transition_ids") or []),
         mode=normalized_mode,
-        canary_pct=canary_pct,
+        canary_pct=normalized_canary_pct,
     )
     return _activation_payload_from_status(updated_status)
+
+
+def rollback_onboarding_activation(
+    *,
+    tenant_id: Optional[str],
+) -> Dict[str, Any]:
+    status_payload = get_onboarding_status(tenant_id=tenant_id)
+    effective_tenant = str(status_payload.get("tenant_id") or "")
+    previous = _pop_previous_activation(tenant_id=effective_tenant)
+    if not previous:
+        raise ValueError("No previous activation state")
+
+    config = status_payload.get("config") or {}
+    updated_status = save_onboarding_config(
+        tenant_id=effective_tenant,
+        jira_instance_id=config.get("jira_instance_id"),
+        project_keys=list(config.get("project_keys") or []),
+        workflow_ids=list(config.get("workflow_ids") or []),
+        transition_ids=list(config.get("transition_ids") or []),
+        mode=str(previous.get("mode") or "simulation"),
+        canary_pct=previous.get("canary_pct"),
+    )
+    activation_payload = _activation_payload_from_status(updated_status)
+    return {
+        "status": "rolled_back",
+        "activation": activation_payload,
+    }
