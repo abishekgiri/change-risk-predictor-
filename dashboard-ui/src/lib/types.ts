@@ -160,6 +160,77 @@ export interface DashboardOverridesBreakdown {
   rows: OverrideBreakdownRow[];
 }
 
+export type ObservabilityMetric =
+  | "integrity_score"
+  | "drift_index"
+  | "override_rate"
+  | "block_frequency";
+
+export interface MetricsSeriesPoint {
+  t: string;
+  value: number;
+  numerator?: number;
+  denominator?: number;
+}
+
+export interface DashboardMetricsTimeseries {
+  trace_id: string;
+  tenant_id: string;
+  metric: ObservabilityMetric;
+  display_name: string;
+  unit: string;
+  higher_is_better: boolean;
+  description: string;
+  bucket: "day" | "hour";
+  from: string;
+  to: string;
+  series: MetricsSeriesPoint[];
+}
+
+export interface DashboardMetricSummaryPoint {
+  display_name: string;
+  unit: string;
+  higher_is_better: boolean;
+  value: number;
+  previous: number | null;
+  delta: number | null;
+  sample_size: number;
+}
+
+export interface DashboardMetricsSummary {
+  trace_id: string;
+  tenant_id: string;
+  from: string;
+  to: string;
+  window_days: number;
+  metrics: Record<ObservabilityMetric, DashboardMetricSummaryPoint>;
+}
+
+export interface DashboardMetricsDrilldownItem {
+  decision_id: string;
+  created_at: string;
+  decision_status: string;
+  reason_code: string;
+  jira_issue_id: string;
+  workflow_id: string;
+  transition_id: string;
+  actor: string;
+  environment: string;
+  project_key: string;
+  policy_hash: string;
+  explainer_path: string;
+}
+
+export interface DashboardMetricsDrilldown {
+  trace_id: string;
+  tenant_id: string;
+  metric: ObservabilityMetric;
+  from: string;
+  to: string;
+  limit: number;
+  items: DashboardMetricsDrilldownItem[];
+}
+
 export type OnboardingMode = "simulation" | "canary" | "strict";
 
 export interface JiraProject {

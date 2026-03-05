@@ -604,6 +604,77 @@ class DashboardOverridesBreakdownData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DashboardMetricsSeriesPoint(BaseModel):
+    t: str
+    value: float = 0.0
+    numerator: Optional[int] = None
+    denominator: Optional[int] = None
+
+
+class DashboardMetricsTimeseriesData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    metric: str
+    display_name: str
+    unit: str
+    higher_is_better: bool = False
+    description: str = ""
+    bucket: str = "day"
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    series: List[DashboardMetricsSeriesPoint] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DashboardMetricSummaryPoint(BaseModel):
+    display_name: str
+    unit: str
+    higher_is_better: bool = False
+    value: float = 0.0
+    previous: Optional[float] = None
+    delta: Optional[float] = None
+    sample_size: int = 0
+
+
+class DashboardMetricsSummaryData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    window_days: int = 30
+    metrics: Dict[str, DashboardMetricSummaryPoint] = Field(default_factory=dict)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DashboardMetricDecisionItem(BaseModel):
+    decision_id: str
+    created_at: str
+    decision_status: str
+    reason_code: str = ""
+    jira_issue_id: str = ""
+    workflow_id: str = ""
+    transition_id: str = ""
+    actor: str = ""
+    environment: str = ""
+    project_key: str = ""
+    policy_hash: str = ""
+    explainer_path: str = ""
+
+
+class DashboardMetricsDrilldownData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    metric: str
+    from_ts: str = Field(alias="from")
+    to_ts: str = Field(alias="to")
+    limit: int = 50
+    items: List[DashboardMetricDecisionItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class DashboardErrorDetail(BaseModel):
     code: str = Field(description="Stable canonical dashboard error code.")
     error_code: str = Field(description="Detailed service error code. Defaults to canonical code.")
@@ -666,6 +737,24 @@ class DashboardOverridesBreakdownResponse(BaseModel):
     generated_at: str
     trace_id: str
     data: DashboardOverridesBreakdownData
+
+
+class DashboardMetricsTimeseriesResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardMetricsTimeseriesData
+
+
+class DashboardMetricsSummaryResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardMetricsSummaryData
+
+
+class DashboardMetricsDrilldownResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardMetricsDrilldownData
 
 
 class OnboardingConfigData(BaseModel):
@@ -2782,6 +2871,174 @@ def dashboard_overrides_breakdown_endpoint(
         response=response,
         trace_id=trace_id,
         cache_control="private, max-age=60",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/metrics/timeseries",
+    response_model=DashboardMetricsTimeseriesResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_metrics_timeseries_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    metric: str = "integrity_score",
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    bucket: str = "day",
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_metrics_timeseries
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_metrics_timeseries(
+            tenant_id=effective_tenant,
+            metric=metric,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+            bucket=bucket,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_METRICS_TIMESERIES",
+        endpoint="/dashboard/metrics/timeseries",
+        trace_id=trace_id,
+        params={
+            "metric": str(metric or "integrity_score"),
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+            "bucket": str(bucket or "day"),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/metrics/summary",
+    response_model=DashboardMetricsSummaryResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_metrics_summary_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_metrics_summary
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_metrics_summary(
+            tenant_id=effective_tenant,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_METRICS_SUMMARY",
+        endpoint="/dashboard/metrics/summary",
+        trace_id=trace_id,
+        params={
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
+
+
+@app.get(
+    "/dashboard/metrics/drilldown",
+    response_model=DashboardMetricsDrilldownResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_metrics_drilldown_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    metric: str = "block_frequency",
+    from_ts: Optional[str] = Query(default=None, alias="from"),
+    to_ts: Optional[str] = Query(default=None, alias="to"),
+    window_days: int = 30,
+    limit: int = 50,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.dashboard_metrics import get_metrics_drilldown
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        payload = get_metrics_drilldown(
+            tenant_id=effective_tenant,
+            metric=metric,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            window_days=window_days,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_METRICS_DRILLDOWN",
+        endpoint="/dashboard/metrics/drilldown",
+        trace_id=trace_id,
+        params={
+            "metric": str(metric or "block_frequency"),
+            "from": from_ts,
+            "to": to_ts,
+            "window_days": int(window_days),
+            "limit": int(limit),
+        },
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=15",
         payload=payload,
     )
 

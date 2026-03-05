@@ -21,11 +21,42 @@ DEFAULT_OVERRIDES_GROUP_BY = "actor"
 DEFAULT_OVERRIDES_LIMIT = 25
 MAX_OVERRIDES_LIMIT = 100
 SAMPLE_OVERRIDE_IDS_LIMIT = 3
+DEFAULT_TIMESERIES_BUCKET = "day"
+DEFAULT_DRILLDOWN_LIMIT = 50
+MAX_DRILLDOWN_LIMIT = 200
 ALERT_BASELINE_DAYS = 7
 OVERRIDE_SPIKE_MULTIPLIER = 2.0
 DRIFT_SPIKE_MULTIPLIER = 2.0
 OVERRIDE_SPIKE_MIN_RATE = 0.05
 DRIFT_SPIKE_MIN_INDEX = 0.02
+BLOCKED_STATUSES = {"BLOCKED", "ERROR", "DENIED"}
+
+TIMESERIES_METRICS: Dict[str, Dict[str, Any]] = {
+    "integrity_score": {
+        "display_name": "Integrity Score",
+        "unit": "score",
+        "higher_is_better": True,
+        "description": "Governance integrity score from daily rollups.",
+    },
+    "drift_index": {
+        "display_name": "Drift Index",
+        "unit": "ratio",
+        "higher_is_better": False,
+        "description": "Policy/behavior drift signal from governance rollups.",
+    },
+    "override_rate": {
+        "display_name": "Override Rate",
+        "unit": "ratio",
+        "higher_is_better": False,
+        "description": "Overrides divided by total decisions in the selected bucket.",
+    },
+    "block_frequency": {
+        "display_name": "Block Frequency",
+        "unit": "ratio",
+        "higher_is_better": False,
+        "description": "Blocked decisions divided by total decisions in the selected bucket.",
+    },
+}
 
 
 def _utc_now() -> datetime:
@@ -81,6 +112,28 @@ def _normalize_overrides_limit(limit: int) -> int:
     parsed = int(limit or DEFAULT_OVERRIDES_LIMIT)
     if parsed < 1 or parsed > MAX_OVERRIDES_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_OVERRIDES_LIMIT}")
+    return parsed
+
+
+def _normalize_timeseries_metric(metric: str) -> str:
+    normalized = str(metric or "").strip().lower()
+    if normalized not in TIMESERIES_METRICS:
+        supported = ", ".join(sorted(TIMESERIES_METRICS))
+        raise ValueError(f"metric must be one of {supported}")
+    return normalized
+
+
+def _normalize_timeseries_bucket(bucket: str) -> str:
+    normalized = str(bucket or DEFAULT_TIMESERIES_BUCKET).strip().lower()
+    if normalized not in {"day", "hour"}:
+        raise ValueError("bucket must be one of day, hour")
+    return normalized
+
+
+def _normalize_drilldown_limit(limit: int) -> int:
+    parsed = int(limit or DEFAULT_DRILLDOWN_LIMIT)
+    if parsed < 1 or parsed > MAX_DRILLDOWN_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_DRILLDOWN_LIMIT}")
     return parsed
 
 
@@ -186,10 +239,42 @@ def _parse_override_window(
     return from_dt, to_dt
 
 
+def _parse_metrics_window(
+    *,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+    window_days: int,
+) -> Tuple[datetime, datetime]:
+    now = _utc_now()
+    bounded_window = _normalize_window_days(window_days)
+    from_dt = _parse_required_datetime(from_ts, field_name="from") if str(from_ts or "").strip() else None
+    to_dt = _parse_required_datetime(to_ts, field_name="to") if str(to_ts or "").strip() else None
+
+    if from_dt is None and to_dt is None:
+        to_dt = now
+        from_dt = to_dt - timedelta(days=bounded_window)
+    elif from_dt is None and to_dt is not None:
+        from_dt = to_dt - timedelta(days=bounded_window)
+    elif from_dt is not None and to_dt is None:
+        to_dt = now
+
+    if from_dt is None or to_dt is None:
+        raise ValueError("invalid metrics window")
+    if from_dt > to_dt:
+        raise ValueError("from must be before to")
+    return from_dt, to_dt
+
+
 def _override_rate_from_counts(*, override_count: int, decision_count: int) -> float:
     if int(decision_count or 0) <= 0:
         return 0.0
     return float(override_count) / float(decision_count)
+
+
+def _block_frequency_from_counts(*, blocked_count: int, decision_count: int) -> float:
+    if int(decision_count or 0) <= 0:
+        return 0.0
+    return float(blocked_count) / float(decision_count)
 
 
 def _extract_drift_breakdown(details_json: Any) -> Optional[Dict[str, Any]]:
@@ -601,6 +686,328 @@ def _decode_blocked_cursor(cursor: Optional[str]) -> Optional[Tuple[str, str]]:
     if not created_at or not decision_id:
         raise ValueError("cursor is invalid")
     return created_at, decision_id
+
+
+def _bucket_start(dt: datetime, *, bucket: str) -> str:
+    if bucket == "hour":
+        return dt.replace(minute=0, second=0, microsecond=0).isoformat()
+    return datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc).isoformat()
+
+
+def _timeseries_value_from_row(*, metric: str, row: Dict[str, Any]) -> Tuple[float, Optional[int], Optional[int]]:
+    decision_count = int(row.get("decision_count") or 0)
+    override_count = int(row.get("override_count") or 0)
+    blocked_count = int(row.get("blocked_count") or 0)
+    if metric == "integrity_score":
+        return float(row.get("integrity_score") or 0.0), None, None
+    if metric == "drift_index":
+        return float(row.get("drift_index") or 0.0), None, None
+    if metric == "override_rate":
+        return _override_rate_from_counts(override_count=override_count, decision_count=decision_count), override_count, decision_count
+    return _block_frequency_from_counts(blocked_count=blocked_count, decision_count=decision_count), blocked_count, decision_count
+
+
+def _decision_item_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _parse_json(row.get("full_decision_json"))
+    request = _request_from_decision_payload(payload)
+    overrides = request.get("context_overrides") if isinstance(request.get("context_overrides"), dict) else {}
+    workflow_id = str(
+        overrides.get("workflow_id")
+        or request.get("workflow_id")
+        or request.get("transition_name")
+        or ""
+    )
+    decision_id = str(row.get("decision_id") or "")
+    return {
+        "decision_id": decision_id,
+        "created_at": str(row.get("created_at") or ""),
+        "decision_status": str(row.get("release_status") or ""),
+        "reason_code": str(payload.get("reason_code") or ""),
+        "jira_issue_id": str(request.get("issue_key") or ""),
+        "workflow_id": workflow_id,
+        "transition_id": str(request.get("transition_id") or ""),
+        "actor": str(request.get("actor_account_id") or request.get("actor_id") or ""),
+        "environment": str(request.get("environment") or ""),
+        "project_key": str(request.get("project_key") or ""),
+        "policy_hash": str(row.get("policy_hash") or ""),
+        "explainer_path": f"/dashboard/decisions/{decision_id}/explainer",
+    }
+
+
+def get_metrics_timeseries(
+    *,
+    tenant_id: str,
+    metric: str,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    bucket: str = DEFAULT_TIMESERIES_BUCKET,
+) -> Dict[str, Any]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_metric = _normalize_timeseries_metric(metric)
+    normalized_bucket = _normalize_timeseries_bucket(bucket)
+    from_dt, to_dt = _parse_metrics_window(
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+    )
+
+    if normalized_bucket == "hour" and normalized_metric in {"integrity_score", "drift_index"}:
+        raise ValueError("hour bucket is only supported for override_rate and block_frequency")
+
+    series: List[Dict[str, Any]] = []
+    if normalized_bucket == "day":
+        rows = storage.fetchall(
+            """
+            SELECT
+                date_utc,
+                integrity_score,
+                drift_index,
+                blocked_count,
+                override_count,
+                decision_count
+            FROM governance_daily_metrics
+            WHERE tenant_id = ?
+              AND date_utc >= ?
+              AND date_utc <= ?
+            ORDER BY date_utc ASC
+            """,
+            (
+                effective_tenant,
+                from_dt.date().isoformat(),
+                to_dt.date().isoformat(),
+            ),
+        )
+        for row in rows:
+            value, numerator, denominator = _timeseries_value_from_row(metric=normalized_metric, row=row)
+            point: Dict[str, Any] = {
+                "t": f"{_iso_date(row.get('date_utc'))}T00:00:00+00:00",
+                "value": round(float(value), 6),
+            }
+            if numerator is not None:
+                point["numerator"] = int(numerator)
+            if denominator is not None:
+                point["denominator"] = int(denominator)
+            series.append(point)
+    else:
+        decision_rows = storage.fetchall(
+            """
+            SELECT created_at, release_status
+            FROM audit_decisions
+            WHERE tenant_id = ?
+              AND created_at >= ?
+              AND created_at <= ?
+            ORDER BY created_at ASC
+            """,
+            (effective_tenant, from_dt.isoformat(), to_dt.isoformat()),
+        )
+        override_rows = storage.fetchall(
+            """
+            SELECT created_at
+            FROM audit_overrides
+            WHERE tenant_id = ?
+              AND created_at >= ?
+              AND created_at <= ?
+            ORDER BY created_at ASC
+            """,
+            (effective_tenant, from_dt.isoformat(), to_dt.isoformat()),
+        )
+        buckets: Dict[str, Dict[str, int]] = {}
+        for row in decision_rows:
+            bucket_key = _bucket_start(_parse_iso_datetime(row.get("created_at")), bucket=normalized_bucket)
+            counts = buckets.setdefault(bucket_key, {"decision_count": 0, "blocked_count": 0, "override_count": 0})
+            counts["decision_count"] += 1
+            if str(row.get("release_status") or "").strip().upper() in BLOCKED_STATUSES:
+                counts["blocked_count"] += 1
+        for row in override_rows:
+            bucket_key = _bucket_start(_parse_iso_datetime(row.get("created_at")), bucket=normalized_bucket)
+            counts = buckets.setdefault(bucket_key, {"decision_count": 0, "blocked_count": 0, "override_count": 0})
+            counts["override_count"] += 1
+
+        for bucket_key in sorted(buckets):
+            counts = buckets[bucket_key]
+            if normalized_metric == "override_rate":
+                value = _override_rate_from_counts(
+                    override_count=int(counts.get("override_count") or 0),
+                    decision_count=int(counts.get("decision_count") or 0),
+                )
+                numerator = int(counts.get("override_count") or 0)
+            else:
+                value = _block_frequency_from_counts(
+                    blocked_count=int(counts.get("blocked_count") or 0),
+                    decision_count=int(counts.get("decision_count") or 0),
+                )
+                numerator = int(counts.get("blocked_count") or 0)
+            series.append(
+                {
+                    "t": bucket_key,
+                    "value": round(float(value), 6),
+                    "numerator": numerator,
+                    "denominator": int(counts.get("decision_count") or 0),
+                }
+            )
+
+    meta = TIMESERIES_METRICS[normalized_metric]
+    return {
+        "tenant_id": effective_tenant,
+        "metric": normalized_metric,
+        "display_name": str(meta.get("display_name") or normalized_metric),
+        "unit": str(meta.get("unit") or "ratio"),
+        "higher_is_better": bool(meta.get("higher_is_better")),
+        "description": str(meta.get("description") or ""),
+        "bucket": normalized_bucket,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "series": series,
+    }
+
+
+def get_metrics_summary(
+    *,
+    tenant_id: str,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+) -> Dict[str, Any]:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    from_dt, to_dt = _parse_metrics_window(
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+    )
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for metric_name, metric_meta in TIMESERIES_METRICS.items():
+        payload = get_metrics_timeseries(
+            tenant_id=effective_tenant,
+            metric=metric_name,
+            from_ts=from_dt.isoformat(),
+            to_ts=to_dt.isoformat(),
+            window_days=window_days,
+            bucket="day",
+        )
+        series = payload.get("series") if isinstance(payload.get("series"), list) else []
+        latest_point = series[-1] if series else None
+        previous_point = series[-2] if len(series) > 1 else None
+        latest_value = float((latest_point or {}).get("value") or 0.0)
+        previous_value = float(previous_point.get("value")) if isinstance(previous_point, dict) else None
+        delta = latest_value - previous_value if previous_value is not None else None
+        metrics[metric_name] = {
+            "display_name": metric_meta.get("display_name"),
+            "unit": metric_meta.get("unit"),
+            "higher_is_better": bool(metric_meta.get("higher_is_better")),
+            "value": round(latest_value, 6),
+            "previous": round(previous_value, 6) if previous_value is not None else None,
+            "delta": round(delta, 6) if delta is not None else None,
+            "sample_size": len(series),
+        }
+
+    return {
+        "tenant_id": effective_tenant,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "window_days": _normalize_window_days(window_days),
+        "metrics": metrics,
+    }
+
+
+def get_metrics_drilldown(
+    *,
+    tenant_id: str,
+    metric: str,
+    from_ts: Optional[str] = None,
+    to_ts: Optional[str] = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = DEFAULT_DRILLDOWN_LIMIT,
+) -> Dict[str, Any]:
+    init_db()
+    storage = get_storage_backend()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_metric = _normalize_timeseries_metric(metric)
+    bounded_limit = _normalize_drilldown_limit(limit)
+    from_dt, to_dt = _parse_metrics_window(
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+    )
+
+    items: List[Dict[str, Any]] = []
+    if normalized_metric == "override_rate":
+        override_rows = storage.fetchall(
+            """
+            SELECT decision_id
+            FROM audit_overrides
+            WHERE tenant_id = ?
+              AND created_at >= ?
+              AND created_at <= ?
+            ORDER BY created_at DESC, override_id ASC
+            LIMIT ?
+            """,
+            (effective_tenant, from_dt.isoformat(), to_dt.isoformat(), bounded_limit * 4),
+        )
+        seen: set[str] = set()
+        decision_ids: List[str] = []
+        for row in override_rows:
+            decision_id = str(row.get("decision_id") or "").strip()
+            if not decision_id or decision_id in seen:
+                continue
+            seen.add(decision_id)
+            decision_ids.append(decision_id)
+            if len(decision_ids) >= bounded_limit:
+                break
+        for decision_id in decision_ids:
+            row = storage.fetchone(
+                """
+                SELECT decision_id, created_at, release_status, full_decision_json, policy_hash
+                FROM audit_decisions
+                WHERE tenant_id = ? AND decision_id = ?
+                LIMIT 1
+                """,
+                (effective_tenant, decision_id),
+            )
+            if row:
+                items.append(_decision_item_from_row(row))
+    else:
+        filter_clause = ""
+        params: List[Any] = [effective_tenant, from_dt.isoformat(), to_dt.isoformat()]
+        if normalized_metric == "block_frequency":
+            filter_clause = "AND release_status IN ('BLOCKED', 'ERROR', 'DENIED')"
+        rows = storage.fetchall(
+            f"""
+            SELECT decision_id, created_at, release_status, full_decision_json, policy_hash
+            FROM audit_decisions
+            WHERE tenant_id = ?
+              AND created_at >= ?
+              AND created_at <= ?
+              {filter_clause}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params + [bounded_limit * 4]),
+        )
+        for row in rows:
+            item = _decision_item_from_row(row)
+            if normalized_metric == "drift_index":
+                reason_code = str(item.get("reason_code") or "").upper()
+                if "DRIFT" not in reason_code and item.get("decision_status") == "ALLOWED":
+                    continue
+            elif normalized_metric == "integrity_score":
+                status = str(item.get("decision_status") or "").upper()
+                if status == "ALLOWED":
+                    continue
+            items.append(item)
+            if len(items) >= bounded_limit:
+                break
+
+    return {
+        "tenant_id": effective_tenant,
+        "metric": normalized_metric,
+        "from": from_dt.isoformat(),
+        "to": to_dt.isoformat(),
+        "limit": bounded_limit,
+        "items": items[:bounded_limit],
+    }
 
 
 def list_integrity_trend(
