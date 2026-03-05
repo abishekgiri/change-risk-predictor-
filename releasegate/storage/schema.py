@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 import sqlite3
+import threading
 
 from releasegate.config import DB_PATH
 from releasegate.storage.migrations import MIGRATIONS, apply_sqlite_migrations
 
 
 SCHEMA_VERSION = "v6"
+_POSTGRES_SCHEMA_LOCK = threading.Lock()
+_POSTGRES_SCHEMA_READY = False
 
 
 def _init_postgres_schema() -> str:
@@ -2573,6 +2576,99 @@ def _init_postgres_schema() -> str:
         END $$;
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cross_system_correlations (
+            tenant_id TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            jira_issue_key TEXT,
+            pr_repo TEXT,
+            pr_sha TEXT,
+            deploy_id TEXT,
+            incident_id TEXT,
+            environment TEXT NOT NULL,
+            change_ticket_key TEXT,
+            decision_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, correlation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_correlations_tenant_deploy
+        ON cross_system_correlations(tenant_id, deploy_id, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_correlations_tenant_incident
+        ON cross_system_correlations(tenant_id, incident_id, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_correlations_tenant_jira
+        ON cross_system_correlations(tenant_id, jira_issue_key, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_insights (
+            tenant_id TEXT NOT NULL,
+            insight_id TEXT NOT NULL,
+            insight_date_utc DATE NOT NULL,
+            lookback_days INTEGER NOT NULL,
+            override_rate_by_project_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            deny_rate_by_reason_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            missing_signal_counts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            strict_fail_closed_trigger_counts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, insight_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_insights_tenant_date
+        ON governance_insights(tenant_id, insight_date_utc DESC, created_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_recommendations (
+            tenant_id TEXT NOT NULL,
+            recommendation_id TEXT NOT NULL,
+            recommendation_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            playbook TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+            acked_by TEXT,
+            acked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, recommendation_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_governance_recommendations_tenant_fingerprint
+        ON governance_recommendations(tenant_id, fingerprint)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_recommendations_tenant_status
+        ON governance_recommendations(tenant_id, status, severity, updated_at DESC)
+        """
+    )
     now = datetime.now(timezone.utc)
     for migration in MIGRATIONS:
         cur.execute(
@@ -2623,7 +2719,15 @@ def init_db() -> str:
 
     backend = (os.getenv("RELEASEGATE_STORAGE_BACKEND") or "sqlite").strip().lower()
     if backend == "postgres":
-        return _init_postgres_schema()
+        global _POSTGRES_SCHEMA_READY
+        if _POSTGRES_SCHEMA_READY:
+            return SCHEMA_VERSION
+        with _POSTGRES_SCHEMA_LOCK:
+            if _POSTGRES_SCHEMA_READY:
+                return SCHEMA_VERSION
+            version = _init_postgres_schema()
+            _POSTGRES_SCHEMA_READY = True
+            return version
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
