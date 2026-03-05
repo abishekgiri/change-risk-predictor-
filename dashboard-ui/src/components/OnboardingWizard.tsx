@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 
 import type {
   OnboardingActivation,
+  OnboardingActivationHistory,
   OnboardingActivationRollback,
   JiraProject,
   JiraProjectsDiscoveryResponse,
@@ -53,6 +54,7 @@ export function OnboardingWizard() {
 
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [activationStatus, setActivationStatus] = useState<OnboardingActivation | null>(null);
+  const [activationHistory, setActivationHistory] = useState<OnboardingActivationHistory | null>(null);
   const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(null);
   const [projects, setProjects] = useState<JiraProject[]>([]);
   const [workflows, setWorkflows] = useState<JiraWorkflow[]>([]);
@@ -94,6 +96,17 @@ export function OnboardingWizard() {
       setActivationStatus(payload);
     } catch {
       setActivationStatus(null);
+    }
+  };
+
+  const loadActivationHistory = async () => {
+    try {
+      const payload = await fetchJson<OnboardingActivationHistory>(
+        `/api/dashboard/onboarding/activation/history?tenant_id=${encodeURIComponent(tenantId)}&limit=10`,
+      );
+      setActivationHistory(payload);
+    } catch {
+      setActivationHistory(null);
     }
   };
 
@@ -187,6 +200,7 @@ export function OnboardingWizard() {
       }
       await loadLastSimulation();
       await loadActivationStatus();
+      await loadActivationHistory();
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load onboarding state");
     } finally {
@@ -298,6 +312,7 @@ export function OnboardingWizard() {
           },
         };
       });
+      await loadActivationHistory();
       setSuccess("Activation mode applied.");
     } catch (applyError) {
       setActivationError(applyError instanceof Error ? applyError.message : "Failed to apply activation mode");
@@ -342,6 +357,7 @@ export function OnboardingWizard() {
           },
         };
       });
+      await loadActivationHistory();
       setSuccess("Activation rolled back to the previous state.");
     } catch (rollbackApplyError) {
       setRollbackError(
@@ -627,6 +643,36 @@ export function OnboardingWizard() {
         </div>
         {activationError ? <p className="mt-3 text-sm text-rose-700">{activationError}</p> : null}
         {rollbackError ? <p className="mt-3 text-sm text-rose-700">{rollbackError}</p> : null}
+
+        <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+          <p className="text-sm font-medium text-slate-900">Activation history</p>
+          {activationHistory?.items.length ? (
+            <div className="mt-2 overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-500">
+                    <th className="py-1 pr-4 font-medium">Recorded at</th>
+                    <th className="py-1 pr-4 font-medium">Mode</th>
+                    <th className="py-1 pr-4 font-medium">Canary %</th>
+                    <th className="py-1 pr-0 font-medium">Previous updated at</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activationHistory.items.map((entry) => (
+                    <tr key={entry.history_id} className="border-t border-slate-100 text-slate-700">
+                      <td className="py-1 pr-4">{entry.recorded_at || "—"}</td>
+                      <td className="py-1 pr-4">{entry.mode}</td>
+                      <td className="py-1 pr-4">{entry.canary_pct ?? "—"}</td>
+                      <td className="py-1 pr-0">{entry.updated_at || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-2 text-sm text-slate-500">No activation history recorded yet.</p>
+          )}
+        </div>
       </section>
 
       <div className="flex items-center gap-3">

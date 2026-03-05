@@ -379,10 +379,16 @@ def _activation_state_from_status(status_payload: Dict[str, Any]) -> ActivationS
 def _serialize_activation_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
     mode = normalize_onboarding_mode(str(row.get("mode") or "simulation"))
     canary_pct = normalize_canary_pct(mode=mode, canary_pct=row.get("canary_pct"))
+    raw_history_id = row.get("history_id")
+    history_id = int(raw_history_id) if raw_history_id is not None else 0
+    recorded_at = row.get("saved_at")
+    updated_at = row.get("previous_updated_at") or recorded_at
     return {
+        "history_id": history_id,
         "mode": mode,
         "canary_pct": canary_pct,
-        "updated_at": row.get("saved_at"),
+        "updated_at": updated_at,
+        "recorded_at": recorded_at,
     }
 
 
@@ -391,10 +397,9 @@ def _record_activation_history(
     tenant_id: str,
     state: ActivationState,
 ) -> None:
-    if state.updated_at is None:
-        return
     storage = get_storage_backend()
     saved_at = _utc_now_iso()
+    previous_updated_at = state.updated_at or saved_at
     storage.execute(
         """
         INSERT INTO tenant_onboarding_activation_history (
@@ -409,7 +414,7 @@ def _record_activation_history(
             tenant_id,
             state.mode,
             state.canary_pct,
-            state.updated_at,
+            previous_updated_at,
             saved_at,
         ),
     )
@@ -437,7 +442,7 @@ def _pop_previous_activation(
     storage = get_storage_backend()
     row = storage.fetchone(
         """
-        SELECT history_id, mode, canary_pct, saved_at
+        SELECT history_id, mode, canary_pct, previous_updated_at, saved_at
         FROM tenant_onboarding_activation_history
         WHERE tenant_id = ?
         ORDER BY history_id DESC
@@ -458,9 +463,44 @@ def _pop_previous_activation(
     return _serialize_activation_history_row(row)
 
 
+def _normalize_history_limit(value: Optional[int]) -> int:
+    parsed = int(value or 20)
+    if parsed < 1 or parsed > 100:
+        raise ValueError("limit must be between 1 and 100")
+    return parsed
+
+
 def get_onboarding_activation(*, tenant_id: Optional[str]) -> Dict[str, Any]:
     status_payload = get_onboarding_status(tenant_id=tenant_id)
     return _activation_payload_from_status(status_payload)
+
+
+def get_onboarding_activation_history(
+    *,
+    tenant_id: Optional[str],
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    init_db()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_limit = _normalize_history_limit(limit)
+    storage = get_storage_backend()
+    rows = storage.fetchall(
+        """
+        SELECT history_id, mode, canary_pct, previous_updated_at, saved_at
+        FROM tenant_onboarding_activation_history
+        WHERE tenant_id = ?
+        ORDER BY history_id DESC
+        LIMIT ?
+        """,
+        (effective_tenant, normalized_limit),
+    )
+    current = get_onboarding_activation(tenant_id=effective_tenant)
+    return {
+        "tenant_id": effective_tenant,
+        "limit": normalized_limit,
+        "current": current,
+        "items": [_serialize_activation_history_row(row) for row in rows],
+    }
 
 
 def save_onboarding_activation(

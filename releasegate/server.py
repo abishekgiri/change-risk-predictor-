@@ -743,6 +743,27 @@ class OnboardingActivationRollbackResponse(BaseModel):
     data: OnboardingActivationRollbackData
 
 
+class OnboardingActivationHistoryEntry(BaseModel):
+    history_id: int
+    mode: str = "simulation"
+    canary_pct: Optional[int] = None
+    updated_at: Optional[str] = None
+    recorded_at: Optional[str] = None
+
+
+class OnboardingActivationHistoryData(BaseModel):
+    tenant_id: str
+    limit: int = 20
+    current: OnboardingActivationData
+    items: List[OnboardingActivationHistoryEntry] = Field(default_factory=list)
+
+
+class OnboardingActivationHistoryResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingActivationHistoryData
+
+
 class SimulationRunRequest(BaseModel):
     tenant_id: Optional[str] = None
     lookback_days: int = 30
@@ -3116,6 +3137,40 @@ def onboarding_activation_update_endpoint(
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
         "data": activation_payload,
+    }
+
+
+@app.get("/onboarding/activation/history", response_model=OnboardingActivationHistoryResponse)
+def onboarding_activation_history_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    limit: int = 20,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import get_onboarding_activation_history
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        history_payload = get_onboarding_activation_history(
+            tenant_id=effective_tenant,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": history_payload,
     }
 
 

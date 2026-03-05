@@ -208,6 +208,21 @@ export interface OnboardingActivation {
   updated_at: string | null;
 }
 
+export interface OnboardingActivationHistoryEntry {
+  history_id: number;
+  mode: OnboardingMode;
+  canary_pct: number | null;
+  updated_at: string | null;
+  recorded_at: string | null;
+}
+
+export interface OnboardingActivationHistory {
+  tenant_id: string;
+  limit: number;
+  current: OnboardingActivation;
+  items: OnboardingActivationHistoryEntry[];
+}
+
 export interface OnboardingActivationRollback {
   status: "rolled_back";
   activation: OnboardingActivation;

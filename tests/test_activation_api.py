@@ -212,6 +212,62 @@ def test_onboarding_activation_rollback_requires_previous_state():
     assert "No previous activation state" in str(response.json())
 
 
+def test_onboarding_activation_rollback_works_after_first_change_from_implicit_default():
+    _reset_db()
+    tenant_id = "tenant-activation-first-change"
+
+    apply_response = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "canary", "canary_pct": 25},
+    )
+    assert apply_response.status_code == 200
+
+    rollback_response = client.post(
+        "/onboarding/activation/rollback",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id},
+    )
+    assert rollback_response.status_code == 200
+    rollback_payload = _unwrap_envelope(rollback_response)
+    assert rollback_payload["status"] == "rolled_back"
+    assert rollback_payload["activation"]["mode"] == "simulation"
+    assert rollback_payload["activation"]["canary_pct"] is None
+
+
+def test_onboarding_activation_history_endpoint_returns_recent_entries():
+    _reset_db()
+    tenant_id = "tenant-activation-history"
+
+    canary = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "canary", "canary_pct": 20},
+    )
+    assert canary.status_code == 200
+
+    strict = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "strict"},
+    )
+    assert strict.status_code == 200
+
+    response = client.get(
+        "/onboarding/activation/history",
+        params={"tenant_id": tenant_id, "limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert response.status_code == 200
+    payload = _unwrap_envelope(response)
+    assert payload["tenant_id"] == tenant_id
+    assert payload["limit"] == 10
+    assert payload["current"]["mode"] == "strict"
+    assert len(payload["items"]) >= 2
+    assert payload["items"][0]["mode"] == "canary"
+    assert payload["items"][1]["mode"] == "simulation"
+
+
 def test_onboarding_activation_rollback_requires_admin_or_operator_role():
     _reset_db()
     tenant_id = "tenant-activation-rollback-role"
