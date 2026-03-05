@@ -289,7 +289,7 @@ export function OnboardingWizard() {
         if (!current) return current;
         return {
           ...current,
-          onboarding_completed: true,
+          onboarding_completed: payload.applied,
           config: {
             ...current.config,
             mode: payload.mode,
