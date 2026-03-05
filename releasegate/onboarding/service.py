@@ -514,5 +514,7 @@ def rollback_onboarding_activation(
         canary_pct=previous.get("canary_pct"),
     )
     activation_payload = _activation_payload_from_status(updated_status)
-    activation_payload["status"] = "rolled_back"
-    return activation_payload
+    return {
+        "status": "rolled_back",
+        "activation": activation_payload,
+    }
