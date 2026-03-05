@@ -1,0 +1,29 @@
+stages:
+  - governance
+
+releasegate_governance:
+  stage: governance
+  image: curlimages/curl:8.7.1
+  script:
+    - |
+      curl -sS -X POST "${RELEASEGATE_URL}/integrations/jira/transition/check" \
+        -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "issue_key": "PAYMENTS-123",
+          "transition_id": "31",
+          "source_status": "Ready for Release",
+          "target_status": "Done",
+          "actor_account_id": "gitlab-ci",
+          "environment": "PRODUCTION",
+          "project_key": "PAYMENTS",
+          "issue_type": "Story"
+        }' | tee releasegate_response.json
+    - |
+      STATUS=$(cat releasegate_response.json | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+      if [ "$STATUS" = "BLOCKED" ] || [ "$STATUS" = "ERROR" ]; then
+        echo "ReleaseGate denied transition"
+        exit 1
+      fi
+  only:
+    - merge_requests

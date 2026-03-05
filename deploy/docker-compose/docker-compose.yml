@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["uvicorn", "releasegate.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      RELEASEGATE_STORAGE_BACKEND: postgres
+      DATABASE_URL: postgresql://releasegate:releasegate@postgres:5432/releasegate
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: releasegate
+      POSTGRES_USER: releasegate
+      POSTGRES_PASSWORD: releasegate
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U releasegate -d releasegate"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - releasegate-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - releasegate-redis:/data
+
+volumes:
+  releasegate-postgres:
+  releasegate-redis:

@@ -931,6 +931,44 @@ Manual verify: `python -m releasegate.cli verify-proof-pack out/golden/proof_pac
 
 ---
 
+## Deployment
+
+ReleaseGate ships with deployment automation kits for fast enterprise adoption.
+
+### Docker Compose (quickstart)
+
+```bash
+cd deploy/docker-compose
+cp .env.example .env
+docker compose up --build
+```
+
+### Kubernetes (Helm)
+
+```bash
+helm install releasegate ./deploy/helm/releasegate
+```
+
+### Infrastructure as Code (Terraform)
+
+```bash
+cd infra/terraform/releasegate
+terraform init
+terraform apply
+```
+
+### CI/CD Integration Examples
+
+- GitHub Actions: `examples/ci/github-actions.yml`
+- GitLab CI: `examples/ci/gitlab-ci.yml`
+
+### Installation Guides
+
+- Forge installation: `docs/forge-installation.md`
+- 2-hour walkthrough: `docs/install-2-hour-guide.md`
+
+---
+
 ## Versioning
 
 **Current milestone:**

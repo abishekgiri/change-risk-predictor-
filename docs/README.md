@@ -8,7 +8,8 @@ Architecture
  ├─ Observability
  ├─ SLA & Failure Modes
  ├─ Multi-Region Strategy
- └─ Compliance Documentation
+ ├─ Compliance Documentation
+ └─ Deployment Automation
 ```
 
 Current source-of-truth docs:
@@ -25,6 +26,8 @@ Current source-of-truth docs:
   - `compliance/signal_freshness_model.md`
   - `compliance/soc2_iso_mapping.md`
   - `compliance/auditor_walkthrough.md`
+- `forge-installation.md` — Forge installation and Jira connection steps
+- `install-2-hour-guide.md` — enterprise 2-hour install walkthrough
 - `jira-config.md` — Jira transition/role mapping
 - `forge-hardening.md` — Forge runtime hardening behavior
 - `attestations/dsse-intoto.md` — DSSE + in-toto interoperability contract

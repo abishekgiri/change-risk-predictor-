@@ -1,0 +1,6 @@
+apiVersion: v2
+name: releasegate
+description: ReleaseGate governance API and enforcement service
+type: application
+version: 0.1.0
+appVersion: "2.0.0"

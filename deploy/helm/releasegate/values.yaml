@@ -1,0 +1,43 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/your-org/releasegate
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: releasegate.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+env:
+  RELEASEGATE_STORAGE_BACKEND: sqlite
+  RELEASEGATE_TENANT_ID: default
+  RELEASEGATE_JWT_ISSUER: releasegate
+  RELEASEGATE_JWT_AUDIENCE: releasegate-api
+
+secretEnv:
+  RELEASEGATE_JWT_SECRET: ""
+  RELEASEGATE_INTERNAL_SERVICE_KEY: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

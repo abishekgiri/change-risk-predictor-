@@ -1,0 +1,38 @@
+name: ReleaseGate Governance Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  releasegate-governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Send transition check to ReleaseGate
+        env:
+          RELEASEGATE_URL: ${{ secrets.RELEASEGATE_URL }}
+          RELEASEGATE_TOKEN: ${{ secrets.RELEASEGATE_TOKEN }}
+        run: |
+          curl -sS -X POST "${RELEASEGATE_URL}/integrations/jira/transition/check" \
+            -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "issue_key": "PAYMENTS-123",
+              "transition_id": "31",
+              "source_status": "Ready for Release",
+              "target_status": "Done",
+              "actor_account_id": "github-actions",
+              "environment": "PRODUCTION",
+              "project_key": "PAYMENTS",
+              "issue_type": "Story"
+            }' | tee releasegate_response.json
+
+      - name: Fail workflow on governance deny
+        run: |
+          STATUS=$(jq -r '.status // empty' releasegate_response.json)
+          if [ "$STATUS" = "BLOCKED" ] || [ "$STATUS" = "ERROR" ]; then
+            echo "ReleaseGate denied transition"
+            exit 1
+          fi
