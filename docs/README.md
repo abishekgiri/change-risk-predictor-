@@ -1,5 +1,16 @@
 # Documentation Index
 
+Architecture overview:
+
+```text
+Architecture
+ ├─ Governance Engine
+ ├─ Observability
+ ├─ SLA & Failure Modes
+ ├─ Multi-Region Strategy
+ └─ Compliance Documentation
+```
+
 Current source-of-truth docs:
 
 - `decision-model.md` — decision output contract and reason-code semantics
