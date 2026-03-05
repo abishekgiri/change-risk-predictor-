@@ -1,0 +1,44 @@
+{
+  "name": "releasegate-demo-policy-pack",
+  "version": "1.0.0",
+  "policies": [
+    {
+      "policy_id": "DEMO-HIGH-RISK-APPROVAL",
+      "description": "Require approvals for high-risk transitions into Done.",
+      "match": {
+        "transition_id": "31",
+        "environment": "PRODUCTION"
+      },
+      "controls": [
+        {
+          "signal": "core_risk.severity_level",
+          "operator": "in",
+          "value": ["HIGH", "CRITICAL"]
+        }
+      ],
+      "enforcement": {
+        "result": "BLOCK",
+        "reason_code": "HIGH_RISK_APPROVAL_REQUIRED",
+        "required_approvals": 2
+      }
+    },
+    {
+      "policy_id": "DEMO-OVERRIDE-GUARDRAIL",
+      "description": "Require explicit justification for production overrides.",
+      "match": {
+        "environment": "PRODUCTION"
+      },
+      "controls": [
+        {
+          "signal": "override.justification_present",
+          "operator": "equals",
+          "value": true
+        }
+      ],
+      "enforcement": {
+        "result": "CONDITIONAL",
+        "reason_code": "OVERRIDE_JUSTIFICATION_REQUIRED"
+      }
+    }
+  ]
+}

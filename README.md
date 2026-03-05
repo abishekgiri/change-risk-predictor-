@@ -969,6 +969,17 @@ terraform apply
 
 ---
 
+## Enterprise Documentation
+
+- Security whitepaper: `docs/security/security-whitepaper.md`
+- SOC2 readiness: `docs/compliance/soc2-readiness.md`
+- Compliance mapping: `docs/compliance/compliance-mapping.md`
+- Architecture overview diagram: `docs/architecture/architecture.md`
+- Governance ROI calculator: `docs/business/roi-calculator.md`
+- Demo kit: `demo/demo-scenarios.md`, `demo/demo-policies.json`, `demo/seed-demo-data.py`
+
+---
+
 ## Versioning
 
 **Current milestone:**
