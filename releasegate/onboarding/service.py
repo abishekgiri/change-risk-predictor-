@@ -382,7 +382,7 @@ def _serialize_activation_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "mode": mode,
         "canary_pct": canary_pct,
-        "updated_at": str(row.get("saved_at") or "") or None,
+        "updated_at": row.get("saved_at"),
     }
 
 
