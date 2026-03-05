@@ -2742,6 +2742,47 @@ def _migration_20260316_040_policy_snapshot_cache(cursor) -> None:
         """
     )
 
+
+def _migration_20260317_041_saas_tenant_admin_and_roles(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_admin_profiles (
+            tenant_id TEXT PRIMARY KEY,
+            org_name TEXT NOT NULL DEFAULT '',
+            plan_tier TEXT NOT NULL DEFAULT 'enterprise',
+            region TEXT NOT NULL DEFAULT 'us-east',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_admin_profiles_plan_region
+        ON tenant_admin_profiles(plan_tier, region)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_role_assignments (
+            tenant_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            assigned_by TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, actor_id, role)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_role_assignments_tenant_actor
+        ON tenant_role_assignments(tenant_id, actor_id)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2942,6 +2983,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260316_040_policy_snapshot_cache",
         description="Add tenant-scoped policy snapshot cache for control-plane outage fallback and grace windows.",
         apply=_migration_20260316_040_policy_snapshot_cache,
+    ),
+    Migration(
+        migration_id="20260317_041_saas_tenant_admin_and_roles",
+        description="Add tenant admin profile and role assignment records for SaaS tenant operations.",
+        apply=_migration_20260317_041_saas_tenant_admin_and_roles,
     ),
 ]
 

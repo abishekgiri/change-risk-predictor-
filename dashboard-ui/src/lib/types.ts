@@ -394,6 +394,65 @@ export interface SimulationResult {
   has_run: boolean;
 }
 
+export type TenantStatus = "active" | "locked" | "throttled";
+export type TenantPlan = "starter" | "growth" | "enterprise";
+export type TenantRole = "owner" | "admin" | "operator" | "auditor" | "viewer";
+
+export interface TenantRoleAssignment {
+  actor_id: string;
+  roles: TenantRole[];
+  assigned_by: string | null;
+  last_assigned_at: string | null;
+}
+
+export interface TenantInfo {
+  trace_id?: string;
+  tenant_id: string;
+  name: string;
+  plan: TenantPlan;
+  region: string;
+  status: TenantStatus;
+  created_at: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+  roles: TenantRoleAssignment[];
+  limits: {
+    plan: TenantPlan;
+    decision_limit_month: number | null;
+    override_limit_month: number | null;
+    simulation_history_days: number;
+    storage_limit_mb: number | null;
+    blocked_list_limit: number;
+    quota_enforcement_mode: string;
+  };
+}
+
+export interface TenantKeyRotationResult {
+  trace_id?: string;
+  tenant_id: string;
+  rotated_signing_key_id: string | null;
+  rotated_api_key_id: string | null;
+  api_key_created: boolean;
+}
+
+export interface BillingUsage {
+  trace_id?: string;
+  tenant_id: string;
+  plan: TenantPlan;
+  status: TenantStatus;
+  decisions_this_month: number;
+  decision_limit: number | null;
+  decision_usage_pct: number | null;
+  overrides_this_month: number;
+  override_limit: number | null;
+  override_usage_pct: number | null;
+  storage_mb: number;
+  storage_limit_mb: number | null;
+  storage_usage_pct: number | null;
+  simulation_runs: number;
+  simulation_history_days_limit: number;
+}
+
 export interface JiraProjectsDiscoveryResponse {
   tenant_id: string;
   source: string;

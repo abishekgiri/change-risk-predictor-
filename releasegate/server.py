@@ -979,6 +979,103 @@ class SimulationRunResponse(BaseModel):
     data: SimulationResultData
 
 
+class DashboardTenantRoleAssignmentEntry(BaseModel):
+    actor_id: str
+    roles: List[str] = Field(default_factory=list)
+    assigned_by: Optional[str] = None
+    last_assigned_at: Optional[str] = None
+
+
+class DashboardTenantInfoData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    name: str
+    plan: str
+    region: str
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+    roles: List[DashboardTenantRoleAssignmentEntry] = Field(default_factory=list)
+    limits: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DashboardTenantCreateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    name: Optional[str] = None
+    plan: str = "enterprise"
+    region: str = "us-east"
+
+
+class DashboardTenantLockRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    status: str = "locked"
+    reason: Optional[str] = None
+
+
+class DashboardTenantUnlockRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class DashboardTenantRoleAssignRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    actor_id: str
+    role: str
+    action: str = "assign"
+
+
+class DashboardTenantKeyRotateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    rotate_signing_key: bool = True
+    rotate_api_key: bool = True
+    api_key_id: Optional[str] = None
+
+
+class DashboardTenantKeyRotateData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    rotated_signing_key_id: Optional[str] = None
+    rotated_api_key_id: Optional[str] = None
+    api_key_created: bool = False
+
+
+class DashboardBillingUsageData(BaseModel):
+    trace_id: Optional[str] = None
+    tenant_id: str
+    plan: str
+    status: str = "active"
+    decisions_this_month: int = 0
+    decision_limit: Optional[int] = None
+    decision_usage_pct: Optional[float] = None
+    overrides_this_month: int = 0
+    override_limit: Optional[int] = None
+    override_usage_pct: Optional[float] = None
+    storage_mb: float = 0.0
+    storage_limit_mb: Optional[int] = None
+    storage_usage_pct: Optional[float] = None
+    simulation_runs: int = 0
+    simulation_history_days_limit: int = 0
+
+
+class DashboardTenantInfoResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardTenantInfoData
+
+
+class DashboardTenantKeyRotateResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardTenantKeyRotateData
+
+
+class DashboardBillingUsageResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: DashboardBillingUsageData
+
+
 # --- Config ---
 # Use user's preferred default
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
@@ -3311,6 +3408,327 @@ def dashboard_customer_success_regression_report_endpoint(
 
 
 @app.get(
+    "/dashboard/tenant/info",
+    response_model=DashboardTenantInfoResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_info_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.saas.tenants import get_tenant_profile
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    payload = get_tenant_profile(tenant_id=effective_tenant)
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_TENANT_INFO",
+        endpoint="/dashboard/tenant/info",
+        trace_id=trace_id,
+        params={},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=payload,
+    )
+
+
+@app.post(
+    "/dashboard/tenant/create",
+    response_model=DashboardTenantInfoResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_create_endpoint(
+    request: Request,
+    response: Response,
+    payload: DashboardTenantCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.saas.tenants import create_tenant_profile
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        tenant_payload = create_tenant_profile(
+            tenant_id=effective_tenant,
+            name=payload.name,
+            plan=payload.plan,
+            region=payload.region,
+            actor_id=auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="dashboard_tenant_create_or_update",
+        target_type="tenant_profile",
+        target_id=effective_tenant,
+        metadata={"plan": payload.plan, "region": payload.region},
+    )
+
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=tenant_payload,
+    )
+
+
+@app.post(
+    "/dashboard/tenant/lock",
+    response_model=DashboardTenantInfoResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_lock_endpoint(
+    request: Request,
+    response: Response,
+    payload: DashboardTenantLockRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+        allow_locked=True,
+    ),
+):
+    from releasegate.saas.tenants import set_tenant_status
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        tenant_payload = set_tenant_status(
+            tenant_id=effective_tenant,
+            status=payload.status,
+            reason=payload.reason,
+            actor_id=auth.principal_id,
+            source="dashboard_tenant_lock",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="dashboard_tenant_status_set",
+        target_type="tenant_security_state",
+        target_id=effective_tenant,
+        metadata={"status": payload.status, "reason": payload.reason},
+    )
+
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=tenant_payload,
+    )
+
+
+@app.post(
+    "/dashboard/tenant/unlock",
+    response_model=DashboardTenantInfoResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_unlock_endpoint(
+    request: Request,
+    response: Response,
+    payload: DashboardTenantUnlockRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+        allow_locked=True,
+    ),
+):
+    from releasegate.saas.tenants import set_tenant_status
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    tenant_payload = set_tenant_status(
+        tenant_id=effective_tenant,
+        status="active",
+        reason=payload.reason,
+        actor_id=auth.principal_id,
+        source="dashboard_tenant_unlock",
+    )
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="dashboard_tenant_unlock",
+        target_type="tenant_security_state",
+        target_id=effective_tenant,
+        metadata={"reason": payload.reason},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=tenant_payload,
+    )
+
+
+@app.post(
+    "/dashboard/tenant/role_assign",
+    response_model=DashboardTenantInfoResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_role_assign_endpoint(
+    request: Request,
+    response: Response,
+    payload: DashboardTenantRoleAssignRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.saas.tenants import assign_tenant_role
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        tenant_payload = assign_tenant_role(
+            tenant_id=effective_tenant,
+            actor_id=payload.actor_id,
+            role=payload.role,
+            action=payload.action,
+            assigned_by=auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="dashboard_tenant_role_assignment",
+        target_type="tenant_role_assignment",
+        target_id=payload.actor_id,
+        metadata={"role": payload.role, "action": payload.action},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=tenant_payload,
+    )
+
+
+@app.post(
+    "/dashboard/tenant/key_rotate",
+    response_model=DashboardTenantKeyRotateResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_tenant_key_rotate_endpoint(
+    request: Request,
+    response: Response,
+    payload: DashboardTenantKeyRotateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.saas.tenants import rotate_tenant_keys
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        rotation_payload = rotate_tenant_keys(
+            tenant_id=effective_tenant,
+            actor_id=auth.principal_id,
+            rotate_signing_key=payload.rotate_signing_key,
+            rotate_api_key_enabled=payload.rotate_api_key,
+            api_key_id=payload.api_key_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="dashboard_tenant_keys_rotate",
+        target_type="tenant_keys",
+        target_id=effective_tenant,
+        metadata={
+            "rotate_signing_key": payload.rotate_signing_key,
+            "rotate_api_key": payload.rotate_api_key,
+            "rotated_signing_key_id": rotation_payload.get("rotated_signing_key_id"),
+            "rotated_api_key_id": rotation_payload.get("rotated_api_key_id"),
+            "api_key_created": bool(rotation_payload.get("api_key_created")),
+        },
+    )
+
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, no-store",
+        payload=rotation_payload,
+    )
+
+
+@app.get(
+    "/dashboard/billing/usage",
+    response_model=DashboardBillingUsageResponse,
+    responses=_dashboard_error_models(),
+)
+def dashboard_billing_usage_endpoint(
+    request: Request,
+    response: Response,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.saas.quotas import get_billing_usage
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    usage_payload = get_billing_usage(tenant_id=effective_tenant)
+    _audit_dashboard_read(
+        auth=auth,
+        tenant_id=effective_tenant,
+        action="DASHBOARD_READ_BILLING_USAGE",
+        endpoint="/dashboard/billing/usage",
+        trace_id=trace_id,
+        params={},
+    )
+    return _dashboard_response(
+        response=response,
+        trace_id=trace_id,
+        cache_control="private, max-age=30",
+        payload=usage_payload,
+    )
+
+
+@app.get(
     "/dashboard/blocked",
     response_model=DashboardBlockedResponse,
     responses=_dashboard_error_models(),
@@ -3755,9 +4173,18 @@ def simulation_run_endpoint(
     ),
 ):
     from releasegate.onboarding.simulation import run_historical_simulation
+    from releasegate.saas.plans import get_plan_tier
+    from releasegate.saas.tenants import get_tenant_profile
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
     trace_id = _dashboard_trace_id(request)
+    profile = get_tenant_profile(tenant_id=effective_tenant)
+    plan = get_plan_tier(profile.get("plan"))
+    if int(payload.lookback_days) > int(plan.simulation_history_days):
+        raise HTTPException(
+            status_code=400,
+            detail=f"lookback_days exceeds plan limit ({plan.simulation_history_days} days for {plan.name})",
+        )
     try:
         result = run_historical_simulation(
             tenant_id=effective_tenant,

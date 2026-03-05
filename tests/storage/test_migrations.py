@@ -57,6 +57,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260314_038_tenant_simulation_runs" in migration_ids
         assert "20260315_039_onboarding_activation_history" in migration_ids
         assert "20260316_040_policy_snapshot_cache" in migration_ids
+        assert "20260317_041_saas_tenant_admin_and_roles" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -281,6 +282,35 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "source",
         } <= snapshot_cache_cols
         assert snapshot_cache_pk == ["tenant_id", "scope_key"]
+
+        cur.execute("PRAGMA table_info(tenant_admin_profiles)")
+        tenant_profile_info = cur.fetchall()
+        tenant_profile_cols = {row[1] for row in tenant_profile_info}
+        tenant_profile_pk = [row[1] for row in sorted((r for r in tenant_profile_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "org_name",
+            "plan_tier",
+            "region",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+        } <= tenant_profile_cols
+        assert tenant_profile_pk == ["tenant_id"]
+
+        cur.execute("PRAGMA table_info(tenant_role_assignments)")
+        tenant_role_info = cur.fetchall()
+        tenant_role_cols = {row[1] for row in tenant_role_info}
+        tenant_role_pk = [row[1] for row in sorted((r for r in tenant_role_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "actor_id",
+            "role",
+            "assigned_by",
+            "assigned_at",
+        } <= tenant_role_cols
+        assert tenant_role_pk == ["tenant_id", "actor_id", "role"]
 
         cur.execute("PRAGMA table_info(tenant_security_anomaly_events)")
         anomaly_info = cur.fetchall()

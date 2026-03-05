@@ -13,6 +13,8 @@ import {
 
 const links = [
   { href: "/onboarding", label: "Onboarding" },
+  { href: "/tenant", label: "Tenant" },
+  { href: "/billing", label: "Billing" },
   { href: "/overview", label: "Overview" },
   { href: "/observability", label: "Observability" },
   { href: "/customer-success", label: "Customer Success" },
