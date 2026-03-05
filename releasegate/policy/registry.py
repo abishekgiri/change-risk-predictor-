@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -24,6 +26,15 @@ ROLLOUT_SCOPES = {"project", "workflow", "transition"}
 SCOPE_PRECEDENCE = ("org", "project", "workflow", "transition")
 _SCOPE_RANK = {scope: idx for idx, scope in enumerate(SCOPE_PRECEDENCE)}
 _MISSING = object()
+FAILURE_MODES = {"closed", "open"}
+
+
+@dataclass(frozen=True)
+class ResolutionFailureConfig:
+    fail_mode: str
+    fail_open_allowlist: frozenset[str]
+    snapshot_cache_ttl_seconds: int
+    grace_window_seconds: int
 
 
 class PolicyConflictError(ValueError):
@@ -98,6 +109,35 @@ def _normalise_resolve_status(value: Optional[str]) -> str:
     return normalized
 
 
+def _normalise_fail_mode(value: Optional[str]) -> str:
+    normalized = str(value or "closed").strip().lower()
+    if normalized not in FAILURE_MODES:
+        return "closed"
+    return normalized
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(minimum, int(default))
+    try:
+        parsed = int(str(raw).strip())
+    except Exception:
+        return max(minimum, int(default))
+    return max(minimum, parsed)
+
+
+def _load_resolution_failure_config() -> ResolutionFailureConfig:
+    raw_allowlist = str(os.getenv("RELEASEGATE_FAIL_OPEN_ALLOWLIST", "") or "").strip()
+    allowlist = frozenset(item.strip() for item in raw_allowlist.split(",") if item.strip())
+    return ResolutionFailureConfig(
+        fail_mode=_normalise_fail_mode(os.getenv("RELEASEGATE_FAIL_MODE")),
+        fail_open_allowlist=allowlist,
+        snapshot_cache_ttl_seconds=_env_int("RELEASEGATE_POLICY_SNAPSHOT_CACHE_TTL_SECONDS", 900, minimum=1),
+        grace_window_seconds=_env_int("RELEASEGATE_POLICY_GRACE_WINDOW_SECONDS", 300, minimum=0),
+    )
+
+
 def _normalise_policy_json(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("policy_json must be an object")
@@ -107,6 +147,197 @@ def _normalise_policy_json(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def _policy_hash(policy_json: Dict[str, Any]) -> str:
     return f"sha256:{sha256_json(policy_json)}"
 
+
+def _normalise_rollout_key(
+    *,
+    rollout_key: Optional[str],
+    org_id: Optional[str],
+    project_id: Optional[str],
+    workflow_id: Optional[str],
+    transition_id: Optional[str],
+) -> str:
+    normalized = str(rollout_key or "").strip()
+    if normalized:
+        return normalized
+    return f"{org_id or '*'}|{project_id or '*'}|{workflow_id or '*'}|{transition_id or '*'}"
+
+
+def _scope_key_part(value: Optional[str]) -> str:
+    text = str(value or "").strip()
+    return text or "*"
+
+
+def _resolution_scope_key(
+    *,
+    org_id: Optional[str],
+    project_id: Optional[str],
+    workflow_id: Optional[str],
+    transition_id: Optional[str],
+    rollout_key: str,
+    status_filter: str,
+) -> str:
+    return "|".join(
+        [
+            _scope_key_part(org_id),
+            _scope_key_part(project_id),
+            _scope_key_part(workflow_id),
+            _scope_key_part(transition_id),
+            _scope_key_part(rollout_key),
+            _scope_key_part(status_filter.upper()),
+        ]
+    )
+
+
+def _parse_iso_datetime(raw_value: Optional[str]) -> Optional[datetime]:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _build_empty_resolution(
+    *,
+    tenant_id: str,
+    status_filter: str,
+    org_id: Optional[str],
+    project_id: Optional[str],
+    workflow_id: Optional[str],
+    transition_id: Optional[str],
+    rollout_key: str,
+) -> Dict[str, Any]:
+    effective_policy: Dict[str, Any] = {}
+    return {
+        "tenant_id": tenant_id,
+        "status_filter": status_filter,
+        "resolution_inputs": {
+            "org_id": org_id,
+            "project_id": project_id,
+            "workflow_id": workflow_id,
+            "transition_id": transition_id,
+            "rollout_key": rollout_key,
+        },
+        "effective_policy": effective_policy,
+        "effective_policy_hash": _policy_hash(effective_policy),
+        "component_policy_ids": [],
+        "component_lineage": {},
+        "components": [],
+        "resolution_conflicts": [],
+    }
+
+
+def _snapshot_event(
+    *,
+    tenant_id: str,
+    action: str,
+    scope_key: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        from releasegate.security.audit import log_security_event
+
+        log_security_event(
+            tenant_id=tenant_id,
+            principal_id="system",
+            auth_method="internal",
+            action=action,
+            target_type="policy_snapshot_cache",
+            target_id=scope_key,
+            metadata=metadata or {},
+        )
+    except Exception:
+        # Snapshot fallback must never fail because audit logging failed.
+        return
+
+
+def _is_fail_open_allowed(scope_key: str, allowlist: frozenset[str]) -> bool:
+    if not allowlist:
+        return False
+    if "*" in allowlist:
+        return True
+    return scope_key in allowlist
+
+
+def _read_policy_snapshot_cache(*, tenant_id: str, scope_key: str) -> Optional[Dict[str, Any]]:
+    storage = get_storage_backend()
+    row = storage.fetchone(
+        """
+        SELECT scope_key, snapshot_hash, snapshot_json, resolved_at, ttl_seconds, source
+        FROM tenant_policy_snapshot_cache
+        WHERE tenant_id = ? AND scope_key = ?
+        LIMIT 1
+        """,
+        (tenant_id, scope_key),
+    )
+    if not row:
+        return None
+    raw_snapshot = row.get("snapshot_json")
+    try:
+        snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else (raw_snapshot or {})
+    except Exception:
+        snapshot = {}
+    return {
+        "scope_key": str(row.get("scope_key") or scope_key),
+        "snapshot_hash": str(row.get("snapshot_hash") or ""),
+        "snapshot": snapshot if isinstance(snapshot, dict) else {},
+        "resolved_at": row.get("resolved_at"),
+        "ttl_seconds": _coerce_int(row.get("ttl_seconds"), 0),
+        "source": str(row.get("source") or "cache"),
+    }
+
+
+def _write_policy_snapshot_cache(
+    *,
+    tenant_id: str,
+    scope_key: str,
+    resolution: Dict[str, Any],
+    ttl_seconds: int,
+    source: str,
+) -> None:
+    storage = get_storage_backend()
+    resolved_at = _utc_now()
+    snapshot_hash = str(resolution.get("effective_policy_hash") or _policy_hash(resolution.get("effective_policy") or {}))
+    storage.execute(
+        """
+        INSERT INTO tenant_policy_snapshot_cache (
+            tenant_id,
+            scope_key,
+            snapshot_hash,
+            snapshot_json,
+            resolved_at,
+            ttl_seconds,
+            source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tenant_id, scope_key) DO UPDATE SET
+            snapshot_hash = excluded.snapshot_hash,
+            snapshot_json = excluded.snapshot_json,
+            resolved_at = excluded.resolved_at,
+            ttl_seconds = excluded.ttl_seconds,
+            source = excluded.source
+        """,
+        (
+            tenant_id,
+            scope_key,
+            snapshot_hash,
+            canonical_json(resolution),
+            resolved_at,
+            int(ttl_seconds),
+            str(source),
+        ),
+    )
 
 def _safe_int(value: Any) -> Optional[int]:
     if value is None:
@@ -914,7 +1145,7 @@ def _resolve_scope_component(
     return component
 
 
-def resolve_registry_policy(
+def _resolve_registry_policy_live(
     *,
     tenant_id: Optional[str],
     org_id: Optional[str],
@@ -928,9 +1159,13 @@ def resolve_registry_policy(
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_status_filter = _normalise_resolve_status(status_filter)
 
-    input_rollout_key = str(rollout_key or "").strip()
-    if not input_rollout_key:
-        input_rollout_key = f"{org_id or '*'}|{project_id or '*'}|{workflow_id or '*'}|{transition_id or '*'}"
+    input_rollout_key = _normalise_rollout_key(
+        rollout_key=rollout_key,
+        org_id=org_id,
+        project_id=project_id,
+        workflow_id=workflow_id,
+        transition_id=transition_id,
+    )
 
     scope_lookup = [
         ("org", [org_id, effective_tenant, "default", "*"]),
@@ -1014,6 +1249,143 @@ def resolve_registry_policy(
         "components": selected_components,
         "resolution_conflicts": resolution_conflicts,
     }
+
+
+def resolve_registry_policy(
+    *,
+    tenant_id: Optional[str],
+    org_id: Optional[str],
+    project_id: Optional[str],
+    workflow_id: Optional[str],
+    transition_id: Optional[str],
+    rollout_key: Optional[str] = None,
+    status_filter: str = "ACTIVE",
+) -> Dict[str, Any]:
+    init_db()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_status_filter = _normalise_resolve_status(status_filter)
+    normalized_rollout_key = _normalise_rollout_key(
+        rollout_key=rollout_key,
+        org_id=org_id,
+        project_id=project_id,
+        workflow_id=workflow_id,
+        transition_id=transition_id,
+    )
+    scope_key = _resolution_scope_key(
+        org_id=org_id,
+        project_id=project_id,
+        workflow_id=workflow_id,
+        transition_id=transition_id,
+        rollout_key=normalized_rollout_key,
+        status_filter=normalized_status_filter,
+    )
+    failure_cfg = _load_resolution_failure_config()
+    now_utc = datetime.now(timezone.utc)
+
+    try:
+        resolved = _resolve_registry_policy_live(
+            tenant_id=effective_tenant,
+            org_id=org_id,
+            project_id=project_id,
+            workflow_id=workflow_id,
+            transition_id=transition_id,
+            rollout_key=normalized_rollout_key,
+            status_filter=normalized_status_filter,
+        )
+        resolved["resolution_source"] = "control_plane"
+        resolved["cache_scope_key"] = scope_key
+        resolved["cache_ttl_seconds"] = int(failure_cfg.snapshot_cache_ttl_seconds)
+        _write_policy_snapshot_cache(
+            tenant_id=effective_tenant,
+            scope_key=scope_key,
+            resolution=resolved,
+            ttl_seconds=failure_cfg.snapshot_cache_ttl_seconds,
+            source="control_plane",
+        )
+        return resolved
+    except Exception:
+        cached = _read_policy_snapshot_cache(tenant_id=effective_tenant, scope_key=scope_key)
+        if cached:
+            resolved_at_dt = _parse_iso_datetime(cached.get("resolved_at"))
+            ttl_seconds = max(1, _coerce_int(cached.get("ttl_seconds"), failure_cfg.snapshot_cache_ttl_seconds))
+            age_seconds = float("inf")
+            if resolved_at_dt is not None:
+                age_seconds = max(0.0, (now_utc - resolved_at_dt).total_seconds())
+            within_ttl = age_seconds <= float(ttl_seconds)
+            within_grace = age_seconds <= float(ttl_seconds + failure_cfg.grace_window_seconds)
+            if within_ttl or within_grace:
+                cache_state = "fresh" if within_ttl else "stale_grace"
+                action = "policy.snapshot.cache_hit" if within_ttl else "policy.snapshot.cache_stale_grace_used"
+                _snapshot_event(
+                    tenant_id=effective_tenant,
+                    action=action,
+                    scope_key=scope_key,
+                    metadata={
+                        "cache_state": cache_state,
+                        "age_seconds": age_seconds,
+                        "ttl_seconds": ttl_seconds,
+                        "grace_window_seconds": failure_cfg.grace_window_seconds,
+                        "status_filter": normalized_status_filter,
+                    },
+                )
+                cached_snapshot = cached.get("snapshot")
+                snapshot_payload = (
+                    dict(cached_snapshot)
+                    if isinstance(cached_snapshot, dict) and cached_snapshot
+                    else _build_empty_resolution(
+                        tenant_id=effective_tenant,
+                        status_filter=normalized_status_filter,
+                        org_id=org_id,
+                        project_id=project_id,
+                        workflow_id=workflow_id,
+                        transition_id=transition_id,
+                        rollout_key=normalized_rollout_key,
+                    )
+                )
+                snapshot_payload["resolution_source"] = "cache"
+                snapshot_payload["cache_scope_key"] = scope_key
+                snapshot_payload["cache_state"] = cache_state
+                snapshot_payload["cache_age_seconds"] = round(age_seconds, 6) if age_seconds != float("inf") else None
+                snapshot_payload["cache_ttl_seconds"] = ttl_seconds
+                snapshot_payload["grace_window_seconds"] = int(failure_cfg.grace_window_seconds)
+                return snapshot_payload
+
+            _snapshot_event(
+                tenant_id=effective_tenant,
+                action="policy.snapshot.cache_expired_fail_closed",
+                scope_key=scope_key,
+                metadata={
+                    "age_seconds": age_seconds,
+                    "ttl_seconds": ttl_seconds,
+                    "grace_window_seconds": failure_cfg.grace_window_seconds,
+                    "status_filter": normalized_status_filter,
+                },
+            )
+
+        if failure_cfg.fail_mode == "open" and _is_fail_open_allowed(scope_key, failure_cfg.fail_open_allowlist):
+            _snapshot_event(
+                tenant_id=effective_tenant,
+                action="policy.snapshot.cache_expired_fail_open",
+                scope_key=scope_key,
+                metadata={
+                    "status_filter": normalized_status_filter,
+                    "reason": "cache_miss_or_expired",
+                },
+            )
+            fail_open_payload = _build_empty_resolution(
+                tenant_id=effective_tenant,
+                status_filter=normalized_status_filter,
+                org_id=org_id,
+                project_id=project_id,
+                workflow_id=workflow_id,
+                transition_id=transition_id,
+                rollout_key=normalized_rollout_key,
+            )
+            fail_open_payload["resolution_source"] = "fail_open"
+            fail_open_payload["cache_scope_key"] = scope_key
+            fail_open_payload["fail_mode"] = "open"
+            return fail_open_payload
+        raise
 
 
 def activate_registry_policy(

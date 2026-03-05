@@ -2713,6 +2713,35 @@ def _migration_20260315_039_onboarding_activation_history(cursor) -> None:
         """
     )
 
+
+def _migration_20260316_040_policy_snapshot_cache(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_policy_snapshot_cache (
+            tenant_id TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            snapshot_hash TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            resolved_at TEXT NOT NULL,
+            ttl_seconds INTEGER NOT NULL DEFAULT 900,
+            source TEXT NOT NULL DEFAULT 'control_plane',
+            PRIMARY KEY (tenant_id, scope_key)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_snapshot_cache_tenant_resolved
+        ON tenant_policy_snapshot_cache(tenant_id, resolved_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_snapshot_cache_hash
+        ON tenant_policy_snapshot_cache(tenant_id, snapshot_hash)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2908,6 +2937,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260315_039_onboarding_activation_history",
         description="Add onboarding activation rollback history with tenant-scoped append-only records.",
         apply=_migration_20260315_039_onboarding_activation_history,
+    ),
+    Migration(
+        migration_id="20260316_040_policy_snapshot_cache",
+        description="Add tenant-scoped policy snapshot cache for control-plane outage fallback and grace windows.",
+        apply=_migration_20260316_040_policy_snapshot_cache,
     ),
 ]
 

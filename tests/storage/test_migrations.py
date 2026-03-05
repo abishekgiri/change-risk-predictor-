@@ -56,6 +56,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260313_037_enterprise_onboarding_config" in migration_ids
         assert "20260314_038_tenant_simulation_runs" in migration_ids
         assert "20260315_039_onboarding_activation_history" in migration_ids
+        assert "20260316_040_policy_snapshot_cache" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -265,6 +266,21 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "saved_at",
         } <= activation_history_cols
         assert activation_history_pk == ["history_id"]
+
+        cur.execute("PRAGMA table_info(tenant_policy_snapshot_cache)")
+        snapshot_cache_info = cur.fetchall()
+        snapshot_cache_cols = {row[1] for row in snapshot_cache_info}
+        snapshot_cache_pk = [row[1] for row in sorted((r for r in snapshot_cache_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "scope_key",
+            "snapshot_hash",
+            "snapshot_json",
+            "resolved_at",
+            "ttl_seconds",
+            "source",
+        } <= snapshot_cache_cols
+        assert snapshot_cache_pk == ["tenant_id", "scope_key"]
 
         cur.execute("PRAGMA table_info(tenant_security_anomaly_events)")
         anomaly_info = cur.fetchall()

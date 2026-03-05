@@ -1056,8 +1056,30 @@ class WorkflowGate:
                     rollout_key=request.issue_key,
                     status_filter="ACTIVE",
                 )
-            except Exception:
-                registry_resolution = {}
+            except Exception as exc:
+                return self._deny(
+                    request,
+                    evaluation_key=f"{evaluation_key}:policy-resolution-unavailable",
+                    repo=repo,
+                    pr_number=pr_number,
+                    tenant_id=tenant_id,
+                    strict_mode=True,
+                    reason_code="POLICY_RESOLUTION_UNAVAILABLE",
+                    message="BLOCKED: policy resolution unavailable and no valid cached snapshot",
+                    unlock_conditions=[
+                        "Restore policy control plane connectivity or refresh the local policy snapshot cache.",
+                    ],
+                    event="jira.transition.policy_resolution_unavailable",
+                    dependency="policy_registry",
+                    error_code="POLICY_RESOLUTION_UNAVAILABLE",
+                    policy_hash=self._current_policy_hash(),
+                    policy_bindings=policy_bindings,
+                    inputs_present={"releasegate_risk": True},
+                    input_snapshot={
+                        "request": request.model_dump(mode="json"),
+                        "error": str(exc),
+                    },
+                )
 
             try:
                 from releasegate.policy.registry import resolve_registry_policy, simulate_registry_decision
