@@ -3148,8 +3148,8 @@ def onboarding_activation_rollback_endpoint(
         target_type="onboarding",
         target_id=effective_tenant,
         metadata={
-            "mode": activation_payload.get("mode"),
-            "canary_pct": activation_payload.get("canary_pct"),
+            "mode": (activation_payload.get("activation") or {}).get("mode"),
+            "canary_pct": (activation_payload.get("activation") or {}).get("canary_pct"),
             "status": activation_payload.get("status"),
         },
     )
@@ -3159,16 +3159,7 @@ def onboarding_activation_rollback_endpoint(
     return {
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
-        "data": {
-            "status": str(activation_payload.get("status") or "rolled_back"),
-            "activation": {
-                "tenant_id": activation_payload.get("tenant_id"),
-                "mode": activation_payload.get("mode"),
-                "canary_pct": activation_payload.get("canary_pct"),
-                "applied": activation_payload.get("applied"),
-                "updated_at": activation_payload.get("updated_at"),
-            },
-        },
+        "data": activation_payload,
     }
 
 
