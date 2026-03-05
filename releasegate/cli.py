@@ -133,6 +133,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional YAML/JSON file containing required coverage targets (list of objects).",
     )
 
+    policy_solver_p = sub.add_parser(
+        "policy",
+        help="Formal policy analysis and conflict explanation tools.",
+    )
+    policy_solver_sub = policy_solver_p.add_subparsers(dest="policy_cmd", required=True)
+    policy_analyze_p = policy_solver_sub.add_parser(
+        "analyze",
+        help="Analyze policy sets for conflicts, gaps, ambiguities, and shadowed/unreachable rules.",
+    )
+    policy_analyze_p.add_argument("--policies", required=True, help="Policy file or directory path.")
+    policy_analyze_p.add_argument(
+        "--coverage-targets",
+        help="Optional YAML/JSON file containing required scope targets (list of objects).",
+    )
+    policy_analyze_p.add_argument("--format", default="json", choices=["json", "text"])
+
+    policy_explain_conflict_p = policy_solver_sub.add_parser(
+        "explain-conflict",
+        help="Explain a specific conflict id from policy analysis output.",
+    )
+    policy_explain_conflict_p.add_argument("--policies", required=True, help="Policy file or directory path.")
+    policy_explain_conflict_p.add_argument("--conflict-id", required=True)
+    policy_explain_conflict_p.add_argument(
+        "--coverage-targets",
+        help="Optional YAML/JSON file containing required scope targets (list of objects).",
+    )
+    policy_explain_conflict_p.add_argument("--format", default="json", choices=["json", "text"])
+
     jira_validate_p = sub.add_parser(
         "validate-jira-config",
         help="Validate Jira transition/role mapping config and optional Jira connectivity.",
@@ -1572,6 +1600,58 @@ def main() -> int:
         else:
             print(format_lint_report(report))
         return 0 if report.get("ok") else 1
+
+    if args.cmd == "policy":
+        from releasegate.policy.analysis.solver import analyze_policies, explain_conflict, load_policies_from_path
+
+        coverage_targets = None
+        if getattr(args, "coverage_targets", None):
+            with open(args.coverage_targets, "r", encoding="utf-8") as handle:
+                loaded_targets = yaml.safe_load(handle) or []
+            if not isinstance(loaded_targets, list):
+                raise ValueError("coverage targets file must contain a list")
+            coverage_targets = loaded_targets
+
+        policies = load_policies_from_path(args.policies)
+        report = analyze_policies(
+            policies=policies,
+            coverage_targets=coverage_targets,
+        )
+        if args.policy_cmd == "analyze":
+            if args.format == "json":
+                print(json.dumps(report, indent=2))
+            else:
+                summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+                print("Policy Analysis")
+                print(f"Policies: {summary.get('policy_count', 0)}")
+                print(f"Rules: {summary.get('rule_count', 0)}")
+                print(f"Conflicts: {summary.get('conflict_count', 0)}")
+                print(f"Gaps: {summary.get('gap_count', 0)}")
+                print(f"Ambiguities: {summary.get('ambiguity_count', 0)}")
+                print(f"Shadowed Rules: {summary.get('shadowed_rule_count', 0)}")
+                print(f"Unreachable Rules: {summary.get('unreachable_rule_count', 0)}")
+            has_findings = bool(
+                report.get("conflicts")
+                or report.get("gaps")
+                or report.get("ambiguities")
+                or report.get("unreachable_rules")
+            )
+            return 1 if has_findings else 0
+
+        if args.policy_cmd == "explain-conflict":
+            explanation = explain_conflict(
+                report=report,
+                conflict_id=args.conflict_id,
+            )
+            if args.format == "json":
+                print(json.dumps(explanation, indent=2))
+            else:
+                print(f"Conflict: {explanation.get('conflict_id')}")
+                print(f"Type: {explanation.get('type')}")
+                print(f"Left Rule: {explanation.get('left_rule_id')}")
+                print(f"Right Rule: {explanation.get('right_rule_id')}")
+                print(f"Suggestion: {explanation.get('suggestion')}")
+            return 0
 
     if args.cmd == "validate-policy-bundle":
         from releasegate.policy.lint import lint_compiled_policies, format_lint_report

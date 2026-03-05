@@ -283,6 +283,34 @@ def _load_checkpoint_row(*, tenant_id: str, date_utc: str) -> Optional[Dict[str,
     )
 
 
+def _load_checkpoint_row_by_id(*, tenant_id: str, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+    storage = get_storage_backend()
+    return storage.fetchone(
+        """
+        SELECT
+            tenant_id,
+            checkpoint_id,
+            date_utc,
+            as_of_utc,
+            ledger_root,
+            ledger_size,
+            prev_checkpoint_hash,
+            checkpoint_hash,
+            signature_algorithm,
+            signature_value,
+            signing_key_id,
+            anchor_provider,
+            anchor_ref,
+            anchor_receipt_json,
+            created_at
+        FROM audit_independent_daily_checkpoints
+        WHERE tenant_id = ? AND checkpoint_id = ?
+        LIMIT 1
+        """,
+        (tenant_id, checkpoint_id),
+    )
+
+
 def _latest_prior_checkpoint_hash(*, tenant_id: str, date_utc: str) -> Optional[str]:
     storage = get_storage_backend()
     row = storage.fetchone(
@@ -494,6 +522,27 @@ def get_independent_daily_checkpoint(
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_date = _normalize_date_utc(date_utc)
     row = _load_checkpoint_row(tenant_id=effective_tenant, date_utc=normalized_date)
+    if not row:
+        return None
+    payload = _row_to_checkpoint(row)
+    payload["created"] = False
+    return payload
+
+
+def get_independent_daily_checkpoint_by_id(
+    *,
+    checkpoint_id: str,
+    tenant_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    init_db()
+    effective_tenant = resolve_tenant_id(tenant_id)
+    normalized_checkpoint_id = str(checkpoint_id or "").strip()
+    if not normalized_checkpoint_id:
+        return None
+    row = _load_checkpoint_row_by_id(
+        tenant_id=effective_tenant,
+        checkpoint_id=normalized_checkpoint_id,
+    )
     if not row:
         return None
     payload = _row_to_checkpoint(row)

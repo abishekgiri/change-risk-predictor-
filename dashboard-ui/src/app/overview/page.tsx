@@ -5,7 +5,7 @@ import { LineChartCard } from "@/components/LineChartCard";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
 import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
-import type { DashboardAlerts, DashboardOverview } from "@/lib/types";
+import type { DashboardAlerts, DashboardOverview, GovernanceRecommendationsResponse } from "@/lib/types";
 
 interface BlockedPagePayload {
   trace_id: string;
@@ -43,6 +43,14 @@ export default async function OverviewPage({
   const blockedResp = await backendFetch<BlockedPagePayload>("/dashboard/blocked", {
     method: "GET",
     query: { ...baseQuery, limit: 25 },
+  });
+  const recommendationsResp = await backendFetch<GovernanceRecommendationsResponse>("/governance/recommendations", {
+    method: "GET",
+    query: {
+      tenant_id: scope.tenantId,
+      lookback_days: scope.windowDays,
+      limit: 5,
+    },
   });
 
   const trendRows = overviewResp.data.integrity_trend.map((point, index) => ({
@@ -116,6 +124,24 @@ export default async function OverviewPage({
             {!alertsResp.data.alerts.length ? <li className="text-slate-500">No alerts in window.</li> : null}
           </ul>
         </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-slate-800">Governance Health Recommendations</h3>
+        <ul className="mt-3 space-y-2 text-sm">
+          {recommendationsResp.data.recommendations.slice(0, 5).map((recommendation) => (
+            <li key={recommendation.recommendation_id} className="rounded-md border border-slate-100 p-2">
+              <p className="font-medium text-slate-900">{recommendation.title}</p>
+              <p className="text-xs text-slate-600">
+                {recommendation.severity} • {recommendation.recommendation_type} • {recommendation.status}
+              </p>
+              <p className="mt-1 text-xs text-slate-600">{recommendation.playbook}</p>
+            </li>
+          ))}
+          {!recommendationsResp.data.recommendations.length ? (
+            <li className="text-slate-500">No active governance recommendations.</li>
+          ) : null}
+        </ul>
       </div>
 
       <BlockedDecisionsTable

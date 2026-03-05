@@ -58,6 +58,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260315_039_onboarding_activation_history" in migration_ids
         assert "20260316_040_policy_snapshot_cache" in migration_ids
         assert "20260317_041_saas_tenant_admin_and_roles" in migration_ids
+        assert "20260318_042_phase28_governance_moat" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -631,6 +632,66 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
             "metadata_json",
         } <= rollouts_cols
         assert rollouts_pk == ["tenant_id", "rollout_id"]
+
+        cur.execute("PRAGMA table_info(cross_system_correlations)")
+        correlation_info = cur.fetchall()
+        correlation_cols = {row[1] for row in correlation_info}
+        correlation_pk = [row[1] for row in sorted((r for r in correlation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "correlation_id",
+            "jira_issue_key",
+            "pr_repo",
+            "pr_sha",
+            "deploy_id",
+            "incident_id",
+            "environment",
+            "change_ticket_key",
+            "decision_id",
+            "created_at",
+            "updated_at",
+        } <= correlation_cols
+        assert correlation_pk == ["tenant_id", "correlation_id"]
+
+        cur.execute("PRAGMA table_info(governance_insights)")
+        insight_info = cur.fetchall()
+        insight_cols = {row[1] for row in insight_info}
+        insight_pk = [row[1] for row in sorted((r for r in insight_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "insight_id",
+            "insight_date_utc",
+            "lookback_days",
+            "override_rate_by_project_json",
+            "deny_rate_by_reason_json",
+            "missing_signal_counts_json",
+            "strict_fail_closed_trigger_counts_json",
+            "metadata_json",
+            "created_at",
+        } <= insight_cols
+        assert insight_pk == ["tenant_id", "insight_id"]
+
+        cur.execute("PRAGMA table_info(governance_recommendations)")
+        recommendation_info = cur.fetchall()
+        recommendation_cols = {row[1] for row in recommendation_info}
+        recommendation_pk = [row[1] for row in sorted((r for r in recommendation_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id",
+            "recommendation_id",
+            "recommendation_type",
+            "severity",
+            "status",
+            "title",
+            "message",
+            "playbook",
+            "fingerprint",
+            "context_json",
+            "acked_by",
+            "acked_at",
+            "created_at",
+            "updated_at",
+        } <= recommendation_cols
+        assert recommendation_pk == ["tenant_id", "recommendation_id"]
 
         cur.execute("PRAGMA table_info(policy_rollout_events)")
         rollout_events_info = cur.fetchall()

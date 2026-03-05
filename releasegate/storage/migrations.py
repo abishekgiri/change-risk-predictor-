@@ -2783,6 +2783,102 @@ def _migration_20260317_041_saas_tenant_admin_and_roles(cursor) -> None:
         """
     )
 
+
+def _migration_20260318_042_phase28_governance_moat(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cross_system_correlations (
+            tenant_id TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            jira_issue_key TEXT,
+            pr_repo TEXT,
+            pr_sha TEXT,
+            deploy_id TEXT,
+            incident_id TEXT,
+            environment TEXT NOT NULL,
+            change_ticket_key TEXT,
+            decision_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, correlation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_corr_tenant_deploy
+        ON cross_system_correlations(tenant_id, deploy_id, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_corr_tenant_incident
+        ON cross_system_correlations(tenant_id, incident_id, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cross_system_corr_tenant_issue
+        ON cross_system_correlations(tenant_id, jira_issue_key, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_insights (
+            tenant_id TEXT NOT NULL,
+            insight_id TEXT NOT NULL,
+            insight_date_utc TEXT NOT NULL,
+            lookback_days INTEGER NOT NULL,
+            override_rate_by_project_json TEXT NOT NULL DEFAULT '{}',
+            deny_rate_by_reason_json TEXT NOT NULL DEFAULT '{}',
+            missing_signal_counts_json TEXT NOT NULL DEFAULT '{}',
+            strict_fail_closed_trigger_counts_json TEXT NOT NULL DEFAULT '{}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, insight_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_insights_tenant_date
+        ON governance_insights(tenant_id, insight_date_utc DESC, created_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS governance_recommendations (
+            tenant_id TEXT NOT NULL,
+            recommendation_id TEXT NOT NULL,
+            recommendation_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            playbook TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            context_json TEXT NOT NULL DEFAULT '{}',
+            acked_by TEXT,
+            acked_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, recommendation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_governance_recommendations_tenant_fingerprint
+        ON governance_recommendations(tenant_id, fingerprint)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_governance_recommendations_tenant_status
+        ON governance_recommendations(tenant_id, status, severity, updated_at DESC)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2988,6 +3084,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260317_041_saas_tenant_admin_and_roles",
         description="Add tenant admin profile and role assignment records for SaaS tenant operations.",
         apply=_migration_20260317_041_saas_tenant_admin_and_roles,
+    ),
+    Migration(
+        migration_id="20260318_042_phase28_governance_moat",
+        description="Add cross-system correlation records and governance insight/recommendation stores.",
+        apply=_migration_20260318_042_phase28_governance_moat,
     ),
 ]
 

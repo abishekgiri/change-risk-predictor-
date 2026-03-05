@@ -376,6 +376,65 @@ class IncidentCloseCheckRequest(BaseModel):
     policy_overrides: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CorrelationCreateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    jira_issue_key: Optional[str] = None
+    pr_repo: Optional[str] = None
+    pr_sha: Optional[str] = None
+    deploy_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    environment: str
+    change_ticket_key: Optional[str] = None
+    decision_id: Optional[str] = None
+
+
+class CorrelationAttachRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    jira_issue_key: Optional[str] = None
+    pr_repo: Optional[str] = None
+    pr_sha: Optional[str] = None
+    deploy_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    environment: Optional[str] = None
+    change_ticket_key: Optional[str] = None
+    decision_id: Optional[str] = None
+
+
+class DeployGateEvaluateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    deploy_id: Optional[str] = None
+    environment: str
+    change_ticket_key: Optional[str] = None
+    decision_id: Optional[str] = None
+    issue_key: Optional[str] = None
+    repo: Optional[str] = None
+    commit_sha: Optional[str] = None
+    artifact_digest: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
+    signals: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IncidentGateEvaluateRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    incident_id: str
+    correlation_id: Optional[str] = None
+    close_reason: Optional[str] = None
+    decision_id: Optional[str] = None
+    issue_key: Optional[str] = None
+    deploy_id: Optional[str] = None
+    repo: Optional[str] = None
+    environment: Optional[str] = None
+    policy_overrides: Dict[str, Any] = Field(default_factory=dict)
+    signals: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationAcknowledgeRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    recommendation_id: str
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str
     roles: list[str] = Field(default_factory=lambda: ["operator"])
@@ -2200,6 +2259,22 @@ def _bounded_limit(value: int, *, max_allowed: int, field: str = "limit") -> int
     return bounded
 
 
+def _gate_required_actions(reason_code: Optional[str]) -> list[str]:
+    code = str(reason_code or "").strip().upper()
+    mapping = {
+        "DEPLOY_JIRA_ISSUE_REQUIRED": ["Attach a valid Jira issue key before production deployment."],
+        "DECISION_REQUIRED_FOR_PROD": ["Obtain an approved ReleaseGate decision for this production change."],
+        "POLICY_RELEASE_MISSING": ["Activate a policy release for the target environment."],
+        "POLICY_NOT_LOADED": ["Verify policy control-plane/cache availability and retry."],
+        "PROVIDER_TIMEOUT": ["Resolve upstream policy provider timeout or retry with healthy dependencies."],
+        "PROVIDER_ERROR": ["Restore provider health and retry gate evaluation."],
+        "POSTMORTEM_REQUIRED": ["Include a postmortem or closure rationale before incident close."],
+        "DEPLOY_LINK_REQUIRED": ["Attach deployment linkage (deploy_id or correlation_id)."],
+        "CORRELATION_ID_MISSING": ["Provide a correlation_id or enable deterministic correlation derivation."],
+    }
+    return list(mapping.get(code) or [])
+
+
 def _soc2_records(
     rows: list,
     overrides: Optional[list] = None,
@@ -2686,6 +2761,48 @@ def get_latest_jira_lock_checkpoint(
     if result is None:
         raise HTTPException(status_code=404, detail="Checkpoint not found")
     return result
+
+
+@app.get("/audit/checkpoints/{checkpoint_id}/proof")
+def get_independent_checkpoint_proof_endpoint(
+    checkpoint_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["checkpoint:read", "proofpack:read"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.anchoring.independent_checkpoints import (
+        get_independent_daily_checkpoint_by_id,
+        verify_independent_daily_checkpoint,
+    )
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    checkpoint = get_independent_daily_checkpoint_by_id(
+        checkpoint_id=checkpoint_id,
+        tenant_id=effective_tenant,
+    )
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail="independent checkpoint not found")
+    payload = checkpoint.get("payload") if isinstance(checkpoint.get("payload"), dict) else {}
+    verification = verify_independent_daily_checkpoint(
+        date_utc=str(payload.get("date_utc") or ""),
+        tenant_id=effective_tenant,
+        require_anchor=True,
+    )
+    return {
+        "tenant_id": effective_tenant,
+        "checkpoint_id": checkpoint_id,
+        "checkpoint": checkpoint,
+        "verification": verification,
+        "chain_segment": {
+            "checkpoint_hash": ((checkpoint.get("integrity") or {}).get("checkpoint_hash") if isinstance(checkpoint.get("integrity"), dict) else None),
+            "prev_checkpoint_hash": payload.get("prev_checkpoint_hash"),
+            "ledger_root": payload.get("ledger_root"),
+            "ledger_size": payload.get("ledger_size"),
+        },
+    }
 
 
 @app.get("/governance/override-metrics")
@@ -3405,6 +3522,61 @@ def dashboard_customer_success_regression_report_endpoint(
         cache_control="private, max-age=60",
         payload=payload,
     )
+
+
+@app.get("/governance/recommendations")
+def governance_recommendations_endpoint(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 25,
+    lookback_days: int = 30,
+    refresh: bool = False,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.recommendations.engine import get_or_generate_recommendations
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    payload = get_or_generate_recommendations(
+        tenant_id=effective_tenant,
+        lookback_days=max(1, min(int(lookback_days or 30), 365)),
+        force_refresh=bool(refresh),
+        status=status,
+        limit=_bounded_limit(limit, max_allowed=200, field="limit"),
+    )
+    return payload
+
+
+@app.post("/governance/recommendations/ack")
+def governance_recommendations_ack_endpoint(
+    payload: RecommendationAcknowledgeRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.recommendations.engine import acknowledge_recommendation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        recommendation = acknowledge_recommendation(
+            tenant_id=effective_tenant,
+            recommendation_id=payload.recommendation_id,
+            actor_id=auth.principal_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "recommendation": recommendation,
+    }
 
 
 @app.get(
@@ -7260,6 +7432,259 @@ def get_correlation_deployment_endpoint(
     if not payload:
         raise HTTPException(status_code=404, detail="Deployment correlation link not found")
     return payload
+
+
+@app.post("/correlations")
+def create_correlation_record_endpoint(
+    payload: CorrelationCreateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.correlation import create_correlation_record
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        record = create_correlation_record(
+            tenant_id=effective_tenant,
+            correlation_id=payload.correlation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_record_create",
+        target_type="correlation",
+        target_id=str(record.get("correlation_id") or ""),
+        metadata={
+            "environment": record.get("environment"),
+            "jira_issue_key": record.get("jira_issue_key"),
+            "deploy_id": record.get("deploy_id"),
+            "incident_id": record.get("incident_id"),
+        },
+    )
+    return record
+
+
+@app.post("/correlations/{correlation_id}/attach")
+def attach_correlation_record_endpoint(
+    correlation_id: str,
+    payload: CorrelationAttachRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.governance.correlation import update_correlation_record
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    try:
+        record = update_correlation_record(
+            tenant_id=effective_tenant,
+            correlation_id=correlation_id,
+            payload=payload.model_dump(mode="json"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="correlation_record_attach",
+        target_type="correlation",
+        target_id=str(record.get("correlation_id") or correlation_id),
+        metadata={
+            "environment": record.get("environment"),
+            "jira_issue_key": record.get("jira_issue_key"),
+            "deploy_id": record.get("deploy_id"),
+            "incident_id": record.get("incident_id"),
+        },
+    )
+    return record
+
+
+@app.post("/gates/deploy/evaluate")
+def evaluate_deploy_gate_endpoint(
+    payload: DeployGateEvaluateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.enforcement import evaluate_deploy_gate
+    from releasegate.governance.correlation import find_correlation_record, get_correlation_record
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    correlation_record = None
+    if payload.correlation_id:
+        correlation_record = get_correlation_record(
+            tenant_id=effective_tenant,
+            correlation_id=payload.correlation_id,
+        )
+    elif payload.deploy_id:
+        correlation_record = find_correlation_record(
+            tenant_id=effective_tenant,
+            deploy_id=payload.deploy_id,
+        )
+
+    resolved_env = str(
+        payload.environment
+        or (correlation_record or {}).get("environment")
+        or ""
+    ).strip().lower()
+    if not resolved_env:
+        raise HTTPException(status_code=400, detail="environment is required")
+
+    resolved_issue_key = str(
+        payload.issue_key
+        or (correlation_record or {}).get("jira_issue_key")
+        or ""
+    ).strip()
+    if resolved_env in {"prod", "production"} and not resolved_issue_key:
+        return {
+            "allow": False,
+            "status": "BLOCKED",
+            "reason_code": "DEPLOY_JIRA_ISSUE_REQUIRED",
+            "reason": "Production deployment requires a valid jira_issue_key.",
+            "decision_id": payload.decision_id,
+            "correlation_id": payload.correlation_id or (correlation_record or {}).get("correlation_id"),
+            "required_actions": _gate_required_actions("DEPLOY_JIRA_ISSUE_REQUIRED"),
+        }
+
+    resolved_decision_id = str(
+        payload.decision_id
+        or (correlation_record or {}).get("decision_id")
+        or ""
+    ).strip()
+    strict_enabled = bool(
+        (payload.policy_overrides or {}).get("strict_fail_closed")
+        if (payload.policy_overrides or {}).get("strict_fail_closed") is not None
+        else True
+    )
+    if strict_enabled and resolved_env in {"prod", "production"} and not resolved_decision_id:
+        return {
+            "allow": False,
+            "status": "BLOCKED",
+            "reason_code": "DECISION_REQUIRED_FOR_PROD",
+            "reason": "Strict production gate requires an approved ReleaseGate decision.",
+            "decision_id": None,
+            "correlation_id": payload.correlation_id or (correlation_record or {}).get("correlation_id"),
+            "required_actions": _gate_required_actions("DECISION_REQUIRED_FOR_PROD"),
+        }
+
+    resolved_repo = str(payload.repo or (correlation_record or {}).get("pr_repo") or "").strip()
+    resolved_commit_sha = str(payload.commit_sha or (correlation_record or {}).get("pr_sha") or "").strip() or None
+    if not resolved_repo:
+        raise HTTPException(status_code=400, detail="repo is required for deploy gate evaluation")
+
+    result = evaluate_deploy_gate(
+        tenant_id=effective_tenant,
+        decision_id=resolved_decision_id or None,
+        issue_key=resolved_issue_key or None,
+        correlation_id=payload.correlation_id or (correlation_record or {}).get("correlation_id"),
+        deploy_id=payload.deploy_id or (correlation_record or {}).get("deploy_id"),
+        repo=resolved_repo,
+        env=resolved_env,
+        commit_sha=resolved_commit_sha,
+        artifact_digest=payload.artifact_digest,
+        policy_overrides=payload.policy_overrides,
+    )
+    result = dict(result)
+    result["required_actions"] = _gate_required_actions(result.get("reason_code"))
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="gate_deploy_evaluate",
+        target_type="deployment",
+        target_id=str(payload.deploy_id or result.get("correlation_id") or resolved_repo),
+        metadata={
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "correlation_id": result.get("correlation_id"),
+        },
+    )
+    return result
+
+
+@app.post("/gates/incident/evaluate")
+def evaluate_incident_gate_endpoint(
+    payload: IncidentGateEvaluateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    from releasegate.correlation.enforcement import evaluate_incident_close_gate
+    from releasegate.governance.correlation import find_correlation_record, get_correlation_record
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    correlation_record = None
+    if payload.correlation_id:
+        correlation_record = get_correlation_record(
+            tenant_id=effective_tenant,
+            correlation_id=payload.correlation_id,
+        )
+    if correlation_record is None:
+        correlation_record = find_correlation_record(
+            tenant_id=effective_tenant,
+            incident_id=payload.incident_id,
+        )
+
+    requires_postmortem = bool(
+        (payload.policy_overrides or {}).get("incident_close_requires_postmortem")
+    )
+    close_reason = str(payload.close_reason or "").strip()
+    if requires_postmortem and not close_reason:
+        return {
+            "allow": False,
+            "status": "BLOCKED",
+            "reason_code": "POSTMORTEM_REQUIRED",
+            "reason": "Incident close requires postmortem evidence.",
+            "decision_id": payload.decision_id,
+            "correlation_id": payload.correlation_id or (correlation_record or {}).get("correlation_id"),
+            "required_actions": _gate_required_actions("POSTMORTEM_REQUIRED"),
+        }
+
+    result = evaluate_incident_close_gate(
+        tenant_id=effective_tenant,
+        incident_id=payload.incident_id,
+        decision_id=payload.decision_id or (correlation_record or {}).get("decision_id"),
+        issue_key=payload.issue_key or (correlation_record or {}).get("jira_issue_key"),
+        correlation_id=payload.correlation_id or (correlation_record or {}).get("correlation_id"),
+        deploy_id=payload.deploy_id or (correlation_record or {}).get("deploy_id"),
+        repo=payload.repo or (correlation_record or {}).get("pr_repo"),
+        env=payload.environment or (correlation_record or {}).get("environment"),
+        policy_overrides=payload.policy_overrides,
+    )
+    result = dict(result)
+    result["required_actions"] = _gate_required_actions(result.get("reason_code"))
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="gate_incident_evaluate",
+        target_type="incident",
+        target_id=str(payload.incident_id),
+        metadata={
+            "allow": result.get("allow"),
+            "reason_code": result.get("reason_code"),
+            "decision_id": result.get("decision_id"),
+            "correlation_id": result.get("correlation_id"),
+        },
+    )
+    return result
 
 
 @app.post("/gate/deploy/check")

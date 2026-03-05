@@ -309,6 +309,29 @@ export interface DashboardCustomerSuccessRegressionReport {
   regressions: CustomerSuccessRegressionItem[];
 }
 
+export interface GovernanceRecommendation {
+  recommendation_id: string;
+  recommendation_type: string;
+  severity: "LOW" | "MEDIUM" | "HIGH";
+  status: "OPEN" | "ACKED" | "RESOLVED";
+  title: string;
+  message: string;
+  playbook: string;
+  context: Record<string, unknown>;
+  acked_by: string | null;
+  acked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GovernanceRecommendationsResponse {
+  tenant_id: string;
+  generated_at: string | null;
+  lookback_days: number;
+  insight: Record<string, unknown>;
+  recommendations: GovernanceRecommendation[];
+}
+
 export type OnboardingMode = "simulation" | "canary" | "strict";
 
 export interface JiraProject {

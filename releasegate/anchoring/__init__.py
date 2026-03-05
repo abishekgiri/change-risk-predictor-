@@ -29,6 +29,7 @@ from releasegate.anchoring.metrics import (
 from releasegate.anchoring.independent_checkpoints import (
     create_independent_daily_checkpoint,
     get_independent_daily_checkpoint,
+    get_independent_daily_checkpoint_by_id,
     verify_independent_daily_checkpoint,
 )
 
@@ -55,5 +56,6 @@ __all__ = [
     "get_anchor_health_all",
     "create_independent_daily_checkpoint",
     "get_independent_daily_checkpoint",
+    "get_independent_daily_checkpoint_by_id",
     "verify_independent_daily_checkpoint",
 ]
