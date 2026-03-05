@@ -714,6 +714,10 @@ class OnboardingActivationRequest(BaseModel):
     canary_pct: Optional[int] = None
 
 
+class OnboardingActivationRollbackRequest(BaseModel):
+    tenant_id: Optional[str] = None
+
+
 class OnboardingActivationData(BaseModel):
     tenant_id: str
     mode: str = "simulation"
@@ -726,6 +730,17 @@ class OnboardingActivationResponse(BaseModel):
     generated_at: str
     trace_id: str
     data: OnboardingActivationData
+
+
+class OnboardingActivationRollbackData(BaseModel):
+    status: str = "rolled_back"
+    activation: OnboardingActivationData
+
+
+class OnboardingActivationRollbackResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingActivationRollbackData
 
 
 class SimulationRunRequest(BaseModel):
@@ -3101,6 +3116,59 @@ def onboarding_activation_update_endpoint(
         "generated_at": _dashboard_generated_at(),
         "trace_id": trace_id,
         "data": activation_payload,
+    }
+
+
+@app.post("/onboarding/activation/rollback", response_model=OnboardingActivationRollbackResponse)
+def onboarding_activation_rollback_endpoint(
+    request: Request,
+    response: Response,
+    payload: OnboardingActivationRollbackRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.service import rollback_onboarding_activation
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    try:
+        activation_payload = rollback_onboarding_activation(tenant_id=effective_tenant)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="onboarding_activation_rollback",
+        target_type="onboarding",
+        target_id=effective_tenant,
+        metadata={
+            "mode": activation_payload.get("mode"),
+            "canary_pct": activation_payload.get("canary_pct"),
+            "status": activation_payload.get("status"),
+        },
+    )
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": {
+            "status": str(activation_payload.get("status") or "rolled_back"),
+            "activation": {
+                "tenant_id": activation_payload.get("tenant_id"),
+                "mode": activation_payload.get("mode"),
+                "canary_pct": activation_payload.get("canary_pct"),
+                "applied": activation_payload.get("applied"),
+                "updated_at": activation_payload.get("updated_at"),
+            },
+        },
     }
 
 

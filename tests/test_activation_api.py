@@ -150,3 +150,79 @@ def test_onboarding_activation_requires_admin_or_operator_role():
         json={"tenant_id": tenant_id, "mode": "strict"},
     )
     assert response.status_code == 403
+
+
+def test_onboarding_activation_rollback_reverts_to_previous_state():
+    _reset_db()
+    tenant_id = "tenant-activation-rollback"
+
+    observe = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "simulation"},
+    )
+    assert observe.status_code == 200
+
+    canary = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "canary", "canary_pct": 15},
+    )
+    assert canary.status_code == 200
+
+    strict = client.post(
+        "/onboarding/activation",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id, "mode": "strict"},
+    )
+    assert strict.status_code == 200
+
+    rollback_to_canary = client.post(
+        "/onboarding/activation/rollback",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id},
+    )
+    assert rollback_to_canary.status_code == 200
+    rollback_payload = _unwrap_envelope(rollback_to_canary)
+    assert rollback_payload["status"] == "rolled_back"
+    assert rollback_payload["activation"]["mode"] == "canary"
+    assert rollback_payload["activation"]["canary_pct"] == 15
+
+    rollback_to_simulation = client.post(
+        "/onboarding/activation/rollback",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id},
+    )
+    assert rollback_to_simulation.status_code == 200
+    rollback_payload = _unwrap_envelope(rollback_to_simulation)
+    assert rollback_payload["activation"]["mode"] == "simulation"
+    assert rollback_payload["activation"]["canary_pct"] is None
+
+
+def test_onboarding_activation_rollback_requires_previous_state():
+    _reset_db()
+    tenant_id = "tenant-activation-rollback-empty"
+
+    response = client.post(
+        "/onboarding/activation/rollback",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={"tenant_id": tenant_id},
+    )
+    assert response.status_code == 400
+    assert "No previous activation state" in str(response.json())
+
+
+def test_onboarding_activation_rollback_requires_admin_or_operator_role():
+    _reset_db()
+    tenant_id = "tenant-activation-rollback-role"
+
+    response = client.post(
+        "/onboarding/activation/rollback",
+        headers=jwt_headers(
+            tenant_id=tenant_id,
+            roles=["auditor"],
+            scopes=["policy:write"],
+        ),
+        json={"tenant_id": tenant_id},
+    )
+    assert response.status_code == 403

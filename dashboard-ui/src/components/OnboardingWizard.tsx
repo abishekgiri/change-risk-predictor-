@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 
 import type {
   OnboardingActivation,
+  OnboardingActivationRollback,
   JiraProject,
   JiraProjectsDiscoveryResponse,
   JiraTransitionsDiscoveryResponse,
@@ -43,10 +44,12 @@ export function OnboardingWizard() {
   const [busyTransitions, setBusyTransitions] = useState(false);
   const [simulationLoading, setSimulationLoading] = useState(false);
   const [activationLoading, setActivationLoading] = useState(false);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [simulationError, setSimulationError] = useState<string | null>(null);
   const [activationError, setActivationError] = useState<string | null>(null);
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
 
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
   const [activationStatus, setActivationStatus] = useState<OnboardingActivation | null>(null);
@@ -253,6 +256,7 @@ export function OnboardingWizard() {
 
   const applyActivation = async () => {
     setActivationError(null);
+    setRollbackError(null);
     setSuccess(null);
 
     if (mode === "canary" && (!Number.isFinite(canaryPct) || canaryPct < 1 || canaryPct > 100)) {
@@ -299,6 +303,52 @@ export function OnboardingWizard() {
       setActivationError(applyError instanceof Error ? applyError.message : "Failed to apply activation mode");
     } finally {
       setActivationLoading(false);
+    }
+  };
+
+  const rollbackActivation = async () => {
+    setActivationError(null);
+    setRollbackError(null);
+    setSuccess(null);
+
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm(
+        "Rollback will revert the activation mode to the previous state. Continue?",
+      );
+      if (!confirmed) return;
+    }
+
+    setRollbackLoading(true);
+    try {
+      const payload = await fetchJson<OnboardingActivationRollback>("/api/dashboard/onboarding/activation/rollback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_id: tenantId }),
+      });
+      const nextActivation = payload.activation;
+      setActivationStatus(nextActivation);
+      setMode(nextActivation.mode);
+      setCanaryPct(nextActivation.canary_pct || 10);
+      setStatus((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          onboarding_completed: nextActivation.applied,
+          config: {
+            ...current.config,
+            mode: nextActivation.mode,
+            canary_pct: nextActivation.canary_pct,
+            updated_at: nextActivation.updated_at || current.config.updated_at,
+          },
+        };
+      });
+      setSuccess("Activation rolled back to the previous state.");
+    } catch (rollbackApplyError) {
+      setRollbackError(
+        rollbackApplyError instanceof Error ? rollbackApplyError.message : "Failed to rollback activation mode",
+      );
+    } finally {
+      setRollbackLoading(false);
     }
   };
 
@@ -561,7 +611,22 @@ export function OnboardingWizard() {
           </p>
           {activationUpdatedAt ? <p className="mt-1 text-xs text-slate-500">Last updated: {activationUpdatedAt}</p> : null}
         </div>
+        <div className="mt-3 rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
+          Rollback will revert the current activation mode to the previous state and may re-enable previously blocked
+          transitions.
+        </div>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => void rollbackActivation()}
+            disabled={rollbackLoading}
+            className="rounded-md border border-rose-600 bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-60"
+          >
+            {rollbackLoading ? "Rolling back..." : "Rollback activation"}
+          </button>
+        </div>
         {activationError ? <p className="mt-3 text-sm text-rose-700">{activationError}</p> : null}
+        {rollbackError ? <p className="mt-3 text-sm text-rose-700">{rollbackError}</p> : null}
       </section>
 
       <div className="flex items-center gap-3">

@@ -208,6 +208,11 @@ export interface OnboardingActivation {
   updated_at: string | null;
 }
 
+export interface OnboardingActivationRollback {
+  status: "rolled_back";
+  activation: OnboardingActivation;
+}
+
 export interface SimulationResult {
   tenant_id: string;
   lookback_days: number;

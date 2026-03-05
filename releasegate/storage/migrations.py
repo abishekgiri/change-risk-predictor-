@@ -2692,6 +2692,27 @@ def _migration_20260314_038_tenant_simulation_runs(cursor) -> None:
         """
     )
 
+
+def _migration_20260315_039_onboarding_activation_history(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_onboarding_activation_history (
+            tenant_id TEXT NOT NULL,
+            history_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            canary_pct INTEGER,
+            previous_updated_at TEXT,
+            saved_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_onboarding_activation_history_tenant_history
+        ON tenant_onboarding_activation_history(tenant_id, history_id DESC)
+        """
+    )
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -2882,6 +2903,11 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260314_038_tenant_simulation_runs",
         description="Add tenant historical simulation run records for onboarding lookback analytics.",
         apply=_migration_20260314_038_tenant_simulation_runs,
+    ),
+    Migration(
+        migration_id="20260315_039_onboarding_activation_history",
+        description="Add onboarding activation rollback history with tenant-scoped append-only records.",
+        apply=_migration_20260315_039_onboarding_activation_history,
     ),
 ]
 
