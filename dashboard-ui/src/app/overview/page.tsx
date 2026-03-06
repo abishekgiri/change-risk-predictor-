@@ -44,14 +44,31 @@ export default async function OverviewPage({
     method: "GET",
     query: { ...baseQuery, limit: 25 },
   });
-  const recommendationsResp = await backendFetch<GovernanceRecommendationsResponse>("/governance/recommendations", {
-    method: "GET",
-    query: {
-      tenant_id: scope.tenantId,
-      lookback_days: scope.windowDays,
-      limit: 5,
-    },
-  });
+  let recommendationsResp:
+    | { data: GovernanceRecommendationsResponse; traceId: string | null; status: number }
+    | null = null;
+  try {
+    recommendationsResp = await backendFetch<GovernanceRecommendationsResponse>("/governance/recommendations", {
+      method: "GET",
+      query: {
+        tenant_id: scope.tenantId,
+        lookback_days: scope.windowDays,
+        limit: 5,
+      },
+    });
+  } catch {
+    recommendationsResp = {
+      data: {
+        tenant_id: scope.tenantId,
+        generated_at: null,
+        lookback_days: scope.windowDays,
+        insight: {},
+        recommendations: [],
+      },
+      traceId: null,
+      status: 500,
+    };
+  }
 
   const trendRows = overviewResp.data.integrity_trend.map((point, index) => ({
     date_utc: point.date_utc,

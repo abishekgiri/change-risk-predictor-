@@ -1848,6 +1848,45 @@ def _expected_schema_version() -> str:
     return MIGRATIONS[-1].migration_id if MIGRATIONS else SCHEMA_VERSION
 
 
+def _required_runtime_tables() -> list[str]:
+    return [
+        "governance_insights",
+        "governance_recommendations",
+        "cross_system_correlations",
+    ]
+
+
+def _missing_runtime_tables() -> list[str]:
+    storage = get_storage_backend()
+    backend = (os.getenv("RELEASEGATE_STORAGE_BACKEND") or "sqlite").strip().lower()
+    missing: list[str] = []
+    for table_name in _required_runtime_tables():
+        if backend == "postgres":
+            row = storage.fetchone(
+                """
+                SELECT 1 AS ok
+                FROM information_schema.tables
+                WHERE table_schema = ANY (current_schemas(false))
+                  AND table_name = ?
+                LIMIT 1
+                """,
+                (table_name,),
+            )
+        else:
+            row = storage.fetchone(
+                """
+                SELECT 1 AS ok
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                LIMIT 1
+                """,
+                (table_name,),
+            )
+        if not row:
+            missing.append(table_name)
+    return missing
+
+
 def _readiness_payload() -> tuple[dict, int]:
     payload = {
         "status": "ok",
@@ -1880,6 +1919,13 @@ def _readiness_payload() -> tuple[dict, int]:
         if str(current_schema) != str(expected_version):
             payload["status"] = "error"
             payload["migrations"]["status"] = "outdated"
+            return payload, 503
+        missing_tables = _missing_runtime_tables()
+        if missing_tables:
+            payload["status"] = "error"
+            payload["storage"] = "error"
+            payload["migrations"]["status"] = "incomplete"
+            payload["migrations"]["missing_tables"] = missing_tables
             return payload, 503
     except Exception:
         payload["status"] = "error"

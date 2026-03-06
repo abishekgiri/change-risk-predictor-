@@ -23,6 +23,8 @@ def _init_postgres_schema() -> str:
 
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
+    # Serialize schema bootstrap across workers/processes to prevent DDL deadlocks.
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (9052, 1))
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS schema_migrations (
