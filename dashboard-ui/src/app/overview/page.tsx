@@ -13,6 +13,35 @@ interface BlockedPagePayload {
   next_cursor: string | null;
 }
 
+type RiskStatus = "safe" | "caution" | "high_risk";
+
+function percentChange(current: number, previous: number): number | null {
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return null;
+  if (previous === 0) {
+    if (current === 0) return 0;
+    return null;
+  }
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+function riskBand(value: number): { label: string; tone: "low" | "medium" | "high" } {
+  if (value >= 0.6) return { label: "High", tone: "high" };
+  if (value >= 0.25) return { label: "Moderate", tone: "medium" };
+  return { label: "Low", tone: "low" };
+}
+
+function driftBand(value: number): { label: string; tone: "low" | "medium" | "high" } {
+  if (value >= 0.4) return { label: "High", tone: "high" };
+  if (value >= 0.15) return { label: "Moderate", tone: "medium" };
+  return { label: "Low", tone: "low" };
+}
+
+function formatSignedPercent(delta: number | null): string {
+  if (delta === null) return "n/a";
+  const rounded = Math.round(delta * 10) / 10;
+  return `${rounded > 0 ? "+" : ""}${rounded}%`;
+}
+
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage({
@@ -77,6 +106,86 @@ export default async function OverviewPage({
     override_rate: overviewResp.data.override_rate_trend[index]?.value ?? 0,
   }));
 
+  const highAlertCount = alertsResp.data.alerts.filter((alert) => String(alert.severity).toLowerCase() === "high").length;
+  const mediumAlertCount = alertsResp.data.alerts.filter((alert) => String(alert.severity).toLowerCase() === "medium").length;
+  const highRecoCount = recommendationsResp.data.recommendations.filter((item) => item.severity === "HIGH").length;
+  const mediumRecoCount = recommendationsResp.data.recommendations.filter((item) => item.severity === "MEDIUM").length;
+  const blockedCountWindow = blockedResp.data.items.length;
+
+  const releaseStatus: RiskStatus =
+    highAlertCount > 0 || highRecoCount > 0
+      ? "high_risk"
+      : mediumAlertCount > 0 || mediumRecoCount > 0 || blockedCountWindow > 0
+      ? "caution"
+      : "safe";
+
+  const statusTheme = {
+    safe: {
+      badge: "SAFE TO SHIP",
+      emoji: "🟢",
+      classes: "border-emerald-200 bg-emerald-50 text-emerald-900",
+      body: "Governance controls are operating normally. No elevated bypass or approval drift detected.",
+    },
+    caution: {
+      badge: "CAUTION ADVISED",
+      emoji: "🟡",
+      classes: "border-amber-200 bg-amber-50 text-amber-900",
+      body: "Governance controls are active, but risk signals are rising. Review high-impact workflows before shipping.",
+    },
+    high_risk: {
+      badge: "HIGH RISK",
+      emoji: "🔴",
+      classes: "border-rose-200 bg-rose-50 text-rose-900",
+      body: "Critical governance protections are weakening. Shipping now increases operational risk.",
+    },
+  }[releaseStatus];
+
+  const recentWeek = trendRows.slice(-7);
+  const previousWeek = trendRows.slice(Math.max(0, trendRows.length - 14), Math.max(0, trendRows.length - 7));
+  const recentOverrideAvg =
+    recentWeek.reduce((sum, item) => sum + Number(item.override_rate || 0), 0) / Math.max(recentWeek.length, 1);
+  const previousOverrideAvg =
+    previousWeek.reduce((sum, item) => sum + Number(item.override_rate || 0), 0) / Math.max(previousWeek.length, 1);
+  const recentDriftAvg =
+    recentWeek.reduce((sum, item) => sum + Number(item.drift || 0), 0) / Math.max(recentWeek.length, 1);
+  const previousDriftAvg =
+    previousWeek.reduce((sum, item) => sum + Number(item.drift || 0), 0) / Math.max(previousWeek.length, 1);
+  const currentIntegrity = recentWeek[recentWeek.length - 1]?.integrity ?? overviewResp.data.integrity_score;
+  const previousIntegrity =
+    previousWeek[previousWeek.length - 1]?.integrity ??
+    recentWeek[0]?.integrity ??
+    overviewResp.data.integrity_score;
+  const overrideDelta = percentChange(recentOverrideAvg, previousOverrideAvg);
+  const driftDelta = percentChange(recentDriftAvg, previousDriftAvg);
+  const integrityDelta = percentChange(currentIntegrity, previousIntegrity);
+
+  const topRisks: Array<{ title: string; detail: string; href?: string; severity: "high" | "medium" | "low" }> = [];
+  for (const alert of alertsResp.data.alerts.slice(0, 5)) {
+    topRisks.push({
+      title: alert.title,
+      detail: `${alert.code} • ${String(alert.severity).toUpperCase()}`,
+      severity: String(alert.severity).toLowerCase() === "high" ? "high" : String(alert.severity).toLowerCase() === "medium" ? "medium" : "low",
+    });
+    if (topRisks.length >= 3) break;
+  }
+  for (const reco of recommendationsResp.data.recommendations) {
+    if (topRisks.length >= 3) break;
+    topRisks.push({
+      title: reco.title,
+      detail: reco.playbook,
+      severity: reco.severity === "HIGH" ? "high" : reco.severity === "MEDIUM" ? "medium" : "low",
+    });
+  }
+  if (topRisks.length < 3 && blockedResp.data.items[0]) {
+    const item = blockedResp.data.items[0];
+    topRisks.push({
+      title: "Recent blocked change needs review",
+      detail: `${item.workflow || "workflow"} / ${item.transition || "transition"} • ${item.reason_code || "policy blocked"}`,
+      href: `/decisions/${item.decision_id}?tenant_id=${encodeURIComponent(scope.tenantId)}`,
+      severity: "medium",
+    });
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-end justify-between">
@@ -87,29 +196,75 @@ export default async function OverviewPage({
         <TraceInfo traceId={overviewResp.data.trace_id ?? overviewResp.traceId} />
       </div>
 
+      <section className={`rounded-xl border p-5 shadow-sm ${statusTheme.classes}`}>
+        <p className="text-xs font-semibold uppercase tracking-wide">Release Risk Status</p>
+        <h2 className="mt-2 text-2xl font-semibold">
+          {statusTheme.emoji} {statusTheme.badge}
+        </h2>
+        <p className="mt-2 text-sm">{statusTheme.body}</p>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-slate-800">Top 3 Risks Today</h3>
+        <p className="mt-1 text-xs text-slate-500">Highest governance risks requiring attention now.</p>
+        <ol className="mt-3 space-y-3">
+          {topRisks.slice(0, 3).map((risk, index) => (
+            <li key={`${risk.title}-${index}`} className="rounded-md border border-slate-100 p-3">
+              <p className="text-sm font-medium text-slate-900">
+                {index + 1}. {risk.title}
+              </p>
+              <p className="mt-1 text-xs text-slate-600">{risk.detail}</p>
+              {risk.href ? (
+                <a className="mt-2 inline-block text-xs text-indigo-700 hover:underline" href={risk.href}>
+                  View details
+                </a>
+              ) : null}
+            </li>
+          ))}
+          {topRisks.length === 0 ? <li className="text-sm text-slate-500">No elevated risks detected.</li> : null}
+        </ol>
+      </section>
+
       <section className="grid gap-4 md:grid-cols-3">
-        <KpiCard label="Integrity Score" value={overviewResp.data.integrity_score.toFixed(2)} />
-        <KpiCard label="Drift Index" value={overviewResp.data.drift.current.toFixed(4)} />
         <KpiCard
-          label="Override Abuse Index"
-          value={alertsResp.data.current_override_abuse_index.toFixed(4)}
-          helper="From latest rollup"
+          label="Release Safety Score"
+          value={overviewResp.data.integrity_score.toFixed(2)}
+          helper={`${formatSignedPercent(integrityDelta)} vs last week`}
+        />
+        <KpiCard
+          label="Process Drift Risk"
+          value={driftBand(overviewResp.data.drift.current).label}
+          helper={`Index ${overviewResp.data.drift.current.toFixed(4)}`}
+        />
+        <KpiCard
+          label="Policy Bypass Risk"
+          value={riskBand(alertsResp.data.current_override_abuse_index).label}
+          helper={`Index ${alertsResp.data.current_override_abuse_index.toFixed(4)}`}
         />
       </section>
 
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h3 className="text-sm font-semibold text-slate-800">What Changed (Last 7 Days)</h3>
+        <ul className="mt-3 space-y-2 text-sm text-slate-700">
+          <li>Override risk {overrideDelta !== null && overrideDelta > 0 ? "increased" : "decreased"} {formatSignedPercent(overrideDelta)} vs prior week.</li>
+          <li>Process drift {driftDelta !== null && driftDelta > 0 ? "increased" : "decreased"} {formatSignedPercent(driftDelta)} vs prior week.</li>
+          <li>Release safety score {integrityDelta !== null && integrityDelta > 0 ? "improved" : "declined"} {formatSignedPercent(integrityDelta)} vs prior week.</li>
+        </ul>
+      </section>
+
       <LineChartCard
-        title="Integrity / Drift / Override Rate (30d)"
+        title="Release Safety / Process Drift / Policy Bypass Trends (30d)"
         data={trendRows}
         series={[
-          { key: "integrity", label: "Integrity", color: "#0f766e" },
-          { key: "drift", label: "Drift", color: "#dc2626" },
-          { key: "override_rate", label: "Override Rate", color: "#4338ca" },
+          { key: "integrity", label: "Release Safety", color: "#0f766e" },
+          { key: "drift", label: "Process Drift Risk", color: "#dc2626" },
+          { key: "override_rate", label: "Policy Bypass Risk", color: "#4338ca" },
         ]}
       />
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h3 className="text-sm font-semibold text-slate-800">Active Strict Modes</h3>
+          <h3 className="text-sm font-semibold text-slate-800">Governance Enforcement Modes</h3>
           <ul className="mt-3 space-y-2 text-sm">
             {overviewResp.data.active_strict_modes.length ? (
               overviewResp.data.active_strict_modes.map((mode) => (
@@ -128,17 +283,25 @@ export default async function OverviewPage({
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h3 className="text-sm font-semibold text-slate-800">Recent Alerts</h3>
+          <h3 className="text-sm font-semibold text-slate-800">Why Changes Were Blocked</h3>
           <ul className="mt-3 space-y-2 text-sm">
-            {alertsResp.data.alerts.slice(0, 5).map((alert) => (
-              <li key={`${alert.date_utc}-${alert.code}`} className="rounded-md border border-slate-100 p-2">
-                <p className="font-medium text-slate-900">{alert.title}</p>
-                <p className="text-xs text-slate-600">
-                  {alert.date_utc} • {alert.code} • {String(alert.severity).toUpperCase()}
+            {blockedResp.data.items[0] ? (
+              <li className="rounded-md border border-slate-100 p-3">
+                <p className="font-medium text-slate-900">Most recent blocked transition</p>
+                <p className="mt-1 text-xs text-slate-600">
+                  Workflow: {blockedResp.data.items[0].workflow || "-"} / {blockedResp.data.items[0].transition || "-"}
                 </p>
+                <p className="mt-1 text-xs text-slate-600">Reason: {blockedResp.data.items[0].reason_code || "Policy blocked"}</p>
+                <a
+                  className="mt-2 inline-block text-xs text-indigo-700 hover:underline"
+                  href={`/decisions/${blockedResp.data.items[0].decision_id}?tenant_id=${encodeURIComponent(scope.tenantId)}`}
+                >
+                  Open “Why blocked” explainer
+                </a>
               </li>
-            ))}
-            {!alertsResp.data.alerts.length ? <li className="text-slate-500">No alerts in window.</li> : null}
+            ) : (
+              <li className="text-slate-500">No blocked changes in this window.</li>
+            )}
           </ul>
         </div>
       </div>
