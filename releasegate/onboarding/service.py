@@ -380,7 +380,13 @@ def _serialize_activation_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
     mode = normalize_onboarding_mode(str(row.get("mode") or "simulation"))
     canary_pct = normalize_canary_pct(mode=mode, canary_pct=row.get("canary_pct"))
     raw_history_id = row.get("history_id")
-    history_id = int(raw_history_id) if raw_history_id is not None else 0
+    if raw_history_id is None:
+        history_id = 0
+    else:
+        try:
+            history_id = int(raw_history_id)
+        except (TypeError, ValueError):
+            history_id = abs(hash(str(raw_history_id))) % 2_147_483_647
     recorded_at = row.get("saved_at")
     updated_at = row.get("previous_updated_at") or recorded_at
     return {
@@ -452,7 +458,7 @@ def _pop_previous_activation(
     )
     if not row:
         return None
-    history_id = int(row.get("history_id"))
+    history_id = row.get("history_id")
     storage.execute(
         """
         DELETE FROM tenant_onboarding_activation_history

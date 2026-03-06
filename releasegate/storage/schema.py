@@ -2675,13 +2675,83 @@ def _init_postgres_schema() -> str:
         """
         CREATE TABLE IF NOT EXISTS tenant_onboarding_activation_history (
             tenant_id TEXT NOT NULL,
-            history_id TEXT NOT NULL,
+            history_id BIGSERIAL PRIMARY KEY,
             mode TEXT NOT NULL,
             canary_pct INTEGER,
-            recorded_at TIMESTAMPTZ NOT NULL,
-            updated_at TIMESTAMPTZ,
-            PRIMARY KEY (tenant_id, history_id)
+            previous_updated_at TEXT,
+            saved_at TEXT NOT NULL
         )
+        """
+    )
+    cur.execute(
+        """
+        ALTER TABLE tenant_onboarding_activation_history
+        ADD COLUMN IF NOT EXISTS previous_updated_at TEXT
+        """
+    )
+    cur.execute(
+        """
+        ALTER TABLE tenant_onboarding_activation_history
+        ADD COLUMN IF NOT EXISTS saved_at TEXT
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'tenant_onboarding_activation_history'
+                  AND column_name = 'recorded_at'
+            ) THEN
+                EXECUTE
+                    'UPDATE tenant_onboarding_activation_history
+                     SET saved_at = COALESCE(saved_at, recorded_at::text)
+                     WHERE saved_at IS NULL';
+            END IF;
+            IF EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'tenant_onboarding_activation_history'
+                  AND column_name = 'updated_at'
+            ) THEN
+                EXECUTE
+                    'UPDATE tenant_onboarding_activation_history
+                     SET previous_updated_at = COALESCE(previous_updated_at, updated_at::text)
+                     WHERE previous_updated_at IS NULL';
+            END IF;
+            EXECUTE
+                'UPDATE tenant_onboarding_activation_history
+                 SET saved_at = COALESCE(saved_at, NOW()::text)
+                 WHERE saved_at IS NULL';
+            EXECUTE
+                'UPDATE tenant_onboarding_activation_history
+                 SET previous_updated_at = COALESCE(previous_updated_at, saved_at)
+                 WHERE previous_updated_at IS NULL';
+        END $$;
+        """
+    )
+    cur.execute(
+        """
+        DO $$
+        DECLARE history_type TEXT;
+        BEGIN
+            SELECT data_type
+            INTO history_type
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'tenant_onboarding_activation_history'
+              AND column_name = 'history_id';
+
+            IF history_type = 'text' THEN
+                EXECUTE
+                    'ALTER TABLE tenant_onboarding_activation_history
+                     ALTER COLUMN history_id SET DEFAULT ((extract(epoch from clock_timestamp()) * 1000000)::bigint::text)';
+            END IF;
+        END $$;
         """
     )
     cur.execute(
