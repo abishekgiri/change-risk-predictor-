@@ -23,9 +23,12 @@ function asTenantStatus(value: string): TenantStatus {
   return "active";
 }
 
-export function TenantAdminPanel() {
+export function TenantAdminPanel({ defaultTenantId }: { defaultTenantId: string }) {
   const searchParams = useSearchParams();
-  const tenantId = useMemo(() => searchParams.get("tenant_id") || "default", [searchParams]);
+  const tenantId = useMemo(
+    () => searchParams.get("tenant_id") || defaultTenantId,
+    [defaultTenantId, searchParams],
+  );
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -58,7 +61,12 @@ export function TenantAdminPanel() {
       setPlan(payload.plan || "enterprise");
       setRegion(payload.region || "us-east");
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load tenant profile");
+      const message = loadError instanceof Error ? loadError.message : "Failed to load tenant profile";
+      if (message.toLowerCase().includes("cannot access another tenant")) {
+        setError(`Tenant access mismatch for "${tenantId}". Align dashboard tenant and backend auth tenant.`);
+      } else {
+        setError(message);
+      }
     } finally {
       setLoading(false);
     }
