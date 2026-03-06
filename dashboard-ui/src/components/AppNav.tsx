@@ -82,15 +82,21 @@ export function AppNav() {
     <nav className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-6 py-3">
         <p className="mr-4 text-sm font-semibold text-slate-900">Governance Dashboard</p>
-        {links.map((link) => (
-          <Link
-            key={link.href}
-            href={scopedHref(link.href)}
-            className="rounded-md px-2 py-1 text-sm text-slate-700 hover:bg-slate-100"
-          >
-            {link.label}
-          </Link>
-        ))}
+        {links.map((link) => {
+          const isActive = pathname === link.href;
+          return (
+            <Link
+              key={link.href}
+              href={scopedHref(link.href)}
+              aria-current={isActive ? "page" : undefined}
+              className={`rounded-md px-2 py-1 text-sm ${
+                isActive ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              {link.label}
+            </Link>
+          );
+        })}
         <div className="ml-auto flex flex-wrap items-end gap-2">
           <label className="flex flex-col text-xs font-medium text-slate-600">
             Tenant
