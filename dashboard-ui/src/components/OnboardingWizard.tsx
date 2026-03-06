@@ -35,9 +35,9 @@ async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promi
   return payload as T;
 }
 
-export function OnboardingWizard() {
+export function OnboardingWizard({ defaultTenantId }: { defaultTenantId: string }) {
   const searchParams = useSearchParams();
-  const tenantId = useMemo(() => searchParams.get("tenant_id") || "default", [searchParams]);
+  const tenantId = useMemo(() => searchParams.get("tenant_id") || defaultTenantId, [defaultTenantId, searchParams]);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -202,7 +202,14 @@ export function OnboardingWizard() {
       await loadActivationStatus();
       await loadActivationHistory();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load onboarding state");
+      const message = loadError instanceof Error ? loadError.message : "Failed to load onboarding state";
+      if (message.toLowerCase().includes("cannot access another tenant")) {
+        setError(
+          `Tenant access mismatch for "${tenantId}". Open this page with ?tenant_id matching your backend tenant configuration.`,
+        );
+      } else {
+        setError(message);
+      }
     } finally {
       setLoading(false);
     }
@@ -371,7 +378,7 @@ export function OnboardingWizard() {
   if (loading) {
     return (
       <div className="space-y-4">
-        <h1 className="text-2xl font-semibold text-slate-900">Enterprise Onboarding</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Setup Release Governance</h1>
         <div className="rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600">
           Loading onboarding configuration...
         </div>
@@ -382,7 +389,7 @@ export function OnboardingWizard() {
   return (
     <div className="space-y-6">
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h1 className="text-2xl font-semibold text-slate-900">Enterprise Onboarding</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Setup Release Governance</h1>
         <p className="mt-1 text-sm text-slate-600">Tenant: {tenantId}</p>
         <p className="mt-2 text-sm">
           Status:{" "}
@@ -401,7 +408,7 @@ export function OnboardingWizard() {
       </div>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">1. Connect Jira</h2>
+        <h2 className="text-lg font-semibold text-slate-900">1. Connect Your Jira Workspace</h2>
         <label className="mt-3 block text-sm font-medium text-slate-700">
           Jira instance
           <input
@@ -416,7 +423,7 @@ export function OnboardingWizard() {
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold text-slate-900">2. Select Projects</h2>
+          <h2 className="text-lg font-semibold text-slate-900">2. Choose Projects to Protect</h2>
           <button
             type="button"
             onClick={() => void loadProjects()}
@@ -512,7 +519,7 @@ export function OnboardingWizard() {
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">5. Enforcement Mode</h2>
+        <h2 className="text-lg font-semibold text-slate-900">5. Turn On Protection</h2>
         <div className="mt-3 grid gap-2">
           <label className="flex items-center gap-2 text-sm text-slate-800">
             <input type="radio" name="mode" checked={mode === "simulation"} onChange={() => setMode("simulation")} />
@@ -541,16 +548,16 @@ export function OnboardingWizard() {
           </label>
         ) : null}
         <p className="mt-3 text-xs text-slate-500">
-          Simulation mode is safest for initial rollout. Move to Canary or Strict after reviewing historical simulation.
+          Start in Simulation mode. Move to Canary or Strict after reviewing preview results.
         </p>
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">6. Historical Simulation (30-day lookback)</h2>
+            <h2 className="text-lg font-semibold text-slate-900">6. Preview Impact (Safe Test Mode)</h2>
             <p className="mt-1 text-sm text-slate-600">
-              Evaluate recent transitions in dry-run mode with no enforcement side effects.
+              Preview how policies would behave over the last 30 days with no enforcement side effects.
             </p>
           </div>
           <button
@@ -606,7 +613,7 @@ export function OnboardingWizard() {
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">7. Activation Ladder</h2>
+            <h2 className="text-lg font-semibold text-slate-900">7. Apply Protection Level</h2>
             <p className="mt-1 text-sm text-slate-600">
               Apply the selected mode to transition from dry-run to controlled enforcement.
             </p>
@@ -622,7 +629,7 @@ export function OnboardingWizard() {
         </div>
         <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
           <p>
-            Current mode: <span className="font-medium text-slate-900">{activeMode}</span>
+            Protection status: <span className="font-medium text-slate-900">{activeMode}</span>
             {activeMode === "canary" && activeCanaryPct ? ` (${activeCanaryPct}%)` : ""}
           </p>
           {activationUpdatedAt ? <p className="mt-1 text-xs text-slate-500">Last updated: {activationUpdatedAt}</p> : null}
