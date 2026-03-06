@@ -42,6 +42,24 @@ function formatSignedPercent(delta: number | null): string {
   return `${rounded > 0 ? "+" : ""}${rounded}%`;
 }
 
+function formatRiskHelper(band: "low" | "medium" | "high"): string {
+  if (band === "high") return "Elevated risk. Review controls today.";
+  if (band === "medium") return "Moderate risk. Monitor closely.";
+  return "Within normal range.";
+}
+
+function changeSummary(
+  delta: number | null,
+  noun: string,
+  improvedDirection: "up" | "down",
+): string {
+  if (delta === null) return `${noun} trend unavailable this week.`;
+  if (Math.abs(delta) < 1) return `${noun} remained stable this week.`;
+  const movedUp = delta > 0;
+  const improved = improvedDirection === "up" ? movedUp : !movedUp;
+  return `${noun} ${improved ? "improved" : "worsened"} ${formatSignedPercent(Math.abs(delta))} vs prior week.`;
+}
+
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage({
@@ -158,6 +176,11 @@ export default async function OverviewPage({
   const overrideDelta = percentChange(recentOverrideAvg, previousOverrideAvg);
   const driftDelta = percentChange(recentDriftAvg, previousDriftAvg);
   const integrityDelta = percentChange(currentIntegrity, previousIntegrity);
+  const driftRisk = driftBand(overviewResp.data.drift.current);
+  const bypassRisk = riskBand(alertsResp.data.current_override_abuse_index);
+  const hasTrendSignal = trendRows.some(
+    (row) => Number(row.integrity || 0) > 0 || Number(row.drift || 0) > 0 || Number(row.override_rate || 0) > 0,
+  );
 
   const topRisks: Array<{ title: string; detail: string; href?: string; severity: "high" | "medium" | "low" }> = [];
   for (const alert of alertsResp.data.alerts.slice(0, 5)) {
@@ -221,7 +244,11 @@ export default async function OverviewPage({
               ) : null}
             </li>
           ))}
-          {topRisks.length === 0 ? <li className="text-sm text-slate-500">No elevated risks detected.</li> : null}
+          {topRisks.length === 0 ? (
+            <li className="text-sm text-slate-500">
+              No critical governance risks detected. All monitored workflows are operating within policy.
+            </li>
+          ) : null}
         </ol>
       </section>
 
@@ -233,38 +260,47 @@ export default async function OverviewPage({
         />
         <KpiCard
           label="Process Drift Risk"
-          value={driftBand(overviewResp.data.drift.current).label}
-          helper={`Index ${overviewResp.data.drift.current.toFixed(4)}`}
+          value={driftRisk.label}
+          helper={formatRiskHelper(driftRisk.tone)}
         />
         <KpiCard
           label="Policy Bypass Risk"
-          value={riskBand(alertsResp.data.current_override_abuse_index).label}
-          helper={`Index ${alertsResp.data.current_override_abuse_index.toFixed(4)}`}
+          value={bypassRisk.label}
+          helper={formatRiskHelper(bypassRisk.tone)}
         />
       </section>
 
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <h3 className="text-sm font-semibold text-slate-800">What Changed (Last 7 Days)</h3>
         <ul className="mt-3 space-y-2 text-sm text-slate-700">
-          <li>Override risk {overrideDelta !== null && overrideDelta > 0 ? "increased" : "decreased"} {formatSignedPercent(overrideDelta)} vs prior week.</li>
-          <li>Process drift {driftDelta !== null && driftDelta > 0 ? "increased" : "decreased"} {formatSignedPercent(driftDelta)} vs prior week.</li>
-          <li>Release safety score {integrityDelta !== null && integrityDelta > 0 ? "improved" : "declined"} {formatSignedPercent(integrityDelta)} vs prior week.</li>
+          <li>{changeSummary(overrideDelta, "Policy bypass risk", "down")}</li>
+          <li>{changeSummary(driftDelta, "Process drift risk", "down")}</li>
+          <li>{changeSummary(integrityDelta, "Release safety score", "up")}</li>
         </ul>
       </section>
 
-      <LineChartCard
-        title="Release Safety / Process Drift / Policy Bypass Trends (30d)"
-        data={trendRows}
-        series={[
-          { key: "integrity", label: "Release Safety", color: "#0f766e" },
-          { key: "drift", label: "Process Drift Risk", color: "#dc2626" },
-          { key: "override_rate", label: "Policy Bypass Risk", color: "#4338ca" },
-        ]}
-      />
+      {hasTrendSignal ? (
+        <LineChartCard
+          title="Release Safety / Process Drift / Policy Bypass Trends (30d)"
+          data={trendRows}
+          series={[
+            { key: "integrity", label: "Release Safety", color: "#0f766e" },
+            { key: "drift", label: "Process Drift Risk", color: "#dc2626" },
+            { key: "override_rate", label: "Policy Bypass Risk", color: "#4338ca" },
+          ]}
+        />
+      ) : (
+        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h3 className="text-sm font-semibold text-slate-800">Risk Trends (30d)</h3>
+          <p className="mt-2 text-sm text-slate-600">
+            No significant risk trends detected in the past 30 days. Governance activity remains stable.
+          </p>
+        </section>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h3 className="text-sm font-semibold text-slate-800">Governance Enforcement Modes</h3>
+          <h3 className="text-sm font-semibold text-slate-800">Protection Level</h3>
           <ul className="mt-3 space-y-2 text-sm">
             {overviewResp.data.active_strict_modes.length ? (
               overviewResp.data.active_strict_modes.map((mode) => (
@@ -307,7 +343,7 @@ export default async function OverviewPage({
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h3 className="text-sm font-semibold text-slate-800">Governance Health Recommendations</h3>
+        <h3 className="text-sm font-semibold text-slate-800">Recommended Actions</h3>
         <ul className="mt-3 space-y-2 text-sm">
           {recommendationsResp.data.recommendations.slice(0, 5).map((recommendation) => (
             <li key={recommendation.recommendation_id} className="rounded-md border border-slate-100 p-2">
