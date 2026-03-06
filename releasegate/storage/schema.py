@@ -2617,6 +2617,81 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS tenant_onboarding_config (
+            tenant_id TEXT PRIMARY KEY,
+            jira_instance_id TEXT,
+            project_keys_json TEXT NOT NULL DEFAULT '[]',
+            workflow_ids_json TEXT NOT NULL DEFAULT '[]',
+            transition_ids_json TEXT NOT NULL DEFAULT '[]',
+            mode TEXT NOT NULL DEFAULT 'simulation',
+            canary_pct INTEGER,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_onboarding_config_updated_at
+        ON tenant_onboarding_config(updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_onboarding_config_mode
+        ON tenant_onboarding_config(mode)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_simulation_runs (
+            tenant_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            lookback_days INTEGER NOT NULL,
+            result_json TEXT NOT NULL,
+            total_transitions INTEGER NOT NULL DEFAULT 0,
+            blocked INTEGER NOT NULL DEFAULT 0,
+            blocked_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+            override_required INTEGER NOT NULL DEFAULT 0,
+            risk_distribution_json TEXT NOT NULL DEFAULT '{}',
+            ran_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, run_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_simulation_runs_tenant_ran
+        ON tenant_simulation_runs(tenant_id, ran_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_simulation_runs_lookback
+        ON tenant_simulation_runs(tenant_id, lookback_days, ran_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_onboarding_activation_history (
+            tenant_id TEXT NOT NULL,
+            history_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            canary_pct INTEGER,
+            recorded_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ,
+            PRIMARY KEY (tenant_id, history_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_onboarding_activation_history_tenant_history
+        ON tenant_onboarding_activation_history(tenant_id, history_id DESC)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS governance_insights (
             tenant_id TEXT NOT NULL,
             insight_id TEXT NOT NULL,
