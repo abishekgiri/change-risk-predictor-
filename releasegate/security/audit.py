@@ -7,7 +7,6 @@ from typing import Any, Dict, Optional
 
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 def log_security_event(
@@ -20,7 +19,6 @@ def log_security_event(
     target_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     event_id = uuid.uuid4().hex
@@ -43,4 +41,3 @@ def log_security_event(
         ),
     )
     return event_id
-

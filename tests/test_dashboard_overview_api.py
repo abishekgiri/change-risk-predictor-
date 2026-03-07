@@ -332,7 +332,8 @@ def test_dashboard_overview_fallback_returns_null_drift_breakdown():
     )
     assert response.status_code == 200, response.text
     _, body = _unwrap_dashboard_envelope(response)
-    assert body["drift"]["breakdown"] is None
+    assert body["drift"]["current"] == 0.0
+    assert _count_rollup_rows(tenant_id=tenant_id) == 1
 
 
 def test_dashboard_blocked_cursor_pagination_returns_non_overlapping_pages():

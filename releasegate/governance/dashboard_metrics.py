@@ -8,7 +8,6 @@ from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from releasegate.governance.integrity import get_tenant_governance_integrity
-from releasegate.quota.quota_service import get_tenant_governance_metrics
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
 
@@ -1270,6 +1269,18 @@ def get_dashboard_overview(
     trend = list_integrity_trend(tenant_id=effective_tenant, window_days=window_days)
     timings["integrity_trend_load"] = round((perf_counter() - started) * 1000.0, 3)
 
+    if not trend:
+        started = perf_counter()
+        compute_and_upsert_daily_rollup(
+            tenant_id=effective_tenant,
+            date_utc=_utc_now().date(),
+        )
+        timings["current_day_rollup_seed"] = round((perf_counter() - started) * 1000.0, 3)
+
+        started = perf_counter()
+        trend = list_integrity_trend(tenant_id=effective_tenant, window_days=window_days)
+        timings["integrity_trend_reload"] = round((perf_counter() - started) * 1000.0, 3)
+
     started = perf_counter()
     blocked = list_recent_blocked_decisions(tenant_id=effective_tenant, limit=blocked_limit)
     timings["recent_blocked_load"] = round((perf_counter() - started) * 1000.0, 3)
@@ -1287,39 +1298,10 @@ def get_dashboard_overview(
         drift_breakdown = latest.get("drift_breakdown") if isinstance(latest.get("drift_breakdown"), dict) else None
         timings["trend_extract"] = round((perf_counter() - started) * 1000.0, 3)
     else:
-        started = perf_counter()
-        integrity_payload = get_tenant_governance_integrity(
-            tenant_id=effective_tenant,
-            window_days=min(_normalize_window_days(window_days), 90),
-        )
-        timings["fallback_integrity_load"] = round((perf_counter() - started) * 1000.0, 3)
-
-        started = perf_counter()
-        governance_metrics = get_tenant_governance_metrics(tenant_id=effective_tenant)
-        timings["fallback_governance_metrics_load"] = round((perf_counter() - started) * 1000.0, 3)
-        override_count = int((integrity_payload.get("override_abuse") or {}).get("override_count") or 0)
-        decision_count = int(integrity_payload.get("decision_count") or 0)
-        integrity_score = float(integrity_payload.get("governance_integrity_score") or 0.0)
-        drift_index = float(integrity_payload.get("drift_index") or 0.0)
-        override_rate = _override_rate_from_counts(
-            override_count=override_count,
-            decision_count=decision_count,
-        )
+        integrity_score = 0.0
+        drift_index = 0.0
+        override_rate = 0.0
         drift_breakdown = None
-        started = perf_counter()
-        trend = [
-            {
-                "date_utc": _utc_now().date().isoformat(),
-                "integrity_score": integrity_score,
-                "drift_index": drift_index,
-                "override_rate": override_rate,
-                "override_count": override_count,
-                "decision_count": decision_count,
-                "blocked_count": int(governance_metrics.get("denies_month") or 0),
-                "drift_breakdown": drift_breakdown,
-            }
-        ]
-        timings["fallback_trend_assembly"] = round((perf_counter() - started) * 1000.0, 3)
 
     started = perf_counter()
     payload = {

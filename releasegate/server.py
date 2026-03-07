@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 import requests
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exception_handlers import (
     http_exception_handler as fastapi_http_exception_handler,
@@ -3102,6 +3102,7 @@ async def releasegate_request_validation_handler(request: Request, exc: RequestV
 def dashboard_overview_endpoint(
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     blocked_limit: int = 25,
@@ -3129,7 +3130,8 @@ def dashboard_overview_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_started = perf_counter()
-    _audit_dashboard_read(
+    background_tasks.add_task(
+        _audit_dashboard_read,
         auth=auth,
         tenant_id=effective_tenant,
         action="DASHBOARD_READ_OVERVIEW",
