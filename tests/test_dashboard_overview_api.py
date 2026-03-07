@@ -467,7 +467,7 @@ def test_dashboard_rollup_backfill_requires_admin():
     assert response.status_code == 403
 
 
-def test_internal_slo_endpoint_reports_latency_and_error_rate():
+def test_internal_slo_endpoint_reports_latency_and_error_rate(monkeypatch):
     _reset_db()
     tenant_id = "tenant-dashboard-slo"
 
@@ -481,15 +481,24 @@ def test_internal_slo_endpoint_reports_latency_and_error_rate():
     unauthorized = client.get("/dashboard/overview", params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10})
     assert unauthorized.status_code == 401
 
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "dashboard-slo-key")
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "policy:read")
+
     slo = client.get(
         "/internal/slo",
-        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+        headers={
+            "X-Internal-Service-Key": "dashboard-slo-key",
+            "X-Tenant-Id": tenant_id,
+        },
     )
     assert slo.status_code == 200, slo.text
     payload = slo.json()
     assert payload["http_requests_total"] >= 2
     assert payload["http_errors_4xx5xx_total"] >= 1
     assert payload["latency_ms_p95"] >= 0.0
+    assert payload["routes"]["/dashboard/overview"]["http_requests_total"] >= 2
+    assert payload["routes"]["/dashboard/overview"]["http_errors_4xx5xx_total"] >= 1
+    assert payload["routes"]["/dashboard/overview"]["latency_ms_p95"] >= 0.0
     assert payload["targets"]["p95_latency_ms"] == 500.0
     assert payload["targets"]["error_rate_5xx"] == 0.001
 

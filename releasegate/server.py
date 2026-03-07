@@ -2023,6 +2023,7 @@ def slo_metrics(
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
+        allow_internal_service=True,
         rate_profile="default",
     ),
 ):
