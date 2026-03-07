@@ -408,6 +408,36 @@ def test_dashboard_overview_allows_internal_service_auth(monkeypatch):
     assert envelope["trace_id"] == body["trace_id"]
 
 
+def test_dashboard_overview_debug_timing_is_exposed_for_internal_service(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-debug-timing"
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "dashboard-debug-key")
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "policy:read,enforcement:write")
+
+    response = client.get(
+        "/dashboard/overview",
+        params={
+            "tenant_id": tenant_id,
+            "window_days": 30,
+            "blocked_limit": 10,
+            "include_debug_timing": "true",
+        },
+        headers={
+            "X-Internal-Service-Key": "dashboard-debug-key",
+            "X-Tenant-Id": tenant_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    _, body = _unwrap_dashboard_envelope(response)
+    assert isinstance(body["debug_timing_ms"], dict)
+    assert body["debug_timing_ms"]["integrity_trend_load"] >= 0.0
+    assert body["debug_timing_ms"]["recent_blocked_load"] >= 0.0
+    assert body["debug_timing_ms"]["strict_modes_load"] >= 0.0
+    assert body["debug_timing_ms"]["audit_dashboard_read"] >= 0.0
+    assert body["debug_timing_ms"]["total_endpoint"] >= body["debug_timing_ms"]["total_service"]
+    assert float(response.headers["X-Overview-Timing-Total-Ms"]) >= 0.0
+
+
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():
     _reset_db()
     tenant_id = "tenant-dashboard-rollup"

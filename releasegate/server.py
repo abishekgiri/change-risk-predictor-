@@ -586,6 +586,7 @@ class DashboardOverviewData(BaseModel):
     drift: DashboardDriftPayload = Field(default_factory=DashboardDriftPayload)
     active_strict_modes: List[Dict[str, Any]] = Field(default_factory=list)
     recent_blocked: List[Dict[str, Any]] = Field(default_factory=list)
+    debug_timing_ms: Optional[Dict[str, float]] = None
 
 
 class DashboardIntegrityTrendPoint(BaseModel):
@@ -3104,6 +3105,7 @@ def dashboard_overview_endpoint(
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     blocked_limit: int = 25,
+    include_debug_timing: bool = False,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
         scopes=["policy:read"],
@@ -3115,14 +3117,18 @@ def dashboard_overview_endpoint(
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     trace_id = _dashboard_trace_id(request)
+    endpoint_started = perf_counter()
+    debug_requested = bool(include_debug_timing and auth.auth_method == "internal_service")
     try:
         payload = get_dashboard_overview(
             tenant_id=effective_tenant,
             window_days=window_days,
             blocked_limit=blocked_limit,
+            include_debug_timing=debug_requested,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_started = perf_counter()
     _audit_dashboard_read(
         auth=auth,
         tenant_id=effective_tenant,
@@ -3134,6 +3140,21 @@ def dashboard_overview_endpoint(
             "blocked_limit": int(blocked_limit),
         },
     )
+    audit_ms = round((perf_counter() - audit_started) * 1000.0, 3)
+    endpoint_total_ms = round((perf_counter() - endpoint_started) * 1000.0, 3)
+    if debug_requested:
+        debug_timing = payload.setdefault("debug_timing_ms", {})
+        debug_timing["audit_dashboard_read"] = audit_ms
+        debug_timing["total_endpoint"] = endpoint_total_ms
+        response.headers["X-Overview-Timing-Total-Ms"] = str(endpoint_total_ms)
+    if debug_requested or endpoint_total_ms >= 500.0:
+        logger.info(
+            "Dashboard overview timings trace_id=%s tenant_id=%s total_ms=%.3f breakdown=%s",
+            trace_id,
+            effective_tenant,
+            endpoint_total_ms,
+            payload.get("debug_timing_ms") or {"audit_dashboard_read": audit_ms},
+        )
     return _dashboard_response(
         response=response,
         trace_id=trace_id,

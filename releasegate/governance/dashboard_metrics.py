@@ -4,6 +4,7 @@ import json
 import os
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from releasegate.governance.integrity import get_tenant_governance_integrity
@@ -1256,24 +1257,46 @@ def get_dashboard_overview(
     tenant_id: str,
     window_days: int = DEFAULT_WINDOW_DAYS,
     blocked_limit: int = DEFAULT_BLOCKED_LIMIT,
+    include_debug_timing: bool = False,
 ) -> Dict[str, Any]:
+    total_started = perf_counter()
+    timings: Dict[str, float] = {}
+
+    started = perf_counter()
     effective_tenant = resolve_tenant_id(tenant_id)
+    timings["resolve_tenant"] = round((perf_counter() - started) * 1000.0, 3)
+
+    started = perf_counter()
     trend = list_integrity_trend(tenant_id=effective_tenant, window_days=window_days)
+    timings["integrity_trend_load"] = round((perf_counter() - started) * 1000.0, 3)
+
+    started = perf_counter()
     blocked = list_recent_blocked_decisions(tenant_id=effective_tenant, limit=blocked_limit)
+    timings["recent_blocked_load"] = round((perf_counter() - started) * 1000.0, 3)
+
+    started = perf_counter()
     strict_modes = list_active_strict_modes(tenant_id=effective_tenant)
+    timings["strict_modes_load"] = round((perf_counter() - started) * 1000.0, 3)
 
     if trend:
+        started = perf_counter()
         latest = trend[-1]
         integrity_score = float(latest.get("integrity_score") or 0.0)
         drift_index = float(latest.get("drift_index") or 0.0)
         override_rate = float(latest.get("override_rate") or 0.0)
         drift_breakdown = latest.get("drift_breakdown") if isinstance(latest.get("drift_breakdown"), dict) else None
+        timings["trend_extract"] = round((perf_counter() - started) * 1000.0, 3)
     else:
+        started = perf_counter()
         integrity_payload = get_tenant_governance_integrity(
             tenant_id=effective_tenant,
             window_days=min(_normalize_window_days(window_days), 90),
         )
+        timings["fallback_integrity_load"] = round((perf_counter() - started) * 1000.0, 3)
+
+        started = perf_counter()
         governance_metrics = get_tenant_governance_metrics(tenant_id=effective_tenant)
+        timings["fallback_governance_metrics_load"] = round((perf_counter() - started) * 1000.0, 3)
         override_count = int((integrity_payload.get("override_abuse") or {}).get("override_count") or 0)
         decision_count = int(integrity_payload.get("decision_count") or 0)
         integrity_score = float(integrity_payload.get("governance_integrity_score") or 0.0)
@@ -1283,6 +1306,7 @@ def get_dashboard_overview(
             decision_count=decision_count,
         )
         drift_breakdown = None
+        started = perf_counter()
         trend = [
             {
                 "date_utc": _utc_now().date().isoformat(),
@@ -1295,8 +1319,10 @@ def get_dashboard_overview(
                 "drift_breakdown": drift_breakdown,
             }
         ]
+        timings["fallback_trend_assembly"] = round((perf_counter() - started) * 1000.0, 3)
 
-    return {
+    started = perf_counter()
+    payload = {
         "tenant_id": effective_tenant,
         "window_days": _normalize_window_days(window_days),
         "integrity_score": round(integrity_score, 6),
@@ -1326,6 +1352,11 @@ def get_dashboard_overview(
         "active_strict_modes": strict_modes,
         "recent_blocked": blocked,
     }
+    timings["payload_assembly"] = round((perf_counter() - started) * 1000.0, 3)
+    timings["total_service"] = round((perf_counter() - total_started) * 1000.0, 3)
+    if include_debug_timing:
+        payload["debug_timing_ms"] = timings
+    return payload
 
 
 def list_dashboard_alerts(
