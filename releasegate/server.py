@@ -16,6 +16,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 import requests
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -71,6 +72,7 @@ from releasegate.security.anomaly_detector import record_anomaly_event
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
 from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
+from releasegate.observability.slo_metrics import record_http_request, snapshot as slo_snapshot
 from releasegate.storage.migrations import MIGRATIONS
 from releasegate.storage.schema import SCHEMA_VERSION
 
@@ -158,6 +160,22 @@ if ALLOWED_ORIGINS:
         allow_headers=["*"],
         expose_headers=["X-Request-Id"],
     )
+
+
+@app.middleware("http")
+async def _http_slo_tracking_middleware(request: Request, call_next):
+    started = perf_counter()
+    path = str(request.url.path or "/")
+    method = str(request.method or "GET").upper()
+    try:
+        response = await call_next(request)
+    except Exception:
+        latency_ms = (perf_counter() - started) * 1000.0
+        record_http_request(path=path, method=method, status_code=500, latency_ms=latency_ms)
+        raise
+    latency_ms = (perf_counter() - started) * 1000.0
+    record_http_request(path=path, method=method, status_code=response.status_code, latency_ms=latency_ms)
+    return response
 
 
 class CIScoreRequest(BaseModel):
@@ -1901,20 +1919,19 @@ def _readiness_payload() -> tuple[dict, int]:
     }
 
     try:
-        from releasegate.storage.schema import init_db
-
-        current_version = init_db()
         expected_version = payload["migrations"]["expected"]
         get_storage_backend().fetchone("SELECT 1 AS ok")
         state = get_storage_backend().fetchone(
             "SELECT current_version, migration_id, updated_at FROM schema_state WHERE id = 1"
         )
-        current_schema = None
-        if state:
-            current_schema = state.get("migration_id") or state.get("current_version")
-            payload["migrations"]["updated_at"] = state.get("updated_at")
-        if not current_schema:
-            current_schema = current_version
+        if not state:
+            payload["status"] = "error"
+            payload["storage"] = "error"
+            payload["migrations"]["status"] = "missing"
+            payload["migrations"]["detail"] = "schema_state row not found; run migrations before serving traffic"
+            return payload, 503
+        current_schema = state.get("migration_id") or state.get("current_version")
+        payload["migrations"]["updated_at"] = state.get("updated_at")
         payload["migrations"]["current"] = current_schema
         if str(current_schema) != str(expected_version):
             payload["status"] = "error"
@@ -1963,12 +1980,23 @@ def _prometheus_label(value: Any) -> str:
 @app.get("/metrics", response_class=PlainTextResponse)
 def metrics():
     snap = metrics_snapshot(include_tenants=True)
+    slo = slo_snapshot()
     by_tenant = snap.pop("_by_tenant", {}) if isinstance(snap, dict) else {}
     lines = [
         "# HELP releasegate_metric_total ReleaseGate internal counters",
         "# TYPE releasegate_metric_total counter",
         "# HELP releasegate_metric_tenant_total ReleaseGate internal counters by tenant",
         "# TYPE releasegate_metric_tenant_total counter",
+        "# HELP releasegate_http_requests_total HTTP requests processed by the API process",
+        "# TYPE releasegate_http_requests_total counter",
+        "# HELP releasegate_http_errors_5xx_total HTTP 5xx responses observed by the API process",
+        "# TYPE releasegate_http_errors_5xx_total counter",
+        "# HELP releasegate_http_error_rate_5xx_ratio HTTP 5xx error ratio observed by the API process",
+        "# TYPE releasegate_http_error_rate_5xx_ratio gauge",
+        "# HELP releasegate_http_latency_ms_p95 API p95 latency in milliseconds (process-local sample)",
+        "# TYPE releasegate_http_latency_ms_p95 gauge",
+        "# HELP releasegate_uptime_seconds API process uptime in seconds",
+        "# TYPE releasegate_uptime_seconds gauge",
     ]
     for metric_name in sorted(snap.keys()):
         lines.append(
@@ -1982,7 +2010,30 @@ def metrics():
                 + f'{{tenant_id="{_prometheus_label(tenant)}",metric="{_prometheus_label(metric_name)}"}} '
                 + f"{int(tenant_metrics[metric_name])}"
             )
+    lines.append(f"releasegate_http_requests_total {int(slo.get('http_requests_total') or 0)}")
+    lines.append(f"releasegate_http_errors_5xx_total {int(slo.get('http_errors_5xx_total') or 0)}")
+    lines.append(f"releasegate_http_error_rate_5xx_ratio {float(slo.get('http_error_rate_5xx') or 0.0)}")
+    lines.append(f"releasegate_http_latency_ms_p95 {float(slo.get('latency_ms_p95') or 0.0)}")
+    lines.append(f"releasegate_uptime_seconds {float(slo.get('uptime_seconds') or 0.0)}")
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.get("/internal/slo")
+def slo_metrics(
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    _ = auth
+    payload = slo_snapshot()
+    payload["targets"] = {
+        "p95_latency_ms": 500.0,
+        "error_rate_5xx": 0.001,
+        "uptime_ratio": 0.999,
+    }
+    return payload
 
 
 @app.get("/metrics/tenant/{tenant_id}")

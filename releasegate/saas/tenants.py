@@ -17,7 +17,6 @@ from releasegate.security.api_keys import create_api_key, list_api_keys, rotate_
 from releasegate.security.security_state_service import set_tenant_security_state
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 from releasegate.tenants.keys import rotate_tenant_signing_key
 
 TENANT_STATUS_ACTIVE = "active"
@@ -65,48 +64,6 @@ def _normalize_role(role: str) -> str:
     if normalized not in _ROLE_VALUES:
         raise ValueError("role must be one of owner, admin, operator, auditor, viewer")
     return normalized
-
-
-def _ensure_saas_tenant_tables() -> None:
-    storage = get_storage_backend()
-    storage.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tenant_admin_profiles (
-            tenant_id TEXT PRIMARY KEY,
-            org_name TEXT NOT NULL DEFAULT '',
-            plan_tier TEXT NOT NULL DEFAULT 'enterprise',
-            region TEXT NOT NULL DEFAULT 'us-east',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            created_by TEXT,
-            updated_by TEXT
-        )
-        """
-    )
-    storage.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tenant_admin_profiles_plan_region
-        ON tenant_admin_profiles(plan_tier, region)
-        """
-    )
-    storage.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tenant_role_assignments (
-            tenant_id TEXT NOT NULL,
-            actor_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            assigned_by TEXT,
-            assigned_at TEXT NOT NULL,
-            PRIMARY KEY (tenant_id, actor_id, role)
-        )
-        """
-    )
-    storage.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tenant_role_assignments_tenant_actor
-        ON tenant_role_assignments(tenant_id, actor_id)
-        """
-    )
 
 
 def _ensure_profile_row(*, tenant_id: str, now_iso: str) -> None:
@@ -174,8 +131,6 @@ def _load_role_assignments(*, tenant_id: str) -> List[Dict[str, Any]]:
 
 
 def get_tenant_profile(*, tenant_id: Optional[str]) -> Dict[str, Any]:
-    init_db()
-    _ensure_saas_tenant_tables()
 
     effective_tenant = resolve_tenant_id(tenant_id)
     now_iso = _utc_now_iso()
@@ -223,8 +178,6 @@ def create_tenant_profile(
     region: Optional[str],
     actor_id: Optional[str],
 ) -> Dict[str, Any]:
-    init_db()
-    _ensure_saas_tenant_tables()
 
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_plan = normalize_plan_tier(plan)
@@ -313,8 +266,6 @@ def assign_tenant_role(
     action: str = "assign",
     assigned_by: Optional[str],
 ) -> Dict[str, Any]:
-    init_db()
-    _ensure_saas_tenant_tables()
 
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_actor = str(actor_id or "").strip()

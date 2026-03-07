@@ -465,3 +465,41 @@ def test_dashboard_rollup_backfill_requires_admin():
         ),
     )
     assert response.status_code == 403
+
+
+def test_internal_slo_endpoint_reports_latency_and_error_rate():
+    _reset_db()
+    tenant_id = "tenant-dashboard-slo"
+
+    ok_response = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert ok_response.status_code == 200, ok_response.text
+
+    unauthorized = client.get("/dashboard/overview", params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10})
+    assert unauthorized.status_code == 401
+
+    slo = client.get(
+        "/internal/slo",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    assert slo.status_code == 200, slo.text
+    payload = slo.json()
+    assert payload["http_requests_total"] >= 2
+    assert payload["http_errors_4xx5xx_total"] >= 1
+    assert payload["latency_ms_p95"] >= 0.0
+    assert payload["targets"]["p95_latency_ms"] == 500.0
+    assert payload["targets"]["error_rate_5xx"] == 0.001
+
+
+def test_prometheus_metrics_exports_slo_gauges():
+    _reset_db()
+    metrics = client.get("/metrics")
+    assert metrics.status_code == 200, metrics.text
+    body = metrics.text
+    assert "releasegate_http_requests_total " in body
+    assert "releasegate_http_errors_5xx_total " in body
+    assert "releasegate_http_error_rate_5xx_ratio " in body
+    assert "releasegate_http_latency_ms_p95 " in body

@@ -2183,6 +2183,44 @@ def _init_postgres_schema() -> str:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS tenant_admin_profiles (
+            tenant_id TEXT PRIMARY KEY,
+            org_name TEXT NOT NULL DEFAULT '',
+            plan_tier TEXT NOT NULL DEFAULT 'enterprise',
+            region TEXT NOT NULL DEFAULT 'us-east',
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_admin_profiles_plan_region
+        ON tenant_admin_profiles(plan_tier, region)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_role_assignments (
+            tenant_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            assigned_by TEXT,
+            assigned_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, actor_id, role)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_role_assignments_tenant_actor
+        ON tenant_role_assignments(tenant_id, actor_id)
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS tenant_security_anomaly_events (
             tenant_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
@@ -2348,6 +2386,44 @@ def _init_postgres_schema() -> str:
         """
         CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_period
         ON tenant_usage_counters(period_type, period_start)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_admin_profiles (
+            tenant_id TEXT PRIMARY KEY,
+            org_name TEXT NOT NULL DEFAULT '',
+            plan_tier TEXT NOT NULL DEFAULT 'enterprise',
+            region TEXT NOT NULL DEFAULT 'us-east',
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_admin_profiles_plan_region
+        ON tenant_admin_profiles(plan_tier, region)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_role_assignments (
+            tenant_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            assigned_by TEXT,
+            assigned_at TIMESTAMPTZ NOT NULL,
+            PRIMARY KEY (tenant_id, actor_id, role)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_tenant_role_assignments_tenant_actor
+        ON tenant_role_assignments(tenant_id, actor_id)
         """
     )
     cur.execute(
@@ -3286,6 +3362,32 @@ def init_db() -> str:
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_admin_profiles (
+            tenant_id TEXT PRIMARY KEY,
+            org_name TEXT NOT NULL DEFAULT '',
+            plan_tier TEXT NOT NULL DEFAULT 'enterprise',
+            region TEXT NOT NULL DEFAULT 'us-east',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT,
+            updated_by TEXT
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_role_assignments (
+            tenant_id TEXT NOT NULL,
+            actor_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            assigned_by TEXT,
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, actor_id, role)
+        )
+        """
+    )
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_context_id ON audit_decisions(context_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_tenant_repo_created ON audit_decisions(tenant_id, repo, created_at)")
@@ -3356,6 +3458,12 @@ def init_db() -> str:
     )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_anchor_jobs_tenant_confirmed_at ON anchor_jobs(tenant_id, confirmed_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_admin_profiles_plan_region ON tenant_admin_profiles(plan_tier, region)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tenant_role_assignments_tenant_actor ON tenant_role_assignments(tenant_id, actor_id)"
     )
 
     cursor.execute(

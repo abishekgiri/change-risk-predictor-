@@ -12,7 +12,6 @@ from releasegate.quota.quota_models import (
 )
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 def _utc_now() -> datetime:
@@ -78,59 +77,6 @@ def _limit_for_quota(limits: TenantQuotaLimits, quota_kind: str) -> Optional[int
     raise ValueError(f"Unsupported quota kind: {quota_kind}")
 
 
-def _ensure_governance_tables() -> None:
-    storage = get_storage_backend()
-    storage.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tenant_governance_settings (
-            tenant_id TEXT PRIMARY KEY,
-            max_decisions_per_month INTEGER,
-            max_anchors_per_day INTEGER,
-            max_overrides_per_month INTEGER,
-            quota_enforcement_mode TEXT NOT NULL DEFAULT 'HARD',
-            security_state TEXT NOT NULL DEFAULT 'normal',
-            security_reason TEXT,
-            security_since TEXT,
-            updated_at TEXT NOT NULL,
-            updated_by TEXT
-        )
-        """
-    )
-    storage.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tenant_governance_settings_security_state
-        ON tenant_governance_settings(security_state, updated_at)
-        """
-    )
-
-    storage.execute(
-        """
-        CREATE TABLE IF NOT EXISTS tenant_usage_counters (
-            tenant_id TEXT NOT NULL,
-            period_type TEXT NOT NULL,
-            period_start TEXT NOT NULL,
-            decisions_count INTEGER NOT NULL DEFAULT 0,
-            anchors_count INTEGER NOT NULL DEFAULT 0,
-            overrides_count INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (tenant_id, period_type, period_start)
-        )
-        """
-    )
-    storage.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_tenant_updated
-        ON tenant_usage_counters(tenant_id, updated_at DESC)
-        """
-    )
-    storage.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_tenant_usage_counters_period
-        ON tenant_usage_counters(period_type, period_start)
-        """
-    )
-
-
 def _ensure_settings_row(*, tenant_id: str, now_iso: str) -> None:
     storage = get_storage_backend()
     storage.execute(
@@ -185,8 +131,6 @@ def _settings_row_to_payload(row: Optional[Dict[str, Any]], *, tenant_id: str) -
 
 
 def get_tenant_governance_settings(*, tenant_id: str) -> Dict[str, Any]:
-    init_db()
-    _ensure_governance_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     now_iso = _utc_now().isoformat()
@@ -217,8 +161,6 @@ def update_tenant_governance_settings(
     security_since: Optional[str] = None,
     updated_by: Optional[str] = None,
 ) -> Dict[str, Any]:
-    init_db()
-    _ensure_governance_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     now_iso = _utc_now().isoformat()
@@ -327,8 +269,6 @@ def consume_tenant_quota(
     enforce_mode: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    init_db()
-    _ensure_governance_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     increment = max(1, int(amount))
@@ -401,8 +341,6 @@ def consume_tenant_quota(
 
 
 def get_tenant_governance_metrics(*, tenant_id: str) -> Dict[str, Any]:
-    init_db()
-    _ensure_governance_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     now = _utc_now()

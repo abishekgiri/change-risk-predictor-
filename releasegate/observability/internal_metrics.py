@@ -9,7 +9,6 @@ import uuid
 
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 _lock = Lock()
@@ -21,7 +20,6 @@ def incr(metric: str, value: int = 1, tenant_id: Optional[str] = None) -> None:
     with _lock:
         _counters_by_tenant[effective_tenant][metric] += int(value)
     try:
-        init_db()
         get_storage_backend().execute(
             """
             INSERT INTO metrics_events (tenant_id, event_id, metric_name, metric_value, created_at, metadata_json)

@@ -9,7 +9,6 @@ from releasegate.integrations.jira.client import JiraClient, JiraClientError
 from releasegate.integrations.jira.config import load_transition_map
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 ONBOARDING_MODES = {"simulation", "canary", "strict"}
 CONFIGURED_WORKFLOW_ID = "configured-transition-map"
@@ -235,7 +234,6 @@ class ActivationState:
 
 
 def get_onboarding_status(*, tenant_id: Optional[str]) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     storage = get_storage_backend()
     row = storage.fetchone(
@@ -289,7 +287,6 @@ def save_onboarding_config(
     mode: str,
     canary_pct: Optional[int],
 ) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_mode = normalize_onboarding_mode(mode)
     normalized_canary_pct = normalize_canary_pct(mode=normalized_mode, canary_pct=canary_pct)
@@ -486,7 +483,6 @@ def get_onboarding_activation_history(
     tenant_id: Optional[str],
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_limit = _normalize_history_limit(limit)
     storage = get_storage_backend()

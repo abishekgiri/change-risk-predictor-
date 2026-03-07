@@ -7,7 +7,6 @@ from releasegate.saas.plans import get_plan_tier
 from releasegate.saas.tenants import get_tenant_profile
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 def _usage_percent(*, usage: int, limit: Optional[int]) -> Optional[float]:
@@ -47,7 +46,6 @@ def _estimated_storage_bytes(*, tenant_id: str) -> int:
 
 
 def get_billing_usage(*, tenant_id: Optional[str]) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     profile = get_tenant_profile(tenant_id=effective_tenant)
     plan = get_plan_tier(profile.get("plan"))

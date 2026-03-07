@@ -10,7 +10,6 @@ from releasegate.governance.integrity import get_tenant_governance_integrity
 from releasegate.quota.quota_service import get_tenant_governance_metrics
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 DEFAULT_WINDOW_DAYS = 30
@@ -533,7 +532,6 @@ def get_dashboard_overrides_breakdown(
     group_by: str = DEFAULT_OVERRIDES_GROUP_BY,
     limit: int = DEFAULT_OVERRIDES_LIMIT,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_group_by = _normalize_overrides_group_by(group_by)
@@ -743,7 +741,6 @@ def get_metrics_timeseries(
     window_days: int = DEFAULT_WINDOW_DAYS,
     bucket: str = DEFAULT_TIMESERIES_BUCKET,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_metric = _normalize_timeseries_metric(metric)
@@ -921,7 +918,6 @@ def get_metrics_drilldown(
     window_days: int = DEFAULT_WINDOW_DAYS,
     limit: int = DEFAULT_DRILLDOWN_LIMIT,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_metric = _normalize_timeseries_metric(metric)
@@ -1015,7 +1011,6 @@ def list_integrity_trend(
     tenant_id: str,
     window_days: int = DEFAULT_WINDOW_DAYS,
 ) -> List[Dict[str, Any]]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     bounded_window = _normalize_window_days(window_days)
@@ -1080,7 +1075,6 @@ def list_recent_blocked_decisions_page(
     limit: int = DEFAULT_BLOCKED_LIMIT,
     cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     bounded_limit = _normalize_limit(limit)
@@ -1149,7 +1143,6 @@ def list_recent_blocked_decisions_page(
 
 
 def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     active: List[Dict[str, Any]] = []
@@ -1340,7 +1333,6 @@ def list_dashboard_alerts(
     tenant_id: str,
     window_days: int = DEFAULT_WINDOW_DAYS,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     bounded_window = _normalize_window_days(window_days)
@@ -1442,7 +1434,6 @@ def compute_and_upsert_daily_rollup(
     tenant_id: str,
     date_utc: date | datetime | str,
 ) -> Dict[str, Any]:
-    init_db()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     day = _coerce_date_utc(date_utc)

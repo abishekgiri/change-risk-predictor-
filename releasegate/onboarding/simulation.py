@@ -9,7 +9,6 @@ from releasegate.policy.registry import resolve_registry_policy
 from releasegate.policy.simulate_service import _evaluate_effective_policy
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 DEFAULT_LOOKBACK_DAYS = 30
 MAX_LOOKBACK_DAYS = 90
@@ -220,7 +219,6 @@ def run_historical_simulation(
     tenant_id: Optional[str],
     lookback_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_lookback = _normalize_lookback_days(lookback_days)
 
@@ -296,7 +294,6 @@ def get_last_historical_simulation(
     tenant_id: Optional[str],
     lookback_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     normalized_lookback = _normalize_lookback_days(lookback_days)
     storage = get_storage_backend()

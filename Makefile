@@ -1,4 +1,4 @@
-.PHONY: test verify phase6 demo demo-json golden validate-policy-bundle validate-jira-config clean
+.PHONY: test verify phase0-smoke phase6 demo demo-json golden validate-policy-bundle validate-jira-config clean
 
 GOLDEN_ENV=COMPLIANCE_DB_PATH=out/golden/releasegate_golden.db RELEASEGATE_STORAGE_BACKEND=sqlite RELEASEGATE_TENANT_ID=golden-demo RELEASEGATE_STRICT_MODE=true RELEASEGATE_CHECKPOINT_SIGNING_KEY=golden-demo-checkpoint-signing-key RELEASEGATE_CHECKPOINT_SIGNING_KEY_ID=golden-demo-key
 
@@ -7,6 +7,9 @@ test:
 
 verify:
 	python3 scripts/verify_features.py
+
+phase0-smoke:
+	python3 scripts/phase0_smoke.py
 
 # Phase 6: Enterprise UX & Trust Verification
 phase6:

@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from releasegate.policy.diff_impact import build_policy_impact_diff
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 
 _ALLOWED_WINDOWS = {30, 60, 90}
@@ -510,7 +509,6 @@ def get_tenant_governance_integrity(
     window_days: int = 90,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    init_db()
     effective_tenant = resolve_tenant_id(tenant_id)
     anchor = now.astimezone(timezone.utc) if isinstance(now, datetime) else _utc_now()
     window_start, window_end = _window_bounds(int(window_days), anchor)
@@ -570,4 +568,3 @@ def get_tenant_governance_integrity(
             "deny_rate_penalty": round(abs(deny_rate - _DENY_RATE_IDEAL_MIDPOINT) * 50.0, 3),
         },
     }
-
