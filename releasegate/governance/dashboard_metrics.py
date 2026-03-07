@@ -1533,6 +1533,76 @@ def compute_and_upsert_daily_rollup(
     }
 
 
+def list_dashboard_rollup_warmup_tenants(*, limit: int = 50) -> List[str]:
+    storage = get_storage_backend()
+    capped_limit = max(1, min(int(limit or 50), 500))
+    tenants: Dict[str, None] = {}
+
+    for raw in [
+        os.getenv("RELEASEGATE_DEFAULT_TENANT_ID"),
+        os.getenv("RELEASEGATE_INTERNAL_SERVICE_TENANT_ID"),
+    ]:
+        value = str(raw or "").strip()
+        if value:
+            tenants[resolve_tenant_id(value)] = None
+
+    tenant_queries = (
+        "SELECT tenant_id FROM tenant_admin_profiles ORDER BY updated_at DESC LIMIT ?",
+        "SELECT tenant_id FROM tenant_onboarding_config ORDER BY updated_at DESC LIMIT ?",
+        "SELECT tenant_id FROM tenant_governance_settings ORDER BY updated_at DESC LIMIT ?",
+        "SELECT tenant_id FROM governance_daily_metrics ORDER BY computed_at DESC LIMIT ?",
+        "SELECT tenant_id FROM audit_decisions ORDER BY created_at DESC LIMIT ?",
+    )
+    for query in tenant_queries:
+        try:
+            rows = storage.fetchall(query, (capped_limit,))
+        except Exception:
+            continue
+        for row in rows:
+            value = str(row.get("tenant_id") or "").strip()
+            if not value:
+                continue
+            tenants[resolve_tenant_id(value)] = None
+            if len(tenants) >= capped_limit:
+                return list(tenants.keys())[:capped_limit]
+    return list(tenants.keys())[:capped_limit]
+
+
+def warm_dashboard_rollups_for_startup(
+    *,
+    limit: int = 50,
+    anchor_date_utc: Optional[date | datetime | str] = None,
+) -> Dict[str, Any]:
+    tenants = list_dashboard_rollup_warmup_tenants(limit=limit)
+    warmed: List[str] = []
+    failed: List[Dict[str, str]] = []
+    target_day = _coerce_date_utc(anchor_date_utc) if anchor_date_utc is not None else _utc_now().date()
+
+    for tenant_id in tenants:
+        try:
+            compute_and_upsert_daily_rollup(
+                tenant_id=tenant_id,
+                date_utc=target_day,
+            )
+            warmed.append(tenant_id)
+        except Exception as exc:
+            failed.append(
+                {
+                    "tenant_id": tenant_id,
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "date_utc": target_day.isoformat(),
+        "tenants_discovered": len(tenants),
+        "tenants_warmed": len(warmed),
+        "tenants_failed": len(failed),
+        "warmed_tenants": warmed,
+        "failed_tenants": failed,
+    }
+
+
 def backfill_rollups(
     *,
     tenant_id: str,

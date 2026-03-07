@@ -2167,11 +2167,23 @@ def anchor_tick(
 def verify_ledger_on_startup():
     from releasegate.anchoring.anchor_scheduler import scheduler_status, start_anchor_scheduler
     from releasegate.crypto.kms_client import ensure_kms_runtime_policy
+    from releasegate.governance.dashboard_metrics import warm_dashboard_rollups_for_startup
     from releasegate.storage.schema import init_db
 
     _validate_startup_environment()
     ensure_kms_runtime_policy()
     init_db()
+    try:
+        warmup_report = warm_dashboard_rollups_for_startup()
+        app.state.dashboard_rollup_warmup = warmup_report
+        logger.info(
+            "Dashboard rollup warmup complete: discovered=%s warmed=%s failed=%s",
+            warmup_report.get("tenants_discovered"),
+            warmup_report.get("tenants_warmed"),
+            warmup_report.get("tenants_failed"),
+        )
+    except Exception:
+        logger.exception("Dashboard rollup warmup failed at startup")
     app.state.anchor_scheduler = start_anchor_scheduler()
     app.state.anchor_scheduler_status = scheduler_status()
     if not LEDGER_VERIFY_ON_STARTUP:

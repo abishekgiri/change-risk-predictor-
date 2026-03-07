@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
+from releasegate.governance.dashboard_metrics import warm_dashboard_rollups_for_startup
 from releasegate.server import app
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
@@ -496,6 +497,35 @@ def test_dashboard_rollup_backfill_requires_admin():
         ),
     )
     assert response.status_code == 403
+
+
+def test_dashboard_rollup_startup_warmup_seeds_known_tenants():
+    _reset_db()
+    tenant_id = "tenant-dashboard-startup-warm"
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO tenant_onboarding_config (
+                tenant_id, jira_instance_id, project_keys_json, workflow_ids_json,
+                transition_ids_json, mode, canary_pct, created_at, updated_at
+            ) VALUES (?, ?, '[]', '[]', '[]', 'simulation', 0, ?, ?)
+            """,
+            (
+                tenant_id,
+                "https://example.atlassian.net",
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = warm_dashboard_rollups_for_startup(limit=10)
+    assert report["tenants_warmed"] >= 1
+    assert tenant_id in report["warmed_tenants"]
+    assert _count_rollup_rows(tenant_id=tenant_id) == 1
 
 
 def test_internal_slo_endpoint_reports_latency_and_error_rate(monkeypatch):
