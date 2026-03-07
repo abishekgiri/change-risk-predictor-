@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
 from releasegate.governance.dashboard_metrics import warm_dashboard_rollups_for_startup
-from releasegate.server import app
+from releasegate.server import _dashboard_json_response, app
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
 
@@ -573,3 +573,16 @@ def test_prometheus_metrics_exports_slo_gauges():
     assert "releasegate_http_errors_5xx_total " in body
     assert "releasegate_http_error_rate_5xx_ratio " in body
     assert "releasegate_http_latency_ms_p95 " in body
+
+
+def test_dashboard_json_response_encodes_datetimes():
+    response = _dashboard_json_response(
+        trace_id="trace-dashboard-json",
+        cache_control="private, max-age=30",
+        payload={
+            "tenant_id": "tenant-dashboard-json",
+            "updated_at": datetime(2026, 3, 7, 4, 0, tzinfo=timezone.utc),
+        },
+    )
+    assert response.status_code == 200
+    assert b"2026-03-07T04:00:00+00:00" in response.body

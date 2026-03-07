@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 import requests
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exception_handlers import (
     http_exception_handler as fastapi_http_exception_handler,
@@ -3069,7 +3070,7 @@ def _dashboard_json_response(
         payload=payload,
     )
     return JSONResponse(
-        content=envelope,
+        content=jsonable_encoder(envelope),
         headers={
             "X-Request-Id": trace_id,
             "Cache-Control": cache_control,
