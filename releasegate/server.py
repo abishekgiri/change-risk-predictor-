@@ -1863,6 +1863,11 @@ def health_check():
     return {"status": "ok", "service": "ReleaseGate API"}
 
 
+@app.head("/")
+def health_check_head():
+    return Response(status_code=200)
+
+
 def _expected_schema_version() -> str:
     return MIGRATIONS[-1].migration_id if MIGRATIONS else SCHEMA_VERSION
 
@@ -3051,6 +3056,27 @@ def _dashboard_response(
     }
 
 
+def _dashboard_json_response(
+    *,
+    trace_id: str,
+    cache_control: str,
+    payload: Dict[str, Any],
+) -> JSONResponse:
+    envelope = _dashboard_response(
+        response=Response(),
+        trace_id=trace_id,
+        cache_control=cache_control,
+        payload=payload,
+    )
+    return JSONResponse(
+        content=envelope,
+        headers={
+            "X-Request-Id": trace_id,
+            "Cache-Control": cache_control,
+        },
+    )
+
+
 def _audit_dashboard_read(
     *,
     auth: AuthContext,
@@ -3108,12 +3134,10 @@ async def releasegate_request_validation_handler(request: Request, exc: RequestV
 
 @app.get(
     "/dashboard/overview",
-    response_model=DashboardOverviewResponse,
     responses=_dashboard_error_models(),
 )
 def dashboard_overview_endpoint(
     request: Request,
-    response: Response,
     background_tasks: BackgroundTasks,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
@@ -3160,7 +3184,6 @@ def dashboard_overview_endpoint(
         debug_timing = payload.setdefault("debug_timing_ms", {})
         debug_timing["audit_dashboard_read"] = audit_ms
         debug_timing["total_endpoint"] = endpoint_total_ms
-        response.headers["X-Overview-Timing-Total-Ms"] = str(endpoint_total_ms)
     if debug_requested or endpoint_total_ms >= 500.0:
         logger.info(
             "Dashboard overview timings trace_id=%s tenant_id=%s total_ms=%.3f breakdown=%s",
@@ -3169,12 +3192,14 @@ def dashboard_overview_endpoint(
             endpoint_total_ms,
             payload.get("debug_timing_ms") or {"audit_dashboard_read": audit_ms},
         )
-    return _dashboard_response(
-        response=response,
+    dashboard_response = _dashboard_json_response(
         trace_id=trace_id,
         cache_control="private, max-age=30",
         payload=payload,
     )
+    if debug_requested:
+        dashboard_response.headers["X-Overview-Timing-Total-Ms"] = str(endpoint_total_ms)
+    return dashboard_response
 
 
 @app.get(
