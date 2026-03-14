@@ -15,8 +15,10 @@ import json
 import logging
 import os
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
-from time import perf_counter
+from threading import Lock
+from time import monotonic, perf_counter
 import requests
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -129,6 +131,10 @@ app = FastAPI(
 )
 app.include_router(jira_router, prefix="/integrations/jira", tags=["jira"])
 logger = logging.getLogger(__name__)
+
+DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS = 15
+_DASHBOARD_OVERVIEW_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_DASHBOARD_OVERVIEW_CACHE_LOCK = Lock()
 
 
 def _releasegate_env() -> str:
@@ -3090,6 +3096,78 @@ def _dashboard_json_response(
     )
 
 
+def _dashboard_overview_cache_ttl_seconds() -> int:
+    raw = str(
+        os.getenv(
+            "RELEASEGATE_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS",
+            str(DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS),
+        )
+        or str(DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS)
+    ).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS
+    return max(0, parsed)
+
+
+def _dashboard_overview_cache_key(*, tenant_id: str, window_days: int, blocked_limit: int) -> str:
+    return f"{tenant_id}:{int(window_days)}:{int(blocked_limit)}"
+
+
+def clear_dashboard_overview_cache(*, tenant_id: Optional[str] = None) -> None:
+    with _DASHBOARD_OVERVIEW_CACHE_LOCK:
+        if tenant_id is None:
+            _DASHBOARD_OVERVIEW_CACHE.clear()
+            return
+        prefix = f"{tenant_id}:"
+        for key in [key for key in _DASHBOARD_OVERVIEW_CACHE if key.startswith(prefix)]:
+            _DASHBOARD_OVERVIEW_CACHE.pop(key, None)
+
+
+def _read_dashboard_overview_cache(*, tenant_id: str, window_days: int, blocked_limit: int) -> Optional[Dict[str, Any]]:
+    ttl_seconds = _dashboard_overview_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    cache_key = _dashboard_overview_cache_key(
+        tenant_id=tenant_id,
+        window_days=window_days,
+        blocked_limit=blocked_limit,
+    )
+    now = monotonic()
+    with _DASHBOARD_OVERVIEW_CACHE_LOCK:
+        cached = _DASHBOARD_OVERVIEW_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _DASHBOARD_OVERVIEW_CACHE.pop(cache_key, None)
+            return None
+        return deepcopy(payload)
+
+
+def _write_dashboard_overview_cache(
+    *,
+    tenant_id: str,
+    window_days: int,
+    blocked_limit: int,
+    payload: Dict[str, Any],
+) -> None:
+    ttl_seconds = _dashboard_overview_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    cache_key = _dashboard_overview_cache_key(
+        tenant_id=tenant_id,
+        window_days=window_days,
+        blocked_limit=blocked_limit,
+    )
+    with _DASHBOARD_OVERVIEW_CACHE_LOCK:
+        _DASHBOARD_OVERVIEW_CACHE[cache_key] = (
+            monotonic() + float(ttl_seconds),
+            deepcopy(payload),
+        )
+
+
 def _audit_dashboard_read(
     *,
     auth: AuthContext,
@@ -3169,13 +3247,28 @@ def dashboard_overview_endpoint(
     trace_id = _dashboard_trace_id(request)
     endpoint_started = perf_counter()
     debug_requested = bool(include_debug_timing and auth.auth_method == "internal_service")
-    try:
-        payload = get_dashboard_overview(
+    payload: Optional[Dict[str, Any]] = None
+    if not debug_requested:
+        payload = _read_dashboard_overview_cache(
             tenant_id=effective_tenant,
             window_days=window_days,
             blocked_limit=blocked_limit,
-            include_debug_timing=debug_requested,
         )
+    try:
+        if payload is None:
+            payload = get_dashboard_overview(
+                tenant_id=effective_tenant,
+                window_days=window_days,
+                blocked_limit=blocked_limit,
+                include_debug_timing=debug_requested,
+            )
+            if not debug_requested:
+                _write_dashboard_overview_cache(
+                    tenant_id=effective_tenant,
+                    window_days=window_days,
+                    blocked_limit=blocked_limit,
+                    payload=payload,
+                )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_started = perf_counter()

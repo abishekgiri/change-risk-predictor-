@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
 from releasegate.governance.dashboard_metrics import clear_active_strict_modes_cache, warm_dashboard_rollups_for_startup
-from releasegate.server import _dashboard_json_response, app
+from releasegate.server import _dashboard_json_response, app, clear_dashboard_overview_cache
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
 
@@ -31,6 +31,7 @@ def _reset_db() -> None:
         os.remove(DB_PATH)
     init_db()
     clear_active_strict_modes_cache()
+    clear_dashboard_overview_cache()
 
 
 def _insert_governance_rollup(
@@ -439,6 +440,91 @@ def test_dashboard_overview_debug_timing_is_exposed_for_internal_service(monkeyp
     assert body["debug_timing_ms"]["audit_dashboard_read"] >= 0.0
     assert body["debug_timing_ms"]["total_endpoint"] >= body["debug_timing_ms"]["total_service"]
     assert float(response.headers["X-Overview-Timing-Total-Ms"]) >= 0.0
+
+
+def test_dashboard_overview_uses_short_ttl_payload_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-overview-cache"
+    monkeypatch.setenv("RELEASEGATE_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS", "15")
+
+    from releasegate import server as server_module
+    from releasegate.governance import dashboard_metrics as metrics
+
+    original_get_dashboard_overview = metrics.get_dashboard_overview
+    calls = {"count": 0}
+    monotonic_values = iter((100.0, 100.0, 110.0))
+
+    def counting_get_dashboard_overview(**kwargs):
+        calls["count"] += 1
+        return original_get_dashboard_overview(**kwargs)
+
+    monkeypatch.setattr(metrics, "get_dashboard_overview", counting_get_dashboard_overview)
+    monkeypatch.setattr(server_module, "monotonic", lambda: next(monotonic_values))
+
+    first = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    second = client.get(
+        "/dashboard/overview",
+        params={"tenant_id": tenant_id, "window_days": 30, "blocked_limit": 10},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert calls["count"] == 1
+
+
+def test_dashboard_overview_debug_timing_bypasses_payload_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-overview-debug-bypass"
+    monkeypatch.setenv("RELEASEGATE_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS", "15")
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_KEY", "dashboard-debug-cache-key")
+    monkeypatch.setenv("RELEASEGATE_INTERNAL_SERVICE_SCOPES", "policy:read,enforcement:write")
+
+    from releasegate.governance import dashboard_metrics as metrics
+
+    original_get_dashboard_overview = metrics.get_dashboard_overview
+    calls = {"count": 0}
+
+    def counting_get_dashboard_overview(**kwargs):
+        calls["count"] += 1
+        return original_get_dashboard_overview(**kwargs)
+
+    monkeypatch.setattr(metrics, "get_dashboard_overview", counting_get_dashboard_overview)
+
+    first = client.get(
+        "/dashboard/overview",
+        params={
+            "tenant_id": tenant_id,
+            "window_days": 30,
+            "blocked_limit": 10,
+            "include_debug_timing": "true",
+        },
+        headers={
+            "X-Internal-Service-Key": "dashboard-debug-cache-key",
+            "X-Tenant-Id": tenant_id,
+        },
+    )
+    second = client.get(
+        "/dashboard/overview",
+        params={
+            "tenant_id": tenant_id,
+            "window_days": 30,
+            "blocked_limit": 10,
+            "include_debug_timing": "true",
+        },
+        headers={
+            "X-Internal-Service-Key": "dashboard-debug-cache-key",
+            "X-Tenant-Id": tenant_id,
+        },
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert calls["count"] == 2
 
 
 def test_list_active_strict_modes_uses_short_ttl_cache(monkeypatch):
