@@ -2174,11 +2174,23 @@ def verify_ledger_on_startup():
     from releasegate.anchoring.anchor_scheduler import scheduler_status, start_anchor_scheduler
     from releasegate.crypto.kms_client import ensure_kms_runtime_policy
     from releasegate.governance.dashboard_metrics import warm_dashboard_rollups_for_startup
+    from releasegate.saas.tenants import warm_known_tenant_rows_for_startup
     from releasegate.storage.schema import init_db
 
     _validate_startup_environment()
     ensure_kms_runtime_policy()
     init_db()
+    try:
+        tenant_row_warmup = warm_known_tenant_rows_for_startup()
+        app.state.tenant_row_warmup = tenant_row_warmup
+        logger.info(
+            "Tenant row warmup complete: discovered=%s warmed=%s failed=%s",
+            tenant_row_warmup.get("tenants_discovered"),
+            tenant_row_warmup.get("tenants_warmed"),
+            tenant_row_warmup.get("tenants_failed"),
+        )
+    except Exception:
+        logger.exception("Tenant row warmup failed at startup")
     try:
         warmup_report = warm_dashboard_rollups_for_startup()
         app.state.dashboard_rollup_warmup = warmup_report

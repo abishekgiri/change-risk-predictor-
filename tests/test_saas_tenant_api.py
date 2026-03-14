@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from releasegate.config import DB_PATH
 from releasegate.quota import QUOTA_KIND_DECISIONS, QUOTA_KIND_OVERRIDES, consume_tenant_quota
 from releasegate.quota.quota_models import TenantQuotaExceededError
+from releasegate.saas.tenants import warm_known_tenant_rows_for_startup
 from releasegate.server import app
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
@@ -110,6 +111,15 @@ def _insert_decision_for_storage(*, tenant_id: str, decision_id: str) -> None:
         conn.close()
 
 
+def _table_row_count(table: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(f"SELECT COUNT(1) FROM {table}").fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+
 def test_dashboard_tenant_create_and_info_exposes_plan_and_limits():
     _reset_db()
     tenant_id = "tenant-saas-create"
@@ -145,6 +155,35 @@ def test_dashboard_tenant_create_and_info_exposes_plan_and_limits():
     _, info_payload = _unwrap_dashboard_envelope(info_response)
     assert info_payload["tenant_id"] == tenant_id
     assert info_payload["plan"] == "starter"
+
+
+def test_dashboard_tenant_info_read_does_not_create_rows():
+    _reset_db()
+    tenant_id = "tenant-saas-read-only"
+
+    response = client.get(
+        "/dashboard/tenant/info",
+        params={"tenant_id": tenant_id},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"], roles=["admin"]),
+    )
+    assert response.status_code == 200, response.text
+    _, payload = _unwrap_dashboard_envelope(response)
+    assert payload["tenant_id"] == tenant_id
+    assert payload["plan"] == "enterprise"
+    assert _table_row_count("tenant_admin_profiles") == 0
+    assert _table_row_count("tenant_governance_settings") == 0
+
+
+def test_startup_warmup_creates_tenant_rows_for_known_tenant():
+    _reset_db()
+    tenant_id = "tenant-saas-startup-warm"
+    _insert_decision_for_storage(tenant_id=tenant_id, decision_id="decision-startup-warm")
+
+    report = warm_known_tenant_rows_for_startup(limit=10)
+    assert report["tenants_warmed"] >= 1
+    assert tenant_id in report["warmed_tenants"]
+    assert _table_row_count("tenant_admin_profiles") == 1
+    assert _table_row_count("tenant_governance_settings") == 1
 
 
 def test_dashboard_tenant_role_assignment_and_status_updates():

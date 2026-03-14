@@ -95,6 +95,18 @@ def _ensure_profile_row(*, tenant_id: str, now_iso: str) -> None:
     )
 
 
+def ensure_tenant_profile_row(
+    *,
+    tenant_id: str,
+    now_iso: Optional[str] = None,
+) -> None:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    _ensure_profile_row(
+        tenant_id=effective_tenant,
+        now_iso=now_iso or _utc_now_iso(),
+    )
+
+
 def _load_role_assignments(*, tenant_id: str) -> List[Dict[str, Any]]:
     storage = get_storage_backend()
     rows = storage.fetchall(
@@ -133,20 +145,16 @@ def _load_role_assignments(*, tenant_id: str) -> List[Dict[str, Any]]:
 def get_tenant_profile(*, tenant_id: Optional[str]) -> Dict[str, Any]:
 
     effective_tenant = resolve_tenant_id(tenant_id)
-    now_iso = _utc_now_iso()
     storage = get_storage_backend()
-
-    with storage.transaction():
-        _ensure_profile_row(tenant_id=effective_tenant, now_iso=now_iso)
-        row = storage.fetchone(
-            """
-            SELECT tenant_id, org_name, plan_tier, region, created_at, updated_at, created_by, updated_by
-            FROM tenant_admin_profiles
-            WHERE tenant_id = ?
-            LIMIT 1
-            """,
-            (effective_tenant,),
-        ) or {}
+    row = storage.fetchone(
+        """
+        SELECT tenant_id, org_name, plan_tier, region, created_at, updated_at, created_by, updated_by
+        FROM tenant_admin_profiles
+        WHERE tenant_id = ?
+        LIMIT 1
+        """,
+        (effective_tenant,),
+    ) or {}
 
     plan_tier = normalize_plan_tier(row.get("plan_tier"))
     settings = get_tenant_governance_settings(tenant_id=effective_tenant)
@@ -167,6 +175,32 @@ def get_tenant_profile(*, tenant_id: Optional[str]) -> Dict[str, Any]:
             **get_plan_limits_payload(plan_tier),
             "quota_enforcement_mode": settings.get("quota_enforcement_mode"),
         },
+    }
+
+
+def warm_known_tenant_rows_for_startup(*, limit: int = 50) -> Dict[str, Any]:
+    from releasegate.governance.dashboard_metrics import list_dashboard_rollup_warmup_tenants
+    from releasegate.quota.quota_service import ensure_tenant_governance_settings_row
+
+    now_iso = _utc_now_iso()
+    tenants = list_dashboard_rollup_warmup_tenants(limit=limit)
+    warmed: List[str] = []
+    failed: List[Dict[str, str]] = []
+
+    for tenant_id in tenants:
+        try:
+            ensure_tenant_profile_row(tenant_id=tenant_id, now_iso=now_iso)
+            ensure_tenant_governance_settings_row(tenant_id=tenant_id, now_iso=now_iso)
+            warmed.append(tenant_id)
+        except Exception as exc:
+            failed.append({"tenant_id": tenant_id, "error": str(exc)})
+
+    return {
+        "tenants_discovered": len(tenants),
+        "tenants_warmed": len(warmed),
+        "tenants_failed": len(failed),
+        "warmed_tenants": warmed,
+        "failed_tenants": failed,
     }
 
 

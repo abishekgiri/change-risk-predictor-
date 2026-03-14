@@ -99,6 +99,18 @@ def _ensure_settings_row(*, tenant_id: str, now_iso: str) -> None:
     )
 
 
+def ensure_tenant_governance_settings_row(
+    *,
+    tenant_id: str,
+    now_iso: Optional[str] = None,
+) -> None:
+    effective_tenant = resolve_tenant_id(tenant_id)
+    _ensure_settings_row(
+        tenant_id=effective_tenant,
+        now_iso=now_iso or _utc_now().isoformat(),
+    )
+
+
 def _settings_row_to_payload(row: Optional[Dict[str, Any]], *, tenant_id: str) -> Dict[str, Any]:
     payload = {
         "tenant_id": tenant_id,
@@ -133,19 +145,16 @@ def _settings_row_to_payload(row: Optional[Dict[str, Any]], *, tenant_id: str) -
 def get_tenant_governance_settings(*, tenant_id: str) -> Dict[str, Any]:
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
-    now_iso = _utc_now().isoformat()
-    with storage.transaction():
-        _ensure_settings_row(tenant_id=effective_tenant, now_iso=now_iso)
-        row = storage.fetchone(
-            """
-            SELECT tenant_id, max_decisions_per_month, max_anchors_per_day, max_overrides_per_month,
-                   quota_enforcement_mode, security_state, security_reason, security_since, updated_at, updated_by
-            FROM tenant_governance_settings
-            WHERE tenant_id = ?
-            LIMIT 1
-            """,
-            (effective_tenant,),
-        )
+    row = storage.fetchone(
+        """
+        SELECT tenant_id, max_decisions_per_month, max_anchors_per_day, max_overrides_per_month,
+               quota_enforcement_mode, security_state, security_reason, security_since, updated_at, updated_by
+        FROM tenant_governance_settings
+        WHERE tenant_id = ?
+        LIMIT 1
+        """,
+        (effective_tenant,),
+    )
     return _settings_row_to_payload(row, tenant_id=effective_tenant)
 
 
