@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
-from releasegate.governance.dashboard_metrics import warm_dashboard_rollups_for_startup
+from releasegate.governance.dashboard_metrics import clear_active_strict_modes_cache, warm_dashboard_rollups_for_startup
 from releasegate.server import _dashboard_json_response, app
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
@@ -30,6 +30,7 @@ def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+    clear_active_strict_modes_cache()
 
 
 def _insert_governance_rollup(
@@ -438,6 +439,45 @@ def test_dashboard_overview_debug_timing_is_exposed_for_internal_service(monkeyp
     assert body["debug_timing_ms"]["audit_dashboard_read"] >= 0.0
     assert body["debug_timing_ms"]["total_endpoint"] >= body["debug_timing_ms"]["total_service"]
     assert float(response.headers["X-Overview-Timing-Total-Ms"]) >= 0.0
+
+
+def test_list_active_strict_modes_uses_short_ttl_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-strict-cache"
+    _insert_active_strict_policy(tenant_id=tenant_id)
+    monkeypatch.setenv("RELEASEGATE_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS", "30")
+
+    from releasegate.governance import dashboard_metrics as metrics
+
+    original_get_storage_backend = metrics.get_storage_backend
+    original_monotonic = metrics.monotonic
+    calls = {"fetchall": 0}
+
+    class CountingStorage:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def fetchall(self, query, params=()):
+            calls["fetchall"] += 1
+            return self._wrapped.fetchall(query, params)
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+    wrapped_storage = CountingStorage(original_get_storage_backend())
+    monotonic_values = iter((100.0, 100.0, 110.0, 145.0, 145.0))
+
+    monkeypatch.setattr(metrics, "get_storage_backend", lambda: wrapped_storage)
+    monkeypatch.setattr(metrics, "monotonic", lambda: next(monotonic_values))
+
+    first = metrics.list_active_strict_modes(tenant_id=tenant_id)
+    second = metrics.list_active_strict_modes(tenant_id=tenant_id)
+    third = metrics.list_active_strict_modes(tenant_id=tenant_id)
+
+    assert first
+    assert second == first
+    assert third == first
+    assert calls["fetchall"] == 2
 
 
 def test_dashboard_rollup_backfill_endpoint_is_idempotent():

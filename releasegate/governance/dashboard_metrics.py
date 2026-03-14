@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from threading import Lock
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import date, datetime, timedelta, timezone
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from releasegate.governance.integrity import get_tenant_governance_integrity
@@ -29,6 +30,10 @@ DRIFT_SPIKE_MULTIPLIER = 2.0
 OVERRIDE_SPIKE_MIN_RATE = 0.05
 DRIFT_SPIKE_MIN_INDEX = 0.02
 BLOCKED_STATUSES = {"BLOCKED", "ERROR", "DENIED"}
+DEFAULT_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS = 30
+
+_ACTIVE_STRICT_MODES_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_ACTIVE_STRICT_MODES_CACHE_LOCK = Lock()
 
 TIMESERIES_METRICS: Dict[str, Dict[str, Any]] = {
     "integrity_score": {
@@ -60,6 +65,59 @@ TIMESERIES_METRICS: Dict[str, Dict[str, Any]] = {
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _active_strict_modes_cache_ttl_seconds() -> int:
+    raw = str(
+        os.getenv(
+            "RELEASEGATE_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS",
+            str(DEFAULT_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS),
+        )
+        or str(DEFAULT_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS)
+    ).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_ACTIVE_STRICT_MODES_CACHE_TTL_SECONDS
+    return max(0, parsed)
+
+
+def clear_active_strict_modes_cache(*, tenant_id: Optional[str] = None) -> None:
+    with _ACTIVE_STRICT_MODES_CACHE_LOCK:
+        if tenant_id is None:
+            _ACTIVE_STRICT_MODES_CACHE.clear()
+            return
+        _ACTIVE_STRICT_MODES_CACHE.pop(resolve_tenant_id(tenant_id), None)
+
+
+def _read_active_strict_modes_cache(*, tenant_id: str) -> Optional[List[Dict[str, Any]]]:
+    ttl_seconds = _active_strict_modes_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    effective_tenant = resolve_tenant_id(tenant_id)
+    now = monotonic()
+    with _ACTIVE_STRICT_MODES_CACHE_LOCK:
+        cached = _ACTIVE_STRICT_MODES_CACHE.get(effective_tenant)
+        if not cached:
+            return None
+        expires_at, items = cached
+        if expires_at <= now:
+            _ACTIVE_STRICT_MODES_CACHE.pop(effective_tenant, None)
+            return None
+        return [dict(item) for item in items]
+
+
+def _write_active_strict_modes_cache(*, tenant_id: str, items: List[Dict[str, Any]]) -> None:
+    ttl_seconds = _active_strict_modes_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    effective_tenant = resolve_tenant_id(tenant_id)
+    cached_items = [dict(item) for item in items]
+    with _ACTIVE_STRICT_MODES_CACHE_LOCK:
+        _ACTIVE_STRICT_MODES_CACHE[effective_tenant] = (
+            monotonic() + float(ttl_seconds),
+            cached_items,
+        )
 
 
 def _parse_json(value: Any) -> Dict[str, Any]:
@@ -1145,6 +1203,9 @@ def list_recent_blocked_decisions_page(
 def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
+    cached = _read_active_strict_modes_cache(tenant_id=effective_tenant)
+    if cached is not None:
+        return cached
     active: List[Dict[str, Any]] = []
 
     policy_rows = storage.fetchall(
@@ -1248,6 +1309,7 @@ def list_active_strict_modes(*, tenant_id: str) -> List[Dict[str, Any]]:
                 }
             )
 
+    _write_active_strict_modes_cache(tenant_id=effective_tenant, items=active)
     return active
 
 

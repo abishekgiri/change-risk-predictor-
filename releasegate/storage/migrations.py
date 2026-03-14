@@ -1562,6 +1562,13 @@ def _migration_20260220_022_policy_registry_control_plane(cursor) -> None:
     )
     cursor.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_policy_registry_active_tenant_activation
+        ON policy_registry_entries(tenant_id, activated_at DESC, created_at DESC)
+        WHERE status = 'ACTIVE'
+        """
+    )
+    cursor.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_policy_registry_hash
         ON policy_registry_entries(tenant_id, policy_hash, created_at)
         """
