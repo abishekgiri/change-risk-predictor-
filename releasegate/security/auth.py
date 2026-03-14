@@ -536,7 +536,8 @@ def require_access(
 
         max_request_bytes = int(os.getenv("RELEASEGATE_MAX_REQUEST_BYTES", "1048576"))
         signature_route = allow_signature or _is_webhook_route(request.url.path)
-        if not signature_route:
+        method = request.method.upper()
+        if not signature_route and method not in {"GET", "HEAD", "OPTIONS"}:
             await _read_request_body_limited(request, max_bytes=max_request_bytes)
 
         auth = await authenticate_request(
@@ -550,7 +551,7 @@ def require_access(
         if not getattr(request.state, "pre_tenant_rate_limited", False):
             enforce_tenant_rate_limit(tenant_id=auth.tenant_id, profile=rate_profile)
 
-        if not allow_locked and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+        if not allow_locked and method in {"POST", "PUT", "PATCH", "DELETE"}:
             from releasegate.security.security_state_service import enforce_tenant_operation_allowed
 
             enforce_tenant_operation_allowed(

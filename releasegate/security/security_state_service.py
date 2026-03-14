@@ -9,7 +9,6 @@ from fastapi import HTTPException
 
 from releasegate.storage import get_storage_backend
 from releasegate.storage.base import resolve_tenant_id
-from releasegate.storage.schema import init_db
 
 SECURITY_STATE_NORMAL = "normal"
 SECURITY_STATE_THROTTLED = "throttled"
@@ -93,8 +92,6 @@ def _ensure_governance_row(*, tenant_id: str, now_iso: str) -> None:
 
 
 def get_tenant_security_state(*, tenant_id: str) -> Dict[str, Any]:
-    init_db()
-    _ensure_security_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     row = storage.fetchone(
@@ -125,8 +122,6 @@ def set_tenant_security_state(
     actor: Optional[str],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    init_db()
-    _ensure_security_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     new_state = _normalize_state(to_state)
@@ -211,8 +206,6 @@ def set_tenant_security_state(
 
 
 def list_tenant_security_state_events(*, tenant_id: str, limit: int = 100) -> List[Dict[str, Any]]:
-    init_db()
-    _ensure_security_tables()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
     effective_limit = max(1, min(int(limit), 500))
