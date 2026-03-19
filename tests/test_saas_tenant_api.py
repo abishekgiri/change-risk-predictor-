@@ -11,7 +11,7 @@ from releasegate.config import DB_PATH
 from releasegate.quota import QUOTA_KIND_DECISIONS, QUOTA_KIND_OVERRIDES, consume_tenant_quota
 from releasegate.quota.quota_models import TenantQuotaExceededError
 from releasegate.saas.tenants import warm_known_tenant_rows_for_startup
-from releasegate.server import app
+from releasegate.server import app, clear_dashboard_tenant_info_cache
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
 
@@ -23,6 +23,7 @@ def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+    clear_dashboard_tenant_info_cache()
 
 
 def _unwrap_dashboard_envelope(response) -> tuple[dict, dict]:
@@ -172,6 +173,101 @@ def test_dashboard_tenant_info_read_does_not_create_rows():
     assert payload["plan"] == "enterprise"
     assert _table_row_count("tenant_admin_profiles") == 0
     assert _table_row_count("tenant_governance_settings") == 0
+
+
+def test_dashboard_tenant_info_uses_short_ttl_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-saas-info-cache"
+    monkeypatch.setenv("RELEASEGATE_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS", "15")
+
+    from releasegate import server as server_module
+    from releasegate.saas import tenants as tenants_module
+
+    original_get_tenant_profile = tenants_module.get_tenant_profile
+    calls = {"count": 0}
+    monotonic_values = iter((100.0, 100.0, 110.0))
+
+    def counting_get_tenant_profile(**kwargs):
+        calls["count"] += 1
+        return original_get_tenant_profile(**kwargs)
+
+    monkeypatch.setattr(tenants_module, "get_tenant_profile", counting_get_tenant_profile)
+    monkeypatch.setattr(server_module, "monotonic", lambda: next(monotonic_values))
+
+    first = client.get(
+        "/dashboard/tenant/info",
+        params={"tenant_id": tenant_id},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"], roles=["admin"]),
+    )
+    second = client.get(
+        "/dashboard/tenant/info",
+        params={"tenant_id": tenant_id},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"], roles=["admin"]),
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert calls["count"] == 1
+
+
+def test_dashboard_tenant_info_cache_invalidates_on_mutation(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-saas-info-invalidate"
+    monkeypatch.setenv("RELEASEGATE_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS", "60")
+
+    create_response = client.post(
+        "/dashboard/tenant/create",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"], roles=["admin"]),
+        json={
+            "tenant_id": tenant_id,
+            "name": "Invalidate Tenant",
+            "plan": "growth",
+            "region": "us-east",
+        },
+    )
+    assert create_response.status_code == 200, create_response.text
+
+    from releasegate import server as server_module
+    from releasegate.saas import tenants as tenants_module
+
+    original_get_tenant_profile = tenants_module.get_tenant_profile
+    calls = {"count": 0}
+
+    def counting_get_tenant_profile(**kwargs):
+        calls["count"] += 1
+        return original_get_tenant_profile(**kwargs)
+
+    monkeypatch.setattr(tenants_module, "get_tenant_profile", counting_get_tenant_profile)
+    monkeypatch.setattr(server_module, "monotonic", lambda: 100.0)
+
+    first = client.get(
+        "/dashboard/tenant/info",
+        params={"tenant_id": tenant_id},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"], roles=["admin"]),
+    )
+    assert first.status_code == 200, first.text
+    assert calls["count"] == 1
+
+    role_assign = client.post(
+        "/dashboard/tenant/role_assign",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"], roles=["admin"]),
+        json={
+            "tenant_id": tenant_id,
+            "actor_id": "bob@example.com",
+            "role": "auditor",
+            "action": "assign",
+        },
+    )
+    assert role_assign.status_code == 200, role_assign.text
+    calls_after_mutation = calls["count"]
+
+    second = client.get(
+        "/dashboard/tenant/info",
+        params={"tenant_id": tenant_id},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"], roles=["admin"]),
+    )
+    assert second.status_code == 200, second.text
+    assert calls["count"] == calls_after_mutation + 1
 
 
 def test_startup_warmup_creates_tenant_rows_for_known_tenant():

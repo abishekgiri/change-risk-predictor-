@@ -135,6 +135,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS = 15
 _DASHBOARD_OVERVIEW_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _DASHBOARD_OVERVIEW_CACHE_LOCK = Lock()
+DEFAULT_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS = 15
+_DASHBOARD_TENANT_INFO_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_DASHBOARD_TENANT_INFO_CACHE_LOCK = Lock()
 DEFAULT_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS = 30
 _DASHBOARD_METRICS_TIMESERIES_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _DASHBOARD_METRICS_TIMESERIES_CACHE_LOCK = Lock()
@@ -3171,6 +3174,56 @@ def _write_dashboard_overview_cache(
         )
 
 
+def _dashboard_tenant_info_cache_ttl_seconds() -> int:
+    raw = str(
+        os.getenv(
+            "RELEASEGATE_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS",
+            str(DEFAULT_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS),
+        )
+        or str(DEFAULT_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS)
+    ).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS
+    return max(0, parsed)
+
+
+def clear_dashboard_tenant_info_cache(*, tenant_id: Optional[str] = None) -> None:
+    with _DASHBOARD_TENANT_INFO_CACHE_LOCK:
+        if tenant_id is None:
+            _DASHBOARD_TENANT_INFO_CACHE.clear()
+            return
+        _DASHBOARD_TENANT_INFO_CACHE.pop(str(tenant_id), None)
+
+
+def _read_dashboard_tenant_info_cache(*, tenant_id: str) -> Optional[Dict[str, Any]]:
+    ttl_seconds = _dashboard_tenant_info_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    now = monotonic()
+    with _DASHBOARD_TENANT_INFO_CACHE_LOCK:
+        cached = _DASHBOARD_TENANT_INFO_CACHE.get(str(tenant_id))
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _DASHBOARD_TENANT_INFO_CACHE.pop(str(tenant_id), None)
+            return None
+        return deepcopy(payload)
+
+
+def _write_dashboard_tenant_info_cache(*, tenant_id: str, payload: Dict[str, Any]) -> None:
+    ttl_seconds = _dashboard_tenant_info_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    with _DASHBOARD_TENANT_INFO_CACHE_LOCK:
+        _DASHBOARD_TENANT_INFO_CACHE[str(tenant_id)] = (
+            monotonic() + float(ttl_seconds),
+            deepcopy(payload),
+        )
+
+
 def _dashboard_metrics_timeseries_cache_ttl_seconds() -> int:
     raw = str(
         os.getenv(
@@ -3972,7 +4025,7 @@ def governance_recommendations_ack_endpoint(
 )
 def dashboard_tenant_info_endpoint(
     request: Request,
-    response: Response,
+    background_tasks: BackgroundTasks,
     tenant_id: Optional[str] = None,
     auth: AuthContext = require_access(
         roles=["admin", "operator", "auditor", "read_only"],
@@ -3985,8 +4038,12 @@ def dashboard_tenant_info_endpoint(
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     trace_id = _dashboard_trace_id(request)
-    payload = get_tenant_profile(tenant_id=effective_tenant)
-    _audit_dashboard_read(
+    payload = _read_dashboard_tenant_info_cache(tenant_id=effective_tenant)
+    if payload is None:
+        payload = get_tenant_profile(tenant_id=effective_tenant)
+        _write_dashboard_tenant_info_cache(tenant_id=effective_tenant, payload=payload)
+    background_tasks.add_task(
+        _audit_dashboard_read,
         auth=auth,
         tenant_id=effective_tenant,
         action="DASHBOARD_READ_TENANT_INFO",
@@ -3994,8 +4051,7 @@ def dashboard_tenant_info_endpoint(
         trace_id=trace_id,
         params={},
     )
-    return _dashboard_response(
-        response=response,
+    return _dashboard_json_response(
         trace_id=trace_id,
         cache_control="private, max-age=30",
         payload=payload,
@@ -4033,6 +4089,7 @@ def dashboard_tenant_create_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    clear_dashboard_tenant_info_cache(tenant_id=effective_tenant)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -4083,6 +4140,7 @@ def dashboard_tenant_lock_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    clear_dashboard_tenant_info_cache(tenant_id=effective_tenant)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -4129,6 +4187,7 @@ def dashboard_tenant_unlock_endpoint(
         actor_id=auth.principal_id,
         source="dashboard_tenant_unlock",
     )
+    clear_dashboard_tenant_info_cache(tenant_id=effective_tenant)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -4177,6 +4236,7 @@ def dashboard_tenant_role_assign_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    clear_dashboard_tenant_info_cache(tenant_id=effective_tenant)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
@@ -7032,6 +7092,7 @@ def update_tenant_governance_settings_endpoint(
         quota_enforcement_mode=payload.quota_enforcement_mode,
         updated_by=auth.principal_id,
     )
+    clear_dashboard_tenant_info_cache(tenant_id=effective_tenant)
     log_security_event(
         tenant_id=effective_tenant,
         principal_id=auth.principal_id,
