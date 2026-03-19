@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
-from releasegate.server import app
+from releasegate.server import app, clear_dashboard_metrics_timeseries_cache
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
 
@@ -29,6 +29,7 @@ def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+    clear_dashboard_metrics_timeseries_cache()
 
 
 def _insert_governance_rollup(
@@ -270,3 +271,48 @@ def test_dashboard_metrics_timeseries_rejects_unknown_metric():
         headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
     )
     assert response.status_code == 400
+
+
+def test_dashboard_metrics_timeseries_uses_short_ttl_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-metrics-cache"
+    today = datetime.now(timezone.utc).date()
+    _insert_governance_rollup(
+        tenant_id=tenant_id,
+        date_utc=today.isoformat(),
+        integrity_score=93.0,
+        drift_index=0.05,
+        override_count=5,
+        decision_count=50,
+        blocked_count=6,
+    )
+    monkeypatch.setenv("RELEASEGATE_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS", "30")
+
+    from releasegate import server as server_module
+    from releasegate.governance import dashboard_metrics as metrics
+
+    original_get_metrics_timeseries = metrics.get_metrics_timeseries
+    calls = {"count": 0}
+    monotonic_values = iter((100.0, 100.0, 110.0))
+
+    def counting_get_metrics_timeseries(**kwargs):
+        calls["count"] += 1
+        return original_get_metrics_timeseries(**kwargs)
+
+    monkeypatch.setattr(metrics, "get_metrics_timeseries", counting_get_metrics_timeseries)
+    monkeypatch.setattr(server_module, "monotonic", lambda: next(monotonic_values))
+
+    first = client.get(
+        "/dashboard/metrics/timeseries",
+        params={"tenant_id": tenant_id, "metric": "override_rate", "window_days": 30, "bucket": "day"},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    second = client.get(
+        "/dashboard/metrics/timeseries",
+        params={"tenant_id": tenant_id, "metric": "override_rate", "window_days": 30, "bucket": "day"},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert calls["count"] == 1

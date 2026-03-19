@@ -135,6 +135,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS = 15
 _DASHBOARD_OVERVIEW_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _DASHBOARD_OVERVIEW_CACHE_LOCK = Lock()
+DEFAULT_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS = 30
+_DASHBOARD_METRICS_TIMESERIES_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_DASHBOARD_METRICS_TIMESERIES_CACHE_LOCK = Lock()
 
 
 def _releasegate_env() -> str:
@@ -3168,6 +3171,107 @@ def _write_dashboard_overview_cache(
         )
 
 
+def _dashboard_metrics_timeseries_cache_ttl_seconds() -> int:
+    raw = str(
+        os.getenv(
+            "RELEASEGATE_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS",
+            str(DEFAULT_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS),
+        )
+        or str(DEFAULT_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS)
+    ).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DASHBOARD_METRICS_TIMESERIES_CACHE_TTL_SECONDS
+    return max(0, parsed)
+
+
+def _dashboard_metrics_timeseries_cache_key(
+    *,
+    tenant_id: str,
+    metric: str,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+    window_days: int,
+    bucket: str,
+) -> str:
+    return "|".join(
+        (
+            tenant_id,
+            str(metric or ""),
+            str(from_ts or ""),
+            str(to_ts or ""),
+            str(int(window_days)),
+            str(bucket or ""),
+        )
+    )
+
+
+def clear_dashboard_metrics_timeseries_cache() -> None:
+    with _DASHBOARD_METRICS_TIMESERIES_CACHE_LOCK:
+        _DASHBOARD_METRICS_TIMESERIES_CACHE.clear()
+
+
+def _read_dashboard_metrics_timeseries_cache(
+    *,
+    tenant_id: str,
+    metric: str,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+    window_days: int,
+    bucket: str,
+) -> Optional[Dict[str, Any]]:
+    ttl_seconds = _dashboard_metrics_timeseries_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    cache_key = _dashboard_metrics_timeseries_cache_key(
+        tenant_id=tenant_id,
+        metric=metric,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+        bucket=bucket,
+    )
+    now = monotonic()
+    with _DASHBOARD_METRICS_TIMESERIES_CACHE_LOCK:
+        cached = _DASHBOARD_METRICS_TIMESERIES_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _DASHBOARD_METRICS_TIMESERIES_CACHE.pop(cache_key, None)
+            return None
+        return deepcopy(payload)
+
+
+def _write_dashboard_metrics_timeseries_cache(
+    *,
+    tenant_id: str,
+    metric: str,
+    from_ts: Optional[str],
+    to_ts: Optional[str],
+    window_days: int,
+    bucket: str,
+    payload: Dict[str, Any],
+) -> None:
+    ttl_seconds = _dashboard_metrics_timeseries_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    cache_key = _dashboard_metrics_timeseries_cache_key(
+        tenant_id=tenant_id,
+        metric=metric,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+        bucket=bucket,
+    )
+    with _DASHBOARD_METRICS_TIMESERIES_CACHE_LOCK:
+        _DASHBOARD_METRICS_TIMESERIES_CACHE[cache_key] = (
+            monotonic() + float(ttl_seconds),
+            deepcopy(payload),
+        )
+
+
 def _audit_dashboard_read(
     *,
     auth: AuthContext,
@@ -3462,7 +3566,7 @@ def dashboard_overrides_breakdown_endpoint(
 )
 def dashboard_metrics_timeseries_endpoint(
     request: Request,
-    response: Response,
+    background_tasks: BackgroundTasks,
     tenant_id: Optional[str] = None,
     metric: str = "integrity_score",
     from_ts: Optional[str] = Query(default=None, alias="from"),
@@ -3480,18 +3584,37 @@ def dashboard_metrics_timeseries_endpoint(
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     trace_id = _dashboard_trace_id(request)
+    payload = _read_dashboard_metrics_timeseries_cache(
+        tenant_id=effective_tenant,
+        metric=metric,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        window_days=window_days,
+        bucket=bucket,
+    )
     try:
-        payload = get_metrics_timeseries(
-            tenant_id=effective_tenant,
-            metric=metric,
-            from_ts=from_ts,
-            to_ts=to_ts,
-            window_days=window_days,
-            bucket=bucket,
-        )
+        if payload is None:
+            payload = get_metrics_timeseries(
+                tenant_id=effective_tenant,
+                metric=metric,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                window_days=window_days,
+                bucket=bucket,
+            )
+            _write_dashboard_metrics_timeseries_cache(
+                tenant_id=effective_tenant,
+                metric=metric,
+                from_ts=from_ts,
+                to_ts=to_ts,
+                window_days=window_days,
+                bucket=bucket,
+                payload=payload,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _audit_dashboard_read(
+    background_tasks.add_task(
+        _audit_dashboard_read,
         auth=auth,
         tenant_id=effective_tenant,
         action="DASHBOARD_READ_METRICS_TIMESERIES",
@@ -3505,8 +3628,7 @@ def dashboard_metrics_timeseries_endpoint(
             "bucket": str(bucket or "day"),
         },
     )
-    return _dashboard_response(
-        response=response,
+    return _dashboard_json_response(
         trace_id=trace_id,
         cache_control="private, max-age=30",
         payload=payload,
