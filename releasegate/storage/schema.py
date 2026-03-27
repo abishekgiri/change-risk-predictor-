@@ -471,8 +471,41 @@ def _init_postgres_schema() -> str:
     cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_reason TEXT")
     cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS compromised_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE audit_attestations ADD COLUMN IF NOT EXISTS superseded_by_resign_id TEXT")
-    cur.execute("UPDATE audit_attestations SET compromised = COALESCE(compromised, FALSE)")
-    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL")
+    # Do not mutate append-only attestation rows once immutability triggers exist.
+    # Older rows can be backfilled only before append-only enforcement is active.
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_trigger
+                WHERE tgname = 'prevent_attestations_update'
+                  AND tgrelid = 'audit_attestations'::regclass
+            ) THEN
+                EXECUTE 'UPDATE audit_attestations
+                         SET compromised = COALESCE(compromised, FALSE)
+                         WHERE compromised IS NULL';
+            END IF;
+        END $$;
+        """
+    )
+    cur.execute("ALTER TABLE audit_attestations ALTER COLUMN compromised SET DEFAULT FALSE")
+    cur.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM audit_attestations
+                WHERE compromised IS NULL
+                LIMIT 1
+            ) THEN
+                EXECUTE 'ALTER TABLE audit_attestations ALTER COLUMN compromised SET NOT NULL';
+            END IF;
+        END $$;
+        """
+    )
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_audit_attestations_tenant_compromised_created
