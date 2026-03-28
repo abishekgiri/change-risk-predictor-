@@ -135,6 +135,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_DASHBOARD_OVERVIEW_CACHE_TTL_SECONDS = 15
 _DASHBOARD_OVERVIEW_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _DASHBOARD_OVERVIEW_CACHE_LOCK = Lock()
+DEFAULT_DASHBOARD_ALERTS_CACHE_TTL_SECONDS = 15
+_DASHBOARD_ALERTS_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
+_DASHBOARD_ALERTS_CACHE_LOCK = Lock()
 DEFAULT_DASHBOARD_TENANT_INFO_CACHE_TTL_SECONDS = 15
 _DASHBOARD_TENANT_INFO_CACHE: Dict[str, tuple[float, Dict[str, Any]]] = {}
 _DASHBOARD_TENANT_INFO_CACHE_LOCK = Lock()
@@ -3224,6 +3227,75 @@ def _write_dashboard_tenant_info_cache(*, tenant_id: str, payload: Dict[str, Any
         )
 
 
+def _dashboard_alerts_cache_ttl_seconds() -> int:
+    raw = str(
+        os.getenv(
+            "RELEASEGATE_DASHBOARD_ALERTS_CACHE_TTL_SECONDS",
+            str(DEFAULT_DASHBOARD_ALERTS_CACHE_TTL_SECONDS),
+        )
+        or str(DEFAULT_DASHBOARD_ALERTS_CACHE_TTL_SECONDS)
+    ).strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_DASHBOARD_ALERTS_CACHE_TTL_SECONDS
+    return max(0, parsed)
+
+
+def _dashboard_alerts_cache_key(*, tenant_id: str, window_days: int) -> str:
+    return f"{tenant_id}:{int(window_days)}"
+
+
+def clear_dashboard_alerts_cache(*, tenant_id: Optional[str] = None) -> None:
+    with _DASHBOARD_ALERTS_CACHE_LOCK:
+        if tenant_id is None:
+            _DASHBOARD_ALERTS_CACHE.clear()
+            return
+        prefix = f"{tenant_id}:"
+        for key in [key for key in _DASHBOARD_ALERTS_CACHE if key.startswith(prefix)]:
+            _DASHBOARD_ALERTS_CACHE.pop(key, None)
+
+
+def _read_dashboard_alerts_cache(*, tenant_id: str, window_days: int) -> Optional[Dict[str, Any]]:
+    ttl_seconds = _dashboard_alerts_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    cache_key = _dashboard_alerts_cache_key(
+        tenant_id=tenant_id,
+        window_days=window_days,
+    )
+    now = monotonic()
+    with _DASHBOARD_ALERTS_CACHE_LOCK:
+        cached = _DASHBOARD_ALERTS_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at <= now:
+            _DASHBOARD_ALERTS_CACHE.pop(cache_key, None)
+            return None
+        return deepcopy(payload)
+
+
+def _write_dashboard_alerts_cache(
+    *,
+    tenant_id: str,
+    window_days: int,
+    payload: Dict[str, Any],
+) -> None:
+    ttl_seconds = _dashboard_alerts_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    cache_key = _dashboard_alerts_cache_key(
+        tenant_id=tenant_id,
+        window_days=window_days,
+    )
+    with _DASHBOARD_ALERTS_CACHE_LOCK:
+        _DASHBOARD_ALERTS_CACHE[cache_key] = (
+            monotonic() + float(ttl_seconds),
+            deepcopy(payload),
+        )
+
+
 def _dashboard_metrics_timeseries_cache_ttl_seconds() -> int:
     raw = str(
         os.getenv(
@@ -3520,7 +3592,7 @@ def dashboard_integrity_endpoint(
 )
 def dashboard_alerts_endpoint(
     request: Request,
-    response: Response,
+    background_tasks: BackgroundTasks,
     tenant_id: Optional[str] = None,
     window_days: int = 30,
     auth: AuthContext = require_access(
@@ -3534,14 +3606,25 @@ def dashboard_alerts_endpoint(
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     trace_id = _dashboard_trace_id(request)
+    payload = _read_dashboard_alerts_cache(
+        tenant_id=effective_tenant,
+        window_days=window_days,
+    )
     try:
-        payload = list_dashboard_alerts(
-            tenant_id=effective_tenant,
-            window_days=window_days,
-        )
+        if payload is None:
+            payload = list_dashboard_alerts(
+                tenant_id=effective_tenant,
+                window_days=window_days,
+            )
+            _write_dashboard_alerts_cache(
+                tenant_id=effective_tenant,
+                window_days=window_days,
+                payload=payload,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _audit_dashboard_read(
+    background_tasks.add_task(
+        _audit_dashboard_read,
         auth=auth,
         tenant_id=effective_tenant,
         action="DASHBOARD_READ_ALERTS",
@@ -3549,8 +3632,7 @@ def dashboard_alerts_endpoint(
         trace_id=trace_id,
         params={"window_days": int(window_days)},
     )
-    return _dashboard_response(
-        response=response,
+    return _dashboard_json_response(
         trace_id=trace_id,
         cache_control="private, max-age=60",
         payload=payload,

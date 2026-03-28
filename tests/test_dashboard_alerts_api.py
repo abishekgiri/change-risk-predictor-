@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from releasegate.config import DB_PATH
-from releasegate.server import app
+from releasegate.server import app, clear_dashboard_alerts_cache
 from releasegate.storage.schema import init_db
 from tests.auth_helpers import jwt_headers
 
@@ -29,6 +29,7 @@ def _reset_db() -> None:
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     init_db()
+    clear_dashboard_alerts_cache()
 
 
 def _insert_governance_rollup(
@@ -168,3 +169,46 @@ def test_dashboard_alerts_emits_strict_mode_drop():
     assert strict_drop["severity"] == "high"
     assert strict_drop["details"]["today"] == 1
     assert strict_drop["details"]["yesterday"] == 3
+
+
+def test_dashboard_alerts_uses_short_ttl_cache(monkeypatch):
+    _reset_db()
+    tenant_id = "tenant-dashboard-alerts-cache"
+    today = datetime.now(timezone.utc).date()
+    _insert_governance_rollup(
+        tenant_id=tenant_id,
+        date_utc=today.isoformat(),
+        integrity_score=94.0,
+        drift_index=0.01,
+        override_rate=0.02,
+        blocked_count=1,
+        strict_mode_count=2,
+        override_count=2,
+        decision_count=100,
+    )
+
+    from releasegate.governance import dashboard_metrics as metrics
+
+    call_count = {"value": 0}
+    original_list_dashboard_alerts = metrics.list_dashboard_alerts
+
+    def counting_list_dashboard_alerts(**kwargs):
+        call_count["value"] += 1
+        return original_list_dashboard_alerts(**kwargs)
+
+    monkeypatch.setattr(metrics, "list_dashboard_alerts", counting_list_dashboard_alerts)
+
+    first = client.get(
+        "/dashboard/alerts",
+        params={"tenant_id": tenant_id, "window_days": 30},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+    second = client.get(
+        "/dashboard/alerts",
+        params={"tenant_id": tenant_id, "window_days": 30},
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert call_count["value"] == 1
