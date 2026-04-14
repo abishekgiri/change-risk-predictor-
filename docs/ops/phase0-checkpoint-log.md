@@ -14,7 +14,7 @@ Checked routes:
 - `/onboarding/activation`
 
 Checkpoint verdicts are based on the checked Phase 0 routes above.
-Per checkpoint notes may explicitly exclude `/internal/slo` global p95 when it is inflated by cumulative non-checkpoint routes.
+Individual checkpoint notes may explicitly exclude /internal/slo global p95 when it is inflated by cumulative non-checkpoint routes.
 
 ## Current Streak
 
