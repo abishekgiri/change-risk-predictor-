@@ -655,6 +655,7 @@ class DashboardDecisionExplainData(BaseModel):
     signals: List[Dict[str, Any]] = Field(default_factory=list)
     risk: Dict[str, Any] = Field(default_factory=dict)
     evidence_links: List[Dict[str, Any]] = Field(default_factory=list)
+    approval_freshness: Dict[str, Any] = Field(default_factory=dict)
     replay: Dict[str, Any] = Field(default_factory=dict)
 
 

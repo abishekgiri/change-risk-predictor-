@@ -1217,6 +1217,7 @@ def _resolve_registry_policy_live(
 
     effective_policy = json.loads(canonical_json(effective_policy))
     effective_policy_hash = _policy_hash(effective_policy)
+    effective_policy_resolution_hash = sha256_json(effective_policy)
     component_policy_ids = [str(component.get("policy_id") or "") for component in selected_components if component.get("policy_id")]
     component_lineage: Dict[str, Dict[str, Any]] = {}
     for component in selected_components:
@@ -1228,6 +1229,7 @@ def _resolve_registry_policy_live(
             "version": component.get("version"),
             "scope_id": component.get("scope_id"),
             "policy_hash": component.get("policy_hash"),
+            "created_by": component.get("created_by"),
             "status": component.get("status"),
             "resolved_from_status": component.get("resolved_from_status"),
         }
@@ -1244,6 +1246,7 @@ def _resolve_registry_policy_live(
         },
         "effective_policy": effective_policy,
         "effective_policy_hash": effective_policy_hash,
+        "policy_resolution_hash": effective_policy_resolution_hash,
         "component_policy_ids": component_policy_ids,
         "component_lineage": component_lineage,
         "components": selected_components,

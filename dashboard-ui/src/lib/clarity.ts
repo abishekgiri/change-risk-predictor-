@@ -22,7 +22,10 @@ export function humanizeReasonCode(reasonCode?: string | null): string {
     OVERRIDE_EXPIRED: "A previous override expired, so protection re-locked the change.",
     APPROVALS_REQUIRED: "Required approvals were missing for this release.",
     APPROVAL_REQUIRED: "Required approvals were missing for this release.",
+    APPROVALS_EXPIRED: "Previously granted approvals were too old to count for this release.",
+    APPROVALS_UNAVAILABLE: "Approval evidence could not be loaded, so the system blocked the release.",
     SOD_VIOLATION: "A separation-of-duties control was violated.",
+    SOD_POLICY_AUTHOR_APPROVER_CONFLICT: "The same person authored the active policy and approved this release.",
   };
   if (mapped[normalized]) return mapped[normalized];
   if (!normalized) return "A governance control blocked this release.";
@@ -79,7 +82,7 @@ export function describeDecisionOutcome({
   const risk = decisionRiskBand(riskScore);
   const environment = decision.environment ? ` for ${decision.environment}` : "";
   const workflow = decision.workflow_id ? ` in workflow ${decision.workflow_id}` : "";
-  const blockedReason = decision.reason_code ? humanizeReasonCode(decision.reason_code) : decision.blocked_because || humanizeReasonCode(decision.reason_code);
+  const blockedReason = decision.blocked_because || humanizeReasonCode(decision.reason_code);
   const normalizedReason = String(decision.reason_code || "").trim().toUpperCase();
 
   if (decision.outcome === "BLOCK") {

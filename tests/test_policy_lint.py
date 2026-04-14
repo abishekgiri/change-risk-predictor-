@@ -235,6 +235,20 @@ def test_registry_lint_detects_impossible_approval_requirements():
     assert any(issue["code"] == "APPROVAL_REQUIREMENT_IMPOSSIBLE" for issue in report["issues"])
 
 
+def test_registry_lint_rejects_invalid_approval_freshness_window():
+    report = lint_registry_policy(
+        {
+            "approval_requirements": {
+                "min_approvals": 1,
+                "max_age_seconds": 0,
+            }
+        }
+    )
+
+    assert report["ok"] is False
+    assert any(issue["code"] == "APPROVAL_FRESHNESS_INVALID" for issue in report["issues"])
+
+
 def test_registry_lint_detects_invalid_nested_rule_logic():
     report = lint_registry_policy(
         {
