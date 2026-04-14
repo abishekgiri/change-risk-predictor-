@@ -79,7 +79,7 @@ export default async function CustomerSuccessPage({
     <div className="space-y-6">
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Customer Success Intelligence</h1>
+          <h1 className="text-2xl font-semibold text-slate-900">Executive Impact</h1>
           <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
         <TraceInfo traceId={traceId} />

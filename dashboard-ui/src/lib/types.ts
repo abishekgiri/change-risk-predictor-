@@ -83,11 +83,16 @@ export interface DecisionExplainer {
     transition_id?: string | null;
     actor?: string | null;
     environment?: string | null;
+    status?: string | null;
+    repo?: string | null;
+    pr_number?: number | null;
+    project_key?: string | null;
   };
   snapshot_binding: {
     policy_hash?: string | null;
     snapshot_hash?: string | null;
     decision_hash?: string | null;
+    binding_verified?: boolean | null;
   };
   evaluation_tree: {
     nodes: Array<Record<string, unknown>>;
@@ -131,6 +136,10 @@ export interface PolicyDiffResponse {
     change_count: number;
     severity_counts: Record<Severity, number>;
     summary_bullets: string[];
+    warning_count?: number;
+    strengthening_count?: number;
+    rule_change_count?: number;
+    risk_threshold_change_count?: number;
   };
   threshold_deltas: Array<Record<string, unknown> & { severity: Severity }>;
   condition_deltas: Array<Record<string, unknown> & { severity: Severity }>;

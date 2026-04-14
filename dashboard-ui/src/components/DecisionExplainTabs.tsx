@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { CopyButton } from "@/components/CopyButton";
+import { decisionRiskBand } from "@/lib/clarity";
 import type { DecisionExplainer } from "@/lib/types";
 
 type Tab = "risk" | "signals" | "evaluation";
@@ -19,6 +20,7 @@ export function DecisionExplainTabs({
   evaluationTree,
 }: DecisionExplainTabsProps) {
   const [activeTab, setActiveTab] = useState<Tab>("risk");
+  const riskBand = useMemo(() => decisionRiskBand(risk.score), [risk.score]);
 
   const sortedComponents = useMemo(() => {
     return [...risk.components].sort((a, b) => {
@@ -35,9 +37,9 @@ export function DecisionExplainTabs({
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex flex-wrap gap-2">
         {([
-          { key: "risk", label: "Risk" },
-          { key: "signals", label: "Signals" },
-          { key: "evaluation", label: "Evaluation tree" },
+          { key: "risk", label: "Risk details" },
+          { key: "signals", label: "Evidence signals" },
+          { key: "evaluation", label: "Technical trace" },
         ] as const).map((tab) => (
           <button
             key={tab.key}
@@ -57,8 +59,11 @@ export function DecisionExplainTabs({
       {activeTab === "risk" ? (
         <div className="mt-4 space-y-4">
           <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-            <p className="text-xs uppercase tracking-wide text-slate-500">Risk score</p>
+            <p className="text-xs uppercase tracking-wide text-slate-500">Risk posture</p>
             <p className="text-2xl font-semibold text-slate-900">{risk.score.toFixed(3)}</p>
+            <p className="mt-1 text-xs text-slate-600">
+              {riskBand.label} risk based on the weighted components below. This is the technical breakdown behind the decision.
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
@@ -86,36 +91,46 @@ export function DecisionExplainTabs({
       ) : null}
 
       {activeTab === "signals" ? (
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-full text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                <th className="py-2 pr-2 text-left">Name</th>
-                <th className="py-2 pr-2 text-left">Value</th>
-                <th className="py-2 pr-2 text-left">Source</th>
-                <th className="py-2 pr-2 text-left">Confidence</th>
-                <th className="py-2 pr-2 text-left">Captured at</th>
-              </tr>
-            </thead>
-            <tbody>
-              {signals.map((signal) => (
-                <tr key={`${signal.name}-${signal.captured_at || "na"}`} className="border-b border-slate-100">
-                  <td className="py-2 pr-2">{signal.name}</td>
-                  <td className="py-2 pr-2 font-mono text-xs">{JSON.stringify(signal.value)}</td>
-                  <td className="py-2 pr-2">{signal.source || "-"}</td>
-                  <td className="py-2 pr-2">{signal.confidence ?? "-"}</td>
-                  <td className="py-2 pr-2">{signal.captured_at || "-"}</td>
+        <div className="mt-4 space-y-3">
+          <p className="text-sm text-slate-600">
+            These are the inputs ReleaseGate used to score and evaluate the release. Confidence helps explain how trustworthy each signal was.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+                  <th className="py-2 pr-2 text-left">Name</th>
+                  <th className="py-2 pr-2 text-left">Value</th>
+                  <th className="py-2 pr-2 text-left">Source</th>
+                  <th className="py-2 pr-2 text-left">Confidence</th>
+                  <th className="py-2 pr-2 text-left">Captured at</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {signals.map((signal) => (
+                  <tr key={`${signal.name}-${signal.captured_at || "na"}`} className="border-b border-slate-100">
+                    <td className="py-2 pr-2">{signal.name}</td>
+                    <td className="py-2 pr-2 font-mono text-xs">{JSON.stringify(signal.value)}</td>
+                    <td className="py-2 pr-2">{signal.source || "-"}</td>
+                    <td className="py-2 pr-2">{signal.confidence ?? "-"}</td>
+                    <td className="py-2 pr-2">{signal.captured_at || "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : null}
 
       {activeTab === "evaluation" ? (
         <div className="mt-4 space-y-3">
           <div className="flex items-center justify-between">
-            <p className="text-sm text-slate-600">Evaluation graph payload used for explainability.</p>
+            <div>
+              <p className="text-sm text-slate-600">Technical evaluation graph used for traceability and replay.</p>
+              <p className="mt-1 text-xs text-slate-500">
+                This view is mainly for operators and auditors who need the raw graph payload.
+              </p>
+            </div>
             <CopyButton value={evaluationJson} label="Copy evaluation JSON" />
           </div>
           <details className="rounded-lg border border-slate-100 bg-slate-50 p-3" open>

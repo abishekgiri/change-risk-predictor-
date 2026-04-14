@@ -4,6 +4,7 @@ import { CopyButton } from "@/components/CopyButton";
 import { DecisionExplainTabs } from "@/components/DecisionExplainTabs";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
+import { describeDecisionOutcome } from "@/lib/clarity";
 import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DecisionExplainer } from "@/lib/types";
 
@@ -51,6 +52,11 @@ export default async function DecisionPage({
 
   const { decision, snapshot_binding: binding } = explainer.data;
   const traceId = String(explainer.data.trace_id ?? explainer.traceId ?? "");
+  const decisionSummary = describeDecisionOutcome({
+    decision,
+    riskScore: explainer.data.risk.score,
+    bindingVerified: binding.binding_verified,
+  });
   const outcomeBadgeClass =
     decision.outcome === "BLOCK"
       ? "border-rose-200 bg-rose-100 text-rose-700"
@@ -85,7 +91,12 @@ export default async function DecisionPage({
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Decision Explorer</h1>
+          <h1 className="text-2xl font-semibold text-slate-900">
+            {decision.outcome === "BLOCK" ? "Why This Was Blocked" : "Release Decision Summary"}
+          </h1>
+          <p className="mt-1 text-sm text-slate-600">
+            Plain-language explanation for buyers, auditors, and operators reviewing a governed release decision.
+          </p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
             <span className={`inline-flex rounded-md border px-2 py-0.5 text-xs font-semibold ${outcomeBadgeClass}`}>
               {decision.outcome}
@@ -102,10 +113,10 @@ export default async function DecisionPage({
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
             <Link href={scopedHref("/policies/diff")} className="text-indigo-700 hover:underline">
-              Policy diff
+              Policy changes
             </Link>
             <Link href={scopedHref("/overrides")} className="text-indigo-700 hover:underline">
-              View overrides
+              View exceptions
             </Link>
             {safeReplay ? (
               <a
@@ -131,8 +142,79 @@ export default async function DecisionPage({
         </div>
       </div>
 
+      <section className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Decision</p>
+          <p className="mt-2 text-lg font-semibold text-slate-900">
+            {decision.outcome === "BLOCK" ? "Blocked before release" : "Allowed to proceed"}
+          </p>
+          <p className="mt-2 text-sm text-slate-700">{decisionSummary.plainLanguage}</p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Policy</p>
+          <p className="mt-2 text-lg font-semibold text-slate-900">
+            {binding.binding_verified ? "Verified release rule applied" : "Release rule evidence attached"}
+          </p>
+          <p className="mt-2 text-sm text-slate-700">
+            {binding.policy_hash
+              ? "This decision is tied to a specific policy snapshot, so the exact control can be traced later."
+              : "Policy hash details were not attached to this decision."}
+          </p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Evidence</p>
+          <p className="mt-2 text-lg font-semibold text-slate-900">
+            {explainer.data.signals.length} signal{explainer.data.signals.length === 1 ? "" : "s"} reviewed
+          </p>
+          <p className="mt-2 text-sm text-slate-700">
+            {explainer.data.signals[0]
+              ? `Primary signal: ${explainer.data.signals[0].name}.`
+              : "No signal details were attached to this decision."}
+          </p>
+        </div>
+      </section>
+
+      <div className="grid gap-4 lg:grid-cols-[1.3fr,1fr]">
+        <section
+          className={`rounded-xl border p-4 shadow-sm ${
+            decision.outcome === "BLOCK"
+              ? "border-rose-200 bg-rose-50 text-rose-900"
+              : "border-emerald-200 bg-emerald-50 text-emerald-900"
+          }`}
+        >
+          <p className="text-xs font-semibold uppercase tracking-wide">Decision Summary</p>
+          <h2 className="mt-2 text-xl font-semibold">{decisionSummary.headline}</h2>
+          <p className="mt-2 text-sm">{decisionSummary.plainLanguage}</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg bg-white/70 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-current">Business impact</p>
+              <p className="mt-2 text-sm">{decisionSummary.businessImpact}</p>
+            </div>
+            <div className="rounded-lg bg-white/70 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-current">Recommended next step</p>
+              <p className="mt-2 text-sm">{decisionSummary.nextStep}</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Audit Lens</p>
+          <h3 className="mt-2 text-lg font-semibold text-slate-900">Control evidence attached</h3>
+          <ul className="mt-3 space-y-2 text-sm text-slate-700">
+            <li>{binding.binding_verified ? "Immutable policy snapshot verified." : "Decision hashes are present; snapshot verification should be confirmed."}</li>
+            <li>{explainer.data.evidence_links.length} linked evidence artifact{explainer.data.evidence_links.length === 1 ? "" : "s"} available.</li>
+            <li>{safeReplay ? "Deterministic replay link is available." : "Replay link is not available for this decision."}</li>
+            <li>Risk posture: {decisionSummary.riskLabel}.</li>
+          </ul>
+          <p className="mt-3 text-xs text-slate-600">{decisionSummary.auditLens}</p>
+        </section>
+      </div>
+
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm" data-testid="snapshot-binding">
         <h3 className="text-sm font-semibold text-slate-800">Snapshot Binding</h3>
+        <p className="mt-2 text-xs text-slate-600">
+          These hashes identify the exact policy snapshot and decision evidence used for this outcome.
+        </p>
         <ul className="mt-3 space-y-2 text-sm">
           <li className="flex items-center justify-between gap-3">
             <span className="font-mono text-xs text-slate-700">policy_hash: {binding.policy_hash || "-"}</span>
@@ -153,17 +235,16 @@ export default async function DecisionPage({
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           {decision.outcome === "BLOCK" ? (
             <>
-              <h3 className="text-sm font-semibold text-slate-800">Why blocked</h3>
+              <h3 className="text-sm font-semibold text-slate-800">Why this was blocked</h3>
               <p className="mt-2 text-sm text-rose-700" data-testid="blocked-because">
-                Blocked because: {decision.blocked_because || "No blocked reason provided."}
+                {decisionSummary.plainLanguage}
               </p>
+              <p className="mt-2 text-xs text-slate-600">Reason code: {decision.reason_code || "No reason code recorded."}</p>
             </>
           ) : (
             <>
-              <h3 className="text-sm font-semibold text-slate-800">Why allowed</h3>
-              <p className="mt-2 text-sm text-emerald-700">
-                Policy conditions satisfied. {decision.reason_code ? `(${decision.reason_code})` : ""}
-              </p>
+              <h3 className="text-sm font-semibold text-slate-800">Why this was allowed</h3>
+              <p className="mt-2 text-sm text-emerald-700">{decisionSummary.plainLanguage}</p>
             </>
           )}
           <div className="mt-3 grid gap-2 text-sm text-slate-700 md:grid-cols-2">
