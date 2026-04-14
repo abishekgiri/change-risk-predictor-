@@ -40,6 +40,7 @@ Current source-of-truth docs:
 - `ops/phase1-onboarding-session-script.md` — facilitation guide for live onboarding validation sessions
 - `ops/phase1-validation-playbook.md` — how to prove Phase 1 with telemetry and real-user batches
 - `ops/phase1-validation-log-template.md` — note template and daily session table for Phase 1 validation
+- `ops/phase2-exec-clarity-script.md` — validation script for non-technical Phase 2 clarity demos
 - `attestations/dsse-intoto.md` — DSSE + in-toto interoperability contract
 - `contracts/` — versioned artifact contracts (`soc2_v1`, `checkpoint_v1`, `proof_pack_v1`)
 - `contracts/versioning_policy.md` — public artifact compatibility and deprecation policy

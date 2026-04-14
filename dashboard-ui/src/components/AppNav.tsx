@@ -15,12 +15,12 @@ const links = [
   { href: "/onboarding", label: "Onboarding" },
   { href: "/tenant", label: "Tenant" },
   { href: "/billing", label: "Billing" },
-  { href: "/overview", label: "Overview" },
+  { href: "/overview", label: "Executive Overview" },
   { href: "/observability", label: "Observability" },
-  { href: "/customer-success", label: "Customer Success" },
-  { href: "/integrity", label: "Integrity" },
-  { href: "/overrides", label: "Overrides" },
-  { href: "/policies/diff", label: "Policy Diff" },
+  { href: "/customer-success", label: "Executive Impact" },
+  { href: "/integrity", label: "Control Health" },
+  { href: "/overrides", label: "Exceptions" },
+  { href: "/policies/diff", label: "Policy Changes" },
 ];
 
 export function AppNav() {

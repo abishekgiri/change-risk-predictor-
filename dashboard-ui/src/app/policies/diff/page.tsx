@@ -19,9 +19,9 @@ export default async function PolicyDiffPage({
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-slate-900">Policy Diff</h1>
+        <h1 className="text-2xl font-semibold text-slate-900">Policy Changes</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Compare active vs staged policy contracts for tenant: {scope.tenantId}
+          Compare active vs staged policy controls for tenant: {scope.tenantId}
         </p>
       </div>
       <PolicyDiffWorkbench tenantId={scope.tenantId} fromTs={scope.fromTs} toTs={scope.toTs} />

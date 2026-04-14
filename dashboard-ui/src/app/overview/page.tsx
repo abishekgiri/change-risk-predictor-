@@ -1,9 +1,16 @@
 import { BlockedDecisionsTable } from "@/components/BlockedDecisionsTable";
-import { JsonPanel } from "@/components/JsonPanel";
 import { KpiCard } from "@/components/KpiCard";
 import { LineChartCard } from "@/components/LineChartCard";
 import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
+import {
+  governanceIntegrityLabel,
+  plainEnglishRiskCardFromAlert,
+  plainEnglishRiskCardFromBlocked,
+  plainEnglishRiskCardFromRecommendation,
+  severityLabel,
+  severityToneClass,
+} from "@/lib/clarity";
 import { resolveDashboardScope, scopeToQuery } from "@/lib/dashboard-scope";
 import type { DashboardAlerts, DashboardOverview, GovernanceRecommendationsResponse } from "@/lib/types";
 
@@ -178,36 +185,99 @@ export default async function OverviewPage({
   const integrityDelta = percentChange(currentIntegrity, previousIntegrity);
   const driftRisk = driftBand(overviewResp.data.drift.current);
   const bypassRisk = riskBand(alertsResp.data.current_override_abuse_index);
+  const integrityLabel = governanceIntegrityLabel(overviewResp.data.integrity_score);
   const hasTrendSignal = trendRows.some(
     (row) => Number(row.integrity || 0) > 0 || Number(row.drift || 0) > 0 || Number(row.override_rate || 0) > 0,
   );
 
-  const topRisks: Array<{ title: string; detail: string; href?: string; severity: "high" | "medium" | "low" }> = [];
+  const topRisks: Array<{
+    title: string;
+    severity: "high" | "medium" | "low";
+    whatHappened: string;
+    whyItMatters: string;
+    consequence: string;
+    whatToDo: string;
+    href?: string;
+    source: string;
+  }> = [];
   for (const alert of alertsResp.data.alerts.slice(0, 5)) {
+    const narrative = plainEnglishRiskCardFromAlert(alert);
     topRisks.push({
-      title: alert.title,
-      detail: `${alert.code} • ${String(alert.severity).toUpperCase()}`,
+      title: narrative.title,
+      whatHappened: narrative.whatHappened,
+      whyItMatters: narrative.whyItMatters,
+      consequence: narrative.consequence,
+      whatToDo: narrative.whatToDo,
       severity: String(alert.severity).toLowerCase() === "high" ? "high" : String(alert.severity).toLowerCase() === "medium" ? "medium" : "low",
+      source: `Alert • ${alert.code}`,
     });
     if (topRisks.length >= 3) break;
   }
   for (const reco of recommendationsResp.data.recommendations) {
     if (topRisks.length >= 3) break;
+    const narrative = plainEnglishRiskCardFromRecommendation(reco);
     topRisks.push({
-      title: reco.title,
-      detail: reco.playbook,
+      title: narrative.title,
+      whatHappened: narrative.whatHappened,
+      whyItMatters: narrative.whyItMatters,
+      consequence: narrative.consequence,
+      whatToDo: narrative.whatToDo,
       severity: reco.severity === "HIGH" ? "high" : reco.severity === "MEDIUM" ? "medium" : "low",
+      source: `Recommended action • ${reco.recommendation_type}`,
     });
   }
   if (topRisks.length < 3 && blockedResp.data.items[0]) {
     const item = blockedResp.data.items[0];
+    const narrative = plainEnglishRiskCardFromBlocked(item);
     topRisks.push({
-      title: "Recent blocked change needs review",
-      detail: `${item.workflow || "workflow"} / ${item.transition || "transition"} • ${item.reason_code || "policy blocked"}`,
+      title: narrative.title,
+      whatHappened: narrative.whatHappened,
+      whyItMatters: narrative.whyItMatters,
+      consequence: narrative.consequence,
+      whatToDo: narrative.whatToDo,
       href: `/decisions/${item.decision_id}?tenant_id=${encodeURIComponent(scope.tenantId)}`,
-      severity: "medium",
+      severity: narrative.severity === "high" ? "high" : narrative.severity === "low" ? "low" : "medium",
+      source: "Blocked release",
     });
   }
+
+  const execDashboardItems = [
+    {
+      label: "Governance Status",
+      value:
+        releaseStatus === "high_risk" ? "High Risk" : releaseStatus === "caution" ? "Moderate Risk" : "Protected",
+      helper: statusTheme.body,
+    },
+    {
+      label: "Priority Issues Today",
+      value:
+        highAlertCount > 0
+          ? `${highAlertCount} high-risk signal${highAlertCount === 1 ? "" : "s"} detected`
+          : blockedCountWindow > 0
+          ? `${blockedCountWindow} blocked release${blockedCountWindow === 1 ? "" : "s"} detected`
+          : "No major gaps detected",
+      helper:
+        topRisks[0]?.title ||
+        "No major governance failures are visible in this reporting window.",
+    },
+    {
+      label: "Control Trend",
+      value:
+        integrityDelta === null
+          ? "Trend pending"
+          : integrityDelta >= 0
+          ? "Controls improving"
+          : "Controls weakening",
+      helper:
+        overrideDelta === null
+          ? changeSummary(integrityDelta, "Governance integrity", "up")
+          : `${changeSummary(integrityDelta, "Governance integrity", "up")} ${changeSummary(
+              overrideDelta,
+              "Exception pressure",
+              "down",
+            )}`,
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -219,27 +289,57 @@ export default async function OverviewPage({
         <TraceInfo traceId={overviewResp.data.trace_id ?? overviewResp.traceId} />
       </div>
 
-      <section className={`rounded-xl border p-5 shadow-sm ${statusTheme.classes}`}>
-        <p className="text-xs font-semibold uppercase tracking-wide">Release Risk Status</p>
-        <h2 className="mt-2 text-2xl font-semibold">
-          {statusTheme.emoji} {statusTheme.badge}
-        </h2>
-        <p className="mt-2 text-sm">{statusTheme.body}</p>
-      </section>
-
-      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <h3 className="text-sm font-semibold text-slate-800">Top 3 Risks Today</h3>
-        <p className="mt-1 text-xs text-slate-500">Highest governance risks requiring attention now.</p>
+      <section className={`rounded-2xl border p-6 shadow-sm ${statusTheme.classes}`}>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide">Top 3 Risks Today</p>
+            <h2 className="mt-2 text-3xl font-semibold">
+              {statusTheme.emoji} This Is Why You Should Care Today
+            </h2>
+            <p className="mt-3 max-w-3xl text-sm">
+              The three clearest release risks an executive or operator should act on first. Each card tells you what
+              happened, why it matters, what it commonly leads to, and what to do next.
+            </p>
+          </div>
+          <div className="rounded-xl border border-current/30 bg-white/60 px-4 py-3 text-sm">
+            <p className="text-xs font-semibold uppercase tracking-wide">Governance Status</p>
+            <p className="mt-1 text-xl font-semibold">{execDashboardItems[0].value}</p>
+            <p className="mt-1 text-xs">{execDashboardItems[0].helper}</p>
+          </div>
+        </div>
         <ol className="mt-3 space-y-3">
           {topRisks.slice(0, 3).map((risk, index) => (
-            <li key={`${risk.title}-${index}`} className="rounded-md border border-slate-100 p-3">
-              <p className="text-sm font-medium text-slate-900">
-                {index + 1}. {risk.title}
-              </p>
-              <p className="mt-1 text-xs text-slate-600">{risk.detail}</p>
+            <li key={`${risk.title}-${index}`} className={`rounded-2xl border p-5 shadow-sm ${severityToneClass(risk.severity)}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-lg font-semibold">
+                  {index + 1}. {risk.title}
+                </p>
+                <span className="rounded-full border border-current px-2 py-0.5 text-[11px] font-semibold">
+                  {severityLabel(risk.severity)}
+                </span>
+              </div>
+              <p className="mt-2 text-xs font-medium uppercase tracking-wide opacity-70">{risk.source}</p>
+              <div className="mt-4 grid gap-3 md:grid-cols-4">
+                <div className="rounded-md bg-white/70 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide">What happened</p>
+                  <p className="mt-2 text-sm">{risk.whatHappened}</p>
+                </div>
+                <div className="rounded-md bg-white/70 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide">Why it matters</p>
+                  <p className="mt-2 text-sm">{risk.whyItMatters}</p>
+                </div>
+                <div className="rounded-md bg-white/70 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide">Common consequence</p>
+                  <p className="mt-2 text-sm">{risk.consequence}</p>
+                </div>
+                <div className="rounded-md bg-white/70 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide">What to do</p>
+                  <p className="mt-2 text-sm">{risk.whatToDo}</p>
+                </div>
+              </div>
               {risk.href ? (
-                <a className="mt-2 inline-block text-xs text-indigo-700 hover:underline" href={risk.href}>
-                  View details
+                <a className="mt-3 inline-block text-sm font-medium text-indigo-700 hover:underline" href={risk.href}>
+                  Open full explainer
                 </a>
               ) : null}
             </li>
@@ -253,18 +353,76 @@ export default async function OverviewPage({
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
+        {execDashboardItems.map((item) => (
+          <div key={item.label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{item.label}</p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">{item.value}</p>
+            <p className="mt-2 text-sm text-slate-700">{item.helper}</p>
+          </div>
+        ))}
+      </section>
+
+      <section className="grid gap-4 lg:grid-cols-[1.35fr,1fr]">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Executive Briefing</p>
+          <h3 className="mt-2 text-xl font-semibold text-slate-900">{integrityLabel.label} governance posture</h3>
+          <p className="mt-2 text-sm text-slate-700">{integrityLabel.explanation}</p>
+          <ul className="mt-4 space-y-2 text-sm text-slate-700">
+            <li>
+              {blockedCountWindow} blocked change{blockedCountWindow === 1 ? "" : "s"} protected this reporting window.
+            </li>
+            <li>
+              {topRisks.length} priority risk{topRisks.length === 1 ? "" : "s"} need attention today across alerts,
+              recommendations, or blocked changes.
+            </li>
+            <li>
+              {overviewResp.data.active_strict_modes.length} strict protection scope
+              {overviewResp.data.active_strict_modes.length === 1 ? "" : "s"} currently fail closed when evidence is missing.
+            </li>
+          </ul>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Audit-Friendly Readout</p>
+          <h3 className="mt-2 text-lg font-semibold text-slate-900">Change-control posture</h3>
+          <p className="mt-2 text-sm text-slate-700">
+            Use this view to explain release controls in buyer language: approval discipline, exception pressure, and
+            control drift.
+          </p>
+          <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md bg-slate-50 p-3">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Open Actions</dt>
+              <dd className="mt-1 text-lg font-semibold text-slate-900">{recommendationsResp.data.recommendations.length}</dd>
+            </div>
+            <div className="rounded-md bg-slate-50 p-3">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">High Alerts</dt>
+              <dd className="mt-1 text-lg font-semibold text-slate-900">{highAlertCount}</dd>
+            </div>
+            <div className="rounded-md bg-slate-50 p-3">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Strict Modes</dt>
+              <dd className="mt-1 text-lg font-semibold text-slate-900">{overviewResp.data.active_strict_modes.length}</dd>
+            </div>
+            <div className="rounded-md bg-slate-50 p-3">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Blocked Changes</dt>
+              <dd className="mt-1 text-lg font-semibold text-slate-900">{blockedCountWindow}</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section className="grid gap-4 md:grid-cols-3">
         <KpiCard
-          label="Release Safety Score"
+          label="Governance Integrity Score"
           value={overviewResp.data.integrity_score.toFixed(2)}
-          helper={`${formatSignedPercent(integrityDelta)} vs last week`}
+          helper={`${integrityLabel.label} posture • ${formatSignedPercent(integrityDelta)} vs last week`}
         />
         <KpiCard
-          label="Process Drift Risk"
+          label="Change Control Drift"
           value={driftRisk.label}
           helper={formatRiskHelper(driftRisk.tone)}
         />
         <KpiCard
-          label="Policy Bypass Risk"
+          label="Override Trend Risk"
           value={bypassRisk.label}
           helper={formatRiskHelper(bypassRisk.tone)}
         />
@@ -273,25 +431,25 @@ export default async function OverviewPage({
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <h3 className="text-sm font-semibold text-slate-800">What Changed (Last 7 Days)</h3>
         <ul className="mt-3 space-y-2 text-sm text-slate-700">
-          <li>{changeSummary(overrideDelta, "Policy bypass risk", "down")}</li>
-          <li>{changeSummary(driftDelta, "Process drift risk", "down")}</li>
-          <li>{changeSummary(integrityDelta, "Release safety score", "up")}</li>
+          <li>{changeSummary(overrideDelta, "Exception pressure", "down")}</li>
+          <li>{changeSummary(driftDelta, "Change-control drift", "down")}</li>
+          <li>{changeSummary(integrityDelta, "Governance integrity", "up")}</li>
         </ul>
       </section>
 
       {hasTrendSignal ? (
         <LineChartCard
-          title="Release Safety / Process Drift / Policy Bypass Trends (30d)"
+          title="Governance Integrity / Drift / Override Trend (30d)"
           data={trendRows}
           series={[
-            { key: "integrity", label: "Release Safety", color: "#0f766e" },
-            { key: "drift", label: "Process Drift Risk", color: "#dc2626" },
-            { key: "override_rate", label: "Policy Bypass Risk", color: "#4338ca" },
+            { key: "integrity", label: "Governance Integrity", color: "#0f766e" },
+            { key: "drift", label: "Change Control Drift", color: "#dc2626" },
+            { key: "override_rate", label: "Override Trend", color: "#4338ca" },
           ]}
         />
       ) : (
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h3 className="text-sm font-semibold text-slate-800">Risk Trends (30d)</h3>
+          <h3 className="text-sm font-semibold text-slate-800">Governance Trend (30d)</h3>
           <p className="mt-2 text-sm text-slate-600">
             No significant risk trends detected in the past 30 days. Governance activity remains stable.
           </p>
@@ -360,15 +518,18 @@ export default async function OverviewPage({
         </ul>
       </div>
 
-      <BlockedDecisionsTable
-        tenantId={scope.tenantId}
-        fromTs={scope.fromTs}
-        toTs={scope.toTs}
-        initialItems={blockedResp.data.items}
-        initialCursor={blockedResp.data.next_cursor}
-      />
-
-      <JsonPanel title="Drift Breakdown" value={overviewResp.data.drift.breakdown} />
+      <details className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-800">Open detailed blocked release log</summary>
+        <div className="mt-4">
+          <BlockedDecisionsTable
+            tenantId={scope.tenantId}
+            fromTs={scope.fromTs}
+            toTs={scope.toTs}
+            initialItems={blockedResp.data.items}
+            initialCursor={blockedResp.data.next_cursor}
+          />
+        </div>
+      </details>
     </div>
   );
 }

@@ -45,7 +45,7 @@ export default async function IntegrityPage({
     <div className="space-y-6">
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-900">Integrity Trends</h1>
+          <h1 className="text-2xl font-semibold text-slate-900">Control Health</h1>
           <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
         <TraceInfo traceId={integrity.data.trace_id ?? integrity.traceId} />
@@ -53,13 +53,13 @@ export default async function IntegrityPage({
 
       <section className="grid gap-4 md:grid-cols-3">
         <KpiCard
-          label="Current Integrity"
+          label="Governance Integrity Score"
           value={(latest?.integrity_score ?? 0).toFixed(2)}
           helper={pointCount <= 1 ? `Last updated: ${lastUpdated}` : "Latest 30-day rollup"}
         />
-        <KpiCard label="Current Drift" value={(latest?.drift_index ?? 0).toFixed(4)} />
+        <KpiCard label="Change Control Drift" value={(latest?.drift_index ?? 0).toFixed(4)} />
         <KpiCard
-          label="Override Abuse Index"
+          label="Override Trend Risk"
           value={alerts.data.current_override_abuse_index.toFixed(4)}
           helper="override_rate x actor_concentration"
         />
@@ -73,12 +73,16 @@ export default async function IntegrityPage({
         </div>
       ) : (
         <LineChartCard
-          title={pointCount === 1 ? "Integrity / Drift / Override Rate (single point)" : "Integrity / Drift / Override Rate"}
+          title={
+            pointCount === 1
+              ? "Governance Integrity / Drift / Override Trend (single point)"
+              : "Governance Integrity / Drift / Override Trend"
+          }
           data={chartRows}
           series={[
-            { key: "integrity_score", label: "Integrity", color: "#0f766e" },
-            { key: "drift_index", label: "Drift", color: "#dc2626" },
-            { key: "override_rate", label: "Override Rate", color: "#4338ca" },
+            { key: "integrity_score", label: "Governance Integrity", color: "#0f766e" },
+            { key: "drift_index", label: "Change Control Drift", color: "#dc2626" },
+            { key: "override_rate", label: "Override Trend", color: "#4338ca" },
           ]}
           height={320}
           showDots={pointCount === 1}

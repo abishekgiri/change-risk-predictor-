@@ -3,9 +3,11 @@
 import { useMemo, useState } from "react";
 
 import { DeltaTable } from "@/components/DeltaTable";
+import { KpiCard } from "@/components/KpiCard";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { TraceInfo } from "@/components/TraceInfo";
 import { callDashboardApi } from "@/lib/api";
+import { describePolicyDelta, describePolicyOverall } from "@/lib/clarity";
 import type { PolicyDiffResponse, Severity } from "@/lib/types";
 
 const EMPTY_POLICY = JSON.stringify(
@@ -36,10 +38,10 @@ type DisplaySeverity = Severity | "unknown";
 type DiffRow = Record<string, unknown> & { severity?: unknown };
 
 const TAB_LABELS: Record<Tab, string> = {
-  thresholds: "Thresholds",
-  conditions: "Conditions",
-  roles: "Roles",
-  sod: "SoD",
+  thresholds: "Risk Thresholds",
+  conditions: "Rule Conditions",
+  roles: "Approvals & Roles",
+  sod: "Separation of Duties",
 };
 
 function normalizeSeverity(value: unknown): DisplaySeverity {
@@ -147,8 +149,39 @@ export function PolicyDiffWorkbench({
     return [...unique];
   }, [filteredRows]);
 
+  const executiveNarrative = useMemo(() => (result ? describePolicyOverall(result) : null), [result]);
+
+  const plainLanguageChanges = useMemo(() => {
+    if (!result) return [];
+    const changes = [
+      ...result.threshold_deltas.map((row) => describePolicyDelta(row, "thresholds")),
+      ...result.condition_deltas.map((row) => describePolicyDelta(row, "conditions")),
+      ...result.role_deltas.map((row) => describePolicyDelta(row, "roles")),
+      ...result.sod_deltas.map((row) => describePolicyDelta(row, "sod")),
+    ];
+    return changes.slice(0, 6);
+  }, [result]);
+
+  const overallToneClass =
+    result?.overall === "WEAKENING"
+      ? "border-rose-200 bg-rose-50 text-rose-800"
+      : result?.overall === "STRENGTHENING"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : "border-slate-200 bg-slate-50 text-slate-800";
+
   return (
     <div className="space-y-6">
+      <section className="rounded-xl border border-sky-200 bg-sky-50 p-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-sky-900">Plain-language policy review</h2>
+        <p className="mt-2 text-sm text-sky-900">
+          Compare the active and staged policy, then use the summary below to explain the change in buyer, operator,
+          or audit language.
+        </p>
+        <p className="mt-1 text-xs text-sky-800">
+          Focus on control strength, approval requirements, rule coverage, and separation-of-duties impacts.
+        </p>
+      </section>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <label className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <p className="text-sm font-semibold text-slate-800">Active Policy JSON</p>
@@ -202,9 +235,41 @@ export function PolicyDiffWorkbench({
 
       {result ? (
         <>
+          <div className="grid gap-4 lg:grid-cols-[1.4fr,1fr]">
+            <section className={`rounded-xl border p-4 shadow-sm ${overallToneClass}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide">Control impact</p>
+                <span className="rounded-full border border-current px-2 py-0.5 text-[11px] font-semibold">
+                  {result.overall}
+                </span>
+              </div>
+              <h3 className="mt-2 text-xl font-semibold">{executiveNarrative?.headline}</h3>
+              <p className="mt-2 text-sm">{executiveNarrative?.businessImpact}</p>
+              <p className="mt-3 text-xs">{executiveNarrative?.auditLens}</p>
+            </section>
+
+            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
+              <KpiCard
+                label="High-Impact Changes"
+                value={String(result.summary.severity_counts.high || 0)}
+                helper="Changes most likely to weaken release controls"
+              />
+              <KpiCard
+                label="Approval Changes"
+                value={String(result.role_deltas.length)}
+                helper="Role or approver requirement updates"
+              />
+              <KpiCard
+                label="Rule Coverage Changes"
+                value={String(result.condition_deltas.length + result.threshold_deltas.length)}
+                helper="Rule or threshold changes affecting release gating"
+              />
+            </section>
+          </div>
+
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-slate-800">Summary</p>
+              <p className="text-sm font-semibold text-slate-800">Policy change summary</p>
               <div className="flex items-center gap-3">
                 <button
                   type="button"
@@ -250,6 +315,18 @@ export function PolicyDiffWorkbench({
                 <li key={`${idx}-${bullet}`}>{bullet}</li>
               ))}
             </ul>
+            {plainLanguageChanges.length ? (
+              <div className="mt-4 border-t border-slate-100 pt-4">
+                <p className="text-sm font-semibold text-slate-800">Plain-language explanation</p>
+                <ul className="mt-2 space-y-2 text-sm text-slate-700">
+                  {plainLanguageChanges.map((change, index) => (
+                    <li key={`${change}-${index}`} className="rounded-md bg-slate-50 px-3 py-2">
+                      {change}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
