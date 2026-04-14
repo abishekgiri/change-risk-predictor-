@@ -1,0 +1,59 @@
+name: Public Contracts
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/public-contracts.yml"
+      - "Makefile"
+      - "docs/README.md"
+      - "docs/contracts/**"
+      - "releasegate/**"
+      - "tests/test_audit_export_contract.py"
+      - "tests/test_audit_proof_pack.py"
+      - "tests/test_audit_checkpoints.py"
+      - "tests/test_root_export.py"
+      - "tests/test_external_root_anchoring.py"
+      - "tests/test_independent_daily_checkpoints.py"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/public-contracts.yml"
+      - "Makefile"
+      - "docs/README.md"
+      - "docs/contracts/**"
+      - "releasegate/**"
+      - "tests/test_audit_export_contract.py"
+      - "tests/test_audit_proof_pack.py"
+      - "tests/test_audit_checkpoints.py"
+      - "tests/test_root_export.py"
+      - "tests/test_external_root_anchoring.py"
+      - "tests/test_independent_daily_checkpoints.py"
+
+jobs:
+  public-contracts:
+    name: Public Contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest httpx
+
+      - name: Verify public contracts
+        run: make verify-public-contracts

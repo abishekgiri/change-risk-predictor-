@@ -35,7 +35,10 @@ Current source-of-truth docs:
 - `install-2-hour-guide.md` — enterprise 2-hour install walkthrough
 - `jira-config.md` — Jira transition/role mapping
 - `forge-hardening.md` — Forge runtime hardening behavior
+- `ops/external-anchoring-runbook.md` — daily anchoring operations runbook
+- `ops/phase0-checkpoint-log.md` — manual Phase 0 reliability checkpoint history
 - `attestations/dsse-intoto.md` — DSSE + in-toto interoperability contract
 - `contracts/` — versioned artifact contracts (`soc2_v1`, `checkpoint_v1`, `proof_pack_v1`)
+- `contracts/versioning_policy.md` — public artifact compatibility and deprecation policy
 
 Legacy/superseded docs live under `legacy/` and are not normative.

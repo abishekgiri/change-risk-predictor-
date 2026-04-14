@@ -22,8 +22,8 @@ ReleaseGate is a Jira-native release governance and enforcement engine.
 - `soc2_v1` export contract.
 - `proof_pack_v1` format.
 - `checkpoint_v1` format.
-- Add CI checks to prevent breaking changes in those contracts.
-- Add explicit deprecation/version policy before introducing any `v2` artifact.
+- Public contract versioning and deprecation policy: `docs/contracts/versioning_policy.md`
+- CI contract guardrail: `make verify-public-contracts` and `.github/workflows/public-contracts.yml`
 - Transaction envelope unification (`idempotency key claim` + `primary write` + `audit append` + `ledger update` in one DB transaction) is planned.
 - Forge production hardening with structured decision logs and deterministic timeout handling is in progress.
 - Jira config UX hardening via `validate-jira-config` and versioned mapping templates is in progress.
