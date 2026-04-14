@@ -93,16 +93,16 @@ Notes:
 - Onboarding 500s: `0`
 - Activation 500s: `0`
 - Tenant 500s: `0`
-- p95 latency: 319.537 ms
-- 5xx error rate: `0.0%`
-- Status: `PASS`
-
-Notes:
-
-- `/dashboard/tenant/info` direct checks were acceptable, with two slower requests at `0.912s` and `0.567s`, but route-level cumulative p95 remained `319.537 ms`
-- `/dashboard/overview` had one slower first request at `0.601s`, but the direct run was otherwise stable
-- `/dashboard/alerts` direct checks were acceptable
-- `/dashboard/metrics/timeseries` direct checks were acceptable overall, with a few higher requests (`0.683s`, `0.872s`) but not enough evidence to fail the checkpoint
+- p95 latency: `319.537 ms` 
+- 5xx error rate: `0.0%` 
+- Status: `PASS` 
+ 
+Notes: 
+ 
+- `/dashboard/tenant/info` direct checks were acceptable, with two slower requests at `912 ms` and `567 ms`, but route-level cumulative p95 remained `319.537 ms` 
+- `/dashboard/overview` had one slower first request at `601 ms`, but the direct run was otherwise stable 
+- `/dashboard/alerts` direct checks were acceptable 
+- `/dashboard/metrics/timeseries` direct checks were acceptable overall, with a few higher requests (`683 ms`, `872 ms`) but not enough evidence to fail the checkpoint
 - `/onboarding/status` returned `200 OK`
 - `/onboarding/activation` returned `200 OK`
 - `/internal/slo` global p95 should not be used as the checkpoint verdict because it includes cumulative non-checkpoint routes like `/dashboard/billing/usage`, `/dashboard/metrics/summary`, `/dashboard/metrics/drilldown`, `/dashboard/blocked`, and customer success dashboards
