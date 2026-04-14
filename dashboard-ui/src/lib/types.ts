@@ -92,6 +92,8 @@ export interface DecisionExplainer {
     policy_hash?: string | null;
     snapshot_hash?: string | null;
     decision_hash?: string | null;
+    policy_resolution_hash?: string | null;
+    signal_bundle_hash?: string | null;
     binding_verified?: boolean | null;
   };
   evaluation_tree: {
@@ -120,6 +122,13 @@ export interface DecisionExplainer {
     label: string;
     path: string | null;
   }>;
+  approval_freshness?: {
+    enforced?: boolean;
+    max_age_seconds?: number | null;
+    active_count?: number;
+    expired_count?: number;
+    expired_actor_ids?: string[];
+  };
   replay: {
     path: string;
     token: string;

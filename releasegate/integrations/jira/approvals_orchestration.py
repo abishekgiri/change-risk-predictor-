@@ -34,6 +34,26 @@ def _reason_min_length_default() -> int:
         return 40
 
 
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def build_approval_scope_payload(
     *,
     tenant_id: str,
@@ -355,6 +375,92 @@ def list_active_scope_approvals(*, tenant_id: str, approval_scope_hash: str, lim
         """,
         (effective_tenant, str(approval_scope_hash or "").strip(), max(1, min(int(limit), 2000))),
     )
+
+
+def resolve_approval_freshness_policy(policy: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(policy, dict):
+        return {"max_age_seconds": None, "enforced": False}
+    approvals_cfg = policy.get("approvals") if isinstance(policy.get("approvals"), dict) else {}
+    approval_requirements = (
+        policy.get("approval_requirements") if isinstance(policy.get("approval_requirements"), dict) else {}
+    )
+    max_age_raw = approvals_cfg.get("max_age_seconds")
+    if max_age_raw is None:
+        max_age_raw = approval_requirements.get("max_age_seconds")
+
+    max_age_seconds: Optional[int] = None
+    if max_age_raw is not None:
+        try:
+            parsed = int(max_age_raw)
+            if parsed > 0:
+                max_age_seconds = parsed
+        except Exception:
+            max_age_seconds = None
+
+    return {
+        "max_age_seconds": max_age_seconds,
+        "enforced": max_age_seconds is not None,
+    }
+
+
+def evaluate_scope_approval_freshness(
+    *,
+    approvals: List[Dict[str, Any]],
+    policy: Dict[str, Any],
+    evaluation_time: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    evaluated_at = evaluation_time or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    evaluated_at = evaluated_at.astimezone(timezone.utc)
+
+    max_age_seconds = policy.get("max_age_seconds")
+    try:
+        max_age = int(max_age_seconds) if max_age_seconds is not None else None
+    except Exception:
+        max_age = None
+
+    if max_age is None or max_age <= 0:
+        return {
+            "enforced": False,
+            "max_age_seconds": None,
+            "active_approvals": list(approvals or []),
+            "expired_approvals": [],
+            "active_count": len(approvals or []),
+            "expired_count": 0,
+            "expired_actor_ids": [],
+        }
+
+    active: List[Dict[str, Any]] = []
+    expired: List[Dict[str, Any]] = []
+    expired_actor_ids: List[str] = []
+    for approval in approvals or []:
+        created_at = _parse_iso_datetime(
+            approval.get("created_at") if isinstance(approval, dict) else None
+        )
+        actor_id = str((approval or {}).get("approver_actor") or "").strip()
+        if created_at is None:
+            expired.append(approval)
+            if actor_id:
+                expired_actor_ids.append(actor_id)
+            continue
+        age_seconds = max(0.0, (evaluated_at - created_at).total_seconds())
+        if age_seconds > float(max_age):
+            expired.append(approval)
+            if actor_id:
+                expired_actor_ids.append(actor_id)
+            continue
+        active.append(approval)
+
+    return {
+        "enforced": True,
+        "max_age_seconds": max_age,
+        "active_approvals": active,
+        "expired_approvals": expired,
+        "active_count": len(active),
+        "expired_count": len(expired),
+        "expired_actor_ids": sorted({actor for actor in expired_actor_ids if actor}),
+    }
 
 
 def normalize_cab_groups(policy: Dict[str, Any]) -> List[Dict[str, Any]]:

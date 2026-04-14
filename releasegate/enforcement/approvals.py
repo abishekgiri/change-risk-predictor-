@@ -173,6 +173,9 @@ class ApprovalsControl(ControlBase):
             "security_team_approved": result.security_team_approved,
             "approved_by": list(result.approved_by),
             "reason_codes": list(result.reason_codes),
+            "stale_reviewers": list(result.stale_reviewers),
+            "expired_reviewers": list(result.expired_reviewers),
+            "freshness_window_seconds": result.max_age_seconds,
         }
 
         signals: Dict[str, Any] = {
@@ -188,6 +191,8 @@ class ApprovalsControl(ControlBase):
             "approvals.reason_codes": list(result.reason_codes),
             "approvals.count": result.total_approvals,
             "approvals.security_review": result.security_approvals_count,
+            "approvals.stale_count": len(result.stale_reviewers),
+            "approvals.expired_count": len(result.expired_reviewers),
             "approvals": structured,
         }
 
@@ -338,6 +343,9 @@ class ApprovalsControl(ControlBase):
             "APPROVALS_INSUFFICIENT": (
                 f"Approvals insufficient: {approvals.get('total_approvals', 0)} "
                 f"of {approvals.get('min_total_required', 0)} required."
+            ),
+            "APPROVALS_EXPIRED": (
+                "Previously granted approvals expired under the configured freshness window."
             ),
             "SELF_APPROVAL_NOT_ALLOWED": "PR author approval does not satisfy approval policy.",
             "CODEOWNER_APPROVAL_REQUIRED": "At least one CODEOWNER approval is required.",

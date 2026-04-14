@@ -2,7 +2,7 @@
 Unit tests for Approval Enforcement.
 """
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from releasegate.signals.approvals.types import Review, ApprovalRequirement
 from releasegate.signals.approvals.validator import (
  is_review_stale,
@@ -285,6 +285,37 @@ def test_approvals_control_role_aware_passes_with_required_roles():
  assert result.signals["approvals"]["codeowner_approved"] is True
  assert result.signals["approvals"]["security_team_approved"] is True
  assert result.signals["approvals"]["approved_by"] == ["owner-user", "sec-user"]
+
+
+def test_approvals_control_role_aware_marks_expired_reviews():
+ control = ApprovalsControl()
+ now = datetime.now()
+ provider = MockProvider(
+ reviews=[
+ Review("alice", "APPROVED", now - timedelta(minutes=2), "head123"),
+ ],
+ pr_author="author",
+ )
+ context = ControlContext(
+ repo="test/repo",
+ pr_number=124,
+ diff={},
+ config={
+ "head_sha": "head123",
+ "approvals": {
+ "min_total": 1,
+ "max_age_seconds": 60,
+ },
+ },
+ provider=provider,
+ )
+
+ result = control.execute(context)
+
+ assert result.signals["approvals.satisfied"] is False
+ assert result.signals["approvals.expired_count"] == 1
+ assert result.signals["approvals"]["expired_reviewers"] == ["alice"]
+ assert "APPROVALS_EXPIRED" in result.signals["approvals"]["reason_codes"]
 
 if __name__ == "__main__":
  pytest.main([__file__, "-v"])

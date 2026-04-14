@@ -632,6 +632,20 @@ def lint_registry_policy(policy_json: Dict[str, Any]) -> Dict[str, Any]:
             min_approvals = int(approval_cfg.get("min_approvals", 0))
         except Exception:
             min_approvals = 0
+        max_age_raw = approval_cfg.get("max_age_seconds")
+        if max_age_raw is not None:
+            try:
+                max_age_seconds = int(max_age_raw)
+            except Exception:
+                max_age_seconds = 0
+            if max_age_seconds <= 0:
+                issues.append(
+                    _issue(
+                        "ERROR",
+                        "APPROVAL_FRESHNESS_INVALID",
+                        "approval_requirements.max_age_seconds must be a positive integer when set.",
+                    )
+                )
         required_roles = approval_cfg.get("required_roles")
         required_roles = [str(role).strip() for role in required_roles] if isinstance(required_roles, list) else []
         role_capacity = approval_cfg.get("role_capacity")

@@ -165,10 +165,22 @@ Every decision stores:
 - `snapshot_id`
 - Full resolved policy snapshot
 - `policy_hash`
+- `policy_resolution_hash`
 - `compiler_version`
 - `resolution_inputs`
 
 Snapshots are immutable, hash-verifiable, and bound to each decision.
+
+Approval requirements can also enforce freshness windows:
+
+- `approval_requirements.max_age_seconds`
+- `approvals.max_age_seconds`
+
+When set, previously granted approvals expire out of the decision path and are recorded as freshness-driven evidence in the stored decision snapshot.
+
+Decision-time SoD also applies to policy authority:
+
+- Active policy authors cannot also satisfy the governed release approval path.
 
 Verification endpoint:
 

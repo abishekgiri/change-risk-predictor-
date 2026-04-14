@@ -82,10 +82,15 @@ export default async function DecisionPage({
     `decision_id=${decision.decision_id || ""}`,
     `trace_id=${traceId}`,
     `policy_hash=${binding.policy_hash || ""}`,
+    `policy_resolution_hash=${binding.policy_resolution_hash || ""}`,
     `snapshot_hash=${binding.snapshot_hash || ""}`,
     `decision_hash=${binding.decision_hash || ""}`,
+    `signal_bundle_hash=${binding.signal_bundle_hash || ""}`,
     `tenant_id=${scope.tenantId}`,
   ].join("\n");
+  const approvalFreshness = explainer.data.approval_freshness || {};
+  const approvalFreshnessEnforced = Boolean(approvalFreshness.enforced);
+  const expiredApprovals = Number(approvalFreshness.expired_count || 0);
 
   return (
     <div className="space-y-6">
@@ -204,6 +209,13 @@ export default async function DecisionPage({
             <li>{binding.binding_verified ? "Immutable policy snapshot verified." : "Decision hashes are present; snapshot verification should be confirmed."}</li>
             <li>{explainer.data.evidence_links.length} linked evidence artifact{explainer.data.evidence_links.length === 1 ? "" : "s"} available.</li>
             <li>{safeReplay ? "Deterministic replay link is available." : "Replay link is not available for this decision."}</li>
+            <li>
+              {approvalFreshnessEnforced
+                ? expiredApprovals > 0
+                  ? `${expiredApprovals} approval${expiredApprovals === 1 ? "" : "s"} expired before evaluation and did not count.`
+                  : "Approval freshness enforcement was active for this decision."
+                : "Approval freshness window was not enforced for this decision."}
+            </li>
             <li>Risk posture: {decisionSummary.riskLabel}.</li>
           </ul>
           <p className="mt-3 text-xs text-slate-600">{decisionSummary.auditLens}</p>
@@ -221,12 +233,20 @@ export default async function DecisionPage({
             <CopyButton value={binding.policy_hash || ""} compact />
           </li>
           <li className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs text-slate-700">policy_resolution_hash: {binding.policy_resolution_hash || "-"}</span>
+            <CopyButton value={binding.policy_resolution_hash || ""} compact />
+          </li>
+          <li className="flex items-center justify-between gap-3">
             <span className="font-mono text-xs text-slate-700">snapshot_hash: {binding.snapshot_hash || "-"}</span>
             <CopyButton value={binding.snapshot_hash || ""} compact />
           </li>
           <li className="flex items-center justify-between gap-3">
             <span className="font-mono text-xs text-slate-700">decision_hash: {binding.decision_hash || "-"}</span>
             <CopyButton value={binding.decision_hash || ""} compact />
+          </li>
+          <li className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs text-slate-700">signal_bundle_hash: {binding.signal_bundle_hash || "-"}</span>
+            <CopyButton value={binding.signal_bundle_hash || ""} compact />
           </li>
         </ul>
       </div>

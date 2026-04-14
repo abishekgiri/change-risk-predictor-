@@ -3,7 +3,7 @@ Role-aware approval evaluator.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .types import Review, RoleAwareApprovalPolicy, RoleAwareApprovalResult
@@ -50,6 +50,15 @@ def normalize_approval_policy(raw: Optional[Dict[str, Any]]) -> RoleAwareApprova
     min_total = int(cfg.get("min_total", 1))
     if min_total < 0:
         min_total = 0
+    max_age_raw = cfg.get("max_age_seconds")
+    max_age_seconds: Optional[int] = None
+    if max_age_raw is not None:
+        try:
+            parsed = int(max_age_raw)
+            if parsed > 0:
+                max_age_seconds = parsed
+        except Exception:
+            max_age_seconds = None
 
     slugs = cfg.get("security_team_slugs", [])
     if not isinstance(slugs, list):
@@ -61,13 +70,29 @@ def normalize_approval_policy(raw: Optional[Dict[str, Any]]) -> RoleAwareApprova
         require_codeowner=bool(cfg.get("require_codeowner", False)),
         require_security_team=bool(cfg.get("require_security_team", False)),
         security_team_slugs=[str(s).strip() for s in slugs if str(s).strip()],
+        max_age_seconds=max_age_seconds,
     )
 
 
 def _dt(value: Optional[datetime]) -> datetime:
     if isinstance(value, datetime):
-        return value
-    return datetime.min
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _is_review_expired(
+    review: Review,
+    *,
+    max_age_seconds: Optional[int],
+    evaluation_time: datetime,
+) -> bool:
+    if max_age_seconds is None or max_age_seconds <= 0:
+        return False
+    submitted_at = _dt(review.submitted_at)
+    age_seconds = max(0.0, (evaluation_time - submitted_at).total_seconds())
+    return age_seconds > float(max_age_seconds)
 
 
 def _latest_reviews_by_user(reviews: Sequence[Review]) -> Dict[str, Review]:
@@ -117,14 +142,26 @@ def evaluate_role_aware_approvals(
     codeowner_users: Optional[Set[str]] = None,
     codeowner_teams: Optional[Set[str]] = None,
     team_members_by_slug: Optional[Dict[str, Sequence[str]]] = None,
+    evaluation_time: Optional[datetime] = None,
 ) -> RoleAwareApprovalResult:
+    evaluated_at = _dt(evaluation_time) if evaluation_time is not None else datetime.now(timezone.utc)
     latest = _latest_reviews_by_user(reviews)
 
     approved_fresh: Set[str] = set()
+    stale_reviewers: Set[str] = set()
+    expired_reviewers: Set[str] = set()
     for reviewer, review in latest.items():
         if str(review.state or "").upper() != "APPROVED":
             continue
         if is_review_stale(review, head_sha):
+            stale_reviewers.add(reviewer)
+            continue
+        if _is_review_expired(
+            review,
+            max_age_seconds=policy.max_age_seconds,
+            evaluation_time=evaluated_at,
+        ):
+            expired_reviewers.add(reviewer)
             continue
         approved_fresh.add(reviewer)
 
@@ -158,6 +195,8 @@ def evaluate_role_aware_approvals(
         reason_codes.append("APPROVALS_INSUFFICIENT")
         if policy.disallow_self_approval and self_approval_detected:
             reason_codes.append("SELF_APPROVAL_NOT_ALLOWED")
+        if expired_reviewers:
+            reason_codes.append("APPROVALS_EXPIRED")
     if codeowner_required and not codeowner_approved:
         reason_codes.append("CODEOWNER_APPROVAL_REQUIRED")
     if security_required and not security_approved:
@@ -175,4 +214,7 @@ def evaluate_role_aware_approvals(
         approved_by=sorted(counted),
         reason_codes=reason_codes,
         security_approvals_count=security_approvals_count,
+        stale_reviewers=sorted(stale_reviewers),
+        expired_reviewers=sorted(expired_reviewers),
+        max_age_seconds=policy.max_age_seconds,
     )

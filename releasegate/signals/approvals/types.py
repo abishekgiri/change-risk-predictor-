@@ -49,6 +49,7 @@ class RoleAwareApprovalPolicy:
     require_codeowner: bool = False
     require_security_team: bool = False
     security_team_slugs: list[str] = field(default_factory=list)
+    max_age_seconds: Optional[int] = None
 
 
 @dataclass
@@ -66,3 +67,6 @@ class RoleAwareApprovalResult:
     approved_by: list[str]
     reason_codes: list[str]
     security_approvals_count: int = 0
+    stale_reviewers: list[str] = field(default_factory=list)
+    expired_reviewers: list[str] = field(default_factory=list)
+    max_age_seconds: Optional[int] = None

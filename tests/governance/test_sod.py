@@ -25,6 +25,18 @@ def test_sod_detects_pr_author_approver_conflict():
     assert violation["reason_code"] == "SOD_PR_AUTHOR_APPROVER_CONFLICT"
 
 
+def test_sod_detects_policy_author_release_approver_conflict():
+    violation = evaluate_separation_of_duties(
+        actors={
+            "policy_created_by": {"alice@example.com"},
+            "release_approved_by": {"alice@example.com"},
+        },
+        config={"enabled": True},
+    )
+    assert violation is not None
+    assert violation["reason_code"] == "SOD_POLICY_AUTHOR_APPROVER_CONFLICT"
+
+
 def test_sod_passes_when_principals_are_distinct():
     violation = evaluate_separation_of_duties(
         actors={

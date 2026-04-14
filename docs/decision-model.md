@@ -64,7 +64,7 @@ Decision output is split into two parts:
 | `matched_policies` | `array<string>` | yes | `["SEC-PR-001"]` | Policies triggered by the input. |
 | `blocking_policies` | `array<string>` | yes | `["SEC-PR-001"]` | Subset of matched policies that force block. |
 | `inputs_present` | `object<string,bool>` | yes | `{"releasegate_risk": true}` | Input presence map for audit clarity. |
-| `input_snapshot` | `object` | yes | `{"signal_map": {...}, "policies_requested": ["SEC-PR-001"]}` | Replay snapshot. |
+| `input_snapshot` | `object` | yes | `{"signal_map": {...}, "policies_requested": ["SEC-PR-001"]}` | Replay snapshot, including `policy_resolution_hash` and freshness metadata when enforced. |
 | `unlock_conditions` | `array<string>` | yes | `["Request 2 approvals including Security"]` | Human actions to unblock. |
 | `policy_bindings[].policy_id` | `string` | yes | `"SEC-PR-001"` | Stable logical identifier. |
 | `policy_bindings[].policy_version` | `string` | yes | `"1.2.0"` | Author-declared version. |
@@ -86,7 +86,10 @@ Decision output is split into two parts:
 | `INVALID_POLICY_REFERENCE_STRICT` | Transition references unresolved policy IDs (strict mode blocks). |
 | `OVERRIDE_APPLIED` | Approved override applied. |
 | `OVERRIDE_EXPIRED` | Override request expired. |
+| `APPROVALS_EXPIRED` | Previously granted approvals expired under the configured freshness window. |
+| `APPROVALS_UNAVAILABLE` | Approval evidence source could not be loaded in strict mode. |
 | `OVERRIDE_JUSTIFICATION_REQUIRED` | Override requested without required justification. |
+| `SOD_POLICY_AUTHOR_APPROVER_CONFLICT` | Active policy author also satisfied the governed release approval path. |
 | `SOD_PR_AUTHOR_CANNOT_OVERRIDE` | Override blocked by separation-of-duties (PR author). |
 | `SOD_REQUESTOR_CANNOT_SELF_APPROVE` | Override blocked by separation-of-duties (requestor self-approval). |
 | `RISK_METADATA_FETCH_ERROR` | Risk metadata retrieval failed. |
