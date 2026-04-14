@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from fastapi.testclient import TestClient
 
@@ -26,6 +27,18 @@ def _unwrap_envelope(response) -> dict:
     assert body.get("trace_id")
     assert isinstance(body.get("data"), dict)
     return body["data"]
+
+
+def _metric_event_count(*, tenant_id: str, metric_name: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(1) FROM metrics_events WHERE tenant_id = ? AND metric_name = ?",
+            (tenant_id, metric_name),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
 
 
 def test_onboarding_status_defaults_to_simulation_when_config_missing():
@@ -149,6 +162,68 @@ def test_onboarding_setup_requires_admin_or_operator_role():
         },
     )
     assert response.status_code == 403
+
+
+def test_onboarding_setup_records_connect_and_scope_metrics_once():
+    _reset_db()
+    tenant_id = "tenant-onboarding-metrics"
+
+    first = client.post(
+        "/onboarding/setup",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={
+            "tenant_id": tenant_id,
+            "jira_instance_id": "https://jira.example.com",
+            "project_keys": ["PAYMENTS"],
+            "workflow_ids": ["wf-release"],
+            "transition_ids": ["31"],
+            "mode": "simulation",
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_jira_connected") == 1
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_transition_scope_ready") == 1
+
+    second = client.post(
+        "/onboarding/setup",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={
+            "tenant_id": tenant_id,
+            "jira_instance_id": "https://jira.example.com",
+            "project_keys": ["PAYMENTS"],
+            "workflow_ids": ["wf-release"],
+            "transition_ids": ["31"],
+            "mode": "simulation",
+        },
+    )
+    assert second.status_code == 200, second.text
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_jira_connected") == 1
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_transition_scope_ready") == 1
+
+
+def test_onboarding_telemetry_records_snapshot_shown_event():
+    _reset_db()
+    tenant_id = "tenant-onboarding-telemetry"
+
+    response = client.post(
+        "/onboarding/telemetry",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+        json={
+            "tenant_id": tenant_id,
+            "event_name": "snapshot_shown",
+            "metadata": {
+                "snapshot_ran_at": "2026-04-13T12:00:00+00:00",
+                "total_transitions": 87,
+                "starter_pack": "conservative",
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = _unwrap_envelope(response)
+    assert payload["status"] == "recorded"
+    assert payload["event_name"] == "snapshot_shown"
+    assert payload["recorded_at"]
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_snapshot_shown") == 1
 
 
 def test_jira_discovery_endpoints_return_expected_shapes(monkeypatch):

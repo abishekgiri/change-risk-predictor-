@@ -70,6 +70,8 @@ def _insert_decision(
     transition_id: str,
     risk_level: str,
     created_at: datetime,
+    approvals_required: bool = False,
+    approvals_satisfied: bool = True,
 ) -> None:
     payload = {
         "release_status": "ALLOWED",
@@ -85,6 +87,10 @@ def _insert_decision(
             },
             "signal_map": {
                 "risk": {"level": risk_level},
+                "approvals": {
+                    "required": approvals_required,
+                    "satisfied": approvals_satisfied,
+                },
             },
         },
     }
@@ -127,6 +133,18 @@ def _count_table_rows(*, table: str, tenant_id: str) -> int:
         row = conn.execute(
             f"SELECT COUNT(1) FROM {table} WHERE tenant_id = ?",
             (tenant_id,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def _metric_event_count(*, tenant_id: str, metric_name: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(1) FROM metrics_events WHERE tenant_id = ? AND metric_name = ?",
+            (tenant_id, metric_name),
         ).fetchone()
         return int(row[0] or 0) if row else 0
     finally:
@@ -186,6 +204,13 @@ def test_simulation_run_returns_expected_metrics_and_no_policy_side_effects():
     assert payload["allowed"] == 1
     assert payload["blocked_pct"] == 66.67
     assert payload["override_required"] == 2
+    assert payload["starter_pack"] == "conservative"
+    assert payload["insights"] == {
+        "high_risk_releases": 1,
+        "missing_approvals": 0,
+        "unmapped_transitions": 1,
+    }
+    assert "We analyzed your last 3 releases." in payload["summary"]
     assert payload["risk_distribution"] == {"low": 1, "medium": 1, "high": 1}
     assert payload["has_run"] is True
     assert payload["ran_at"]
@@ -228,6 +253,8 @@ def test_simulation_last_returns_last_persisted_run():
     assert last_payload["total_transitions"] == run_payload["total_transitions"]
     assert last_payload["blocked"] == run_payload["blocked"]
     assert last_payload["override_required"] == run_payload["override_required"]
+    assert last_payload["insights"] == run_payload["insights"]
+    assert last_payload["starter_pack"] == "conservative"
 
 
 def test_simulation_last_is_tenant_isolated():
@@ -261,6 +288,11 @@ def test_simulation_last_is_tenant_isolated():
     assert payload["has_run"] is False
     assert payload["total_transitions"] == 0
     assert payload["blocked"] == 0
+    assert payload["insights"] == {
+        "high_risk_releases": 0,
+        "missing_approvals": 0,
+        "unmapped_transitions": 0,
+    }
 
 
 def test_simulation_run_requires_supported_role():
@@ -276,3 +308,88 @@ def test_simulation_run_requires_supported_role():
         json={"tenant_id": tenant_id, "lookback_days": 30},
     )
     assert response.status_code == 403
+
+
+def test_simulation_starter_pack_flags_high_risk_and_missing_approvals_without_active_policy():
+    _reset_db()
+    tenant_id = "tenant-sim-starter-pack"
+    now = datetime.now(timezone.utc)
+
+    _insert_decision(
+        tenant_id=tenant_id,
+        decision_id="dec-risk",
+        transition_id="31",
+        risk_level="HIGH",
+        created_at=now - timedelta(days=1),
+    )
+    _insert_decision(
+        tenant_id=tenant_id,
+        decision_id="dec-approvals",
+        transition_id="31",
+        risk_level="LOW",
+        approvals_required=True,
+        approvals_satisfied=False,
+        created_at=now - timedelta(hours=2),
+    )
+
+    response = client.post(
+        "/simulation/run",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+        json={"tenant_id": tenant_id, "lookback_days": 30},
+    )
+    assert response.status_code == 200
+    payload = _unwrap_envelope(response)
+
+    assert payload["total_transitions"] == 2
+    assert payload["blocked"] == 2
+    assert payload["allowed"] == 0
+    assert payload["insights"] == {
+        "high_risk_releases": 1,
+        "missing_approvals": 1,
+        "unmapped_transitions": 2,
+    }
+
+
+def test_simulation_run_records_first_value_metrics_only_once():
+    _reset_db()
+    tenant_id = "tenant-sim-metrics"
+    _insert_active_transition_policy(tenant_id=tenant_id, transition_id="31")
+    now = datetime.now(timezone.utc)
+    _insert_decision(
+        tenant_id=tenant_id,
+        decision_id="dec-metrics",
+        transition_id="31",
+        risk_level="HIGH",
+        created_at=now - timedelta(hours=2),
+    )
+    setup_response = client.post(
+        "/onboarding/setup",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:write"]),
+        json={
+            "tenant_id": tenant_id,
+            "jira_instance_id": "https://jira.example.com",
+            "project_keys": ["PAYMENTS"],
+            "workflow_ids": ["wf-release"],
+            "transition_ids": ["31"],
+            "mode": "simulation",
+        },
+    )
+    assert setup_response.status_code == 200, setup_response.text
+
+    first = client.post(
+        "/simulation/run",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+        json={"tenant_id": tenant_id, "lookback_days": 30},
+    )
+    assert first.status_code == 200, first.text
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_first_value_ready") == 1
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_time_to_first_value_seconds") == 1
+
+    second = client.post(
+        "/simulation/run",
+        headers=jwt_headers(tenant_id=tenant_id, scopes=["policy:read"]),
+        json={"tenant_id": tenant_id, "lookback_days": 30},
+    )
+    assert second.status_code == 200, second.text
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_first_value_ready") == 1
+    assert _metric_event_count(tenant_id=tenant_id, metric_name="onboarding_time_to_first_value_seconds") == 1

@@ -74,7 +74,7 @@ from releasegate.quota import (
 from releasegate.security.anomaly_detector import record_anomaly_event
 from releasegate.utils.canonical import canonical_json, sha256_json
 from releasegate.storage import get_storage_backend
-from releasegate.observability.internal_metrics import snapshot as metrics_snapshot
+from releasegate.observability.internal_metrics import incr, snapshot as metrics_snapshot
 from releasegate.observability.slo_metrics import record_http_request, snapshot as slo_snapshot
 from releasegate.storage.migrations import MIGRATIONS
 from releasegate.storage.schema import SCHEMA_VERSION
@@ -1049,9 +1049,99 @@ class OnboardingActivationHistoryResponse(BaseModel):
     data: OnboardingActivationHistoryData
 
 
+class OnboardingTelemetryRequest(BaseModel):
+    tenant_id: Optional[str] = None
+    event_name: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OnboardingTelemetryData(BaseModel):
+    status: str = "recorded"
+    event_name: str
+    recorded_at: str
+
+
+class OnboardingTelemetryResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: OnboardingTelemetryData
+
+
+class Phase1ValidationTenantFilterData(BaseModel):
+    tenant_id: Optional[str] = None
+    tenant_prefix: Optional[str] = None
+
+
+class Phase1ValidationHesitationBandsData(BaseModel):
+    instant_trust: int = 0
+    acceptable_thinking: int = 0
+    hesitation_or_doubt: int = 0
+
+
+class Phase1ValidationExitCriteriaData(BaseModel):
+    sample_size_ready: bool = False
+    first_value_under_10_minutes: bool = False
+    canary_under_15_minutes: bool = False
+    onboarding_completion_gte_80_pct: bool = False
+    activation_drop_off_lt_20_pct: bool = False
+    median_hesitation_lt_5_seconds: bool = False
+    official_phase1_proven: bool = False
+
+
+class Phase1ValidationSessionData(BaseModel):
+    tenant_id: str
+    jira_connected_at: Optional[str] = None
+    transition_scope_ready_at: Optional[str] = None
+    first_value_ready_at: Optional[str] = None
+    canary_enabled_at: Optional[str] = None
+    time_to_first_value_seconds: Optional[int] = None
+    time_to_canary_seconds: Optional[int] = None
+    hesitation_seconds: Optional[int] = None
+    hesitation_band: Optional[str] = None
+    canary_enabled: bool = False
+    first_value_ready: bool = False
+    cohort: str
+    starter_pack: Optional[str] = None
+    total_transitions: Optional[int] = None
+    snapshot_confidence: Optional[str] = None
+    zero_transition_guard_hits: int = 0
+    rollback_count: int = 0
+
+
+class Phase1ValidationData(BaseModel):
+    window_days: int = 30
+    tenant_filter: Phase1ValidationTenantFilterData
+    sessions_count: int = 0
+    connected_count: int = 0
+    first_value_count: int = 0
+    canary_enabled_count: int = 0
+    onboarding_completion_rate: Optional[float] = None
+    canary_conversion_rate: Optional[float] = None
+    activation_drop_off_rate: Optional[float] = None
+    median_time_to_first_value_seconds: Optional[float] = None
+    median_time_to_canary_seconds: Optional[float] = None
+    median_hesitation_seconds: Optional[float] = None
+    hesitation_bands: Phase1ValidationHesitationBandsData
+    cohorts: Dict[str, int] = Field(default_factory=dict)
+    exit_criteria: Phase1ValidationExitCriteriaData
+    sessions: List[Phase1ValidationSessionData] = Field(default_factory=list)
+
+
+class Phase1ValidationResponse(BaseModel):
+    generated_at: str
+    trace_id: str
+    data: Phase1ValidationData
+
+
 class SimulationRunRequest(BaseModel):
     tenant_id: Optional[str] = None
     lookback_days: int = 30
+
+
+class SimulationInsightsData(BaseModel):
+    high_risk_releases: int = 0
+    missing_approvals: int = 0
+    unmapped_transitions: int = 0
 
 
 class SimulationResultData(BaseModel):
@@ -1062,6 +1152,9 @@ class SimulationResultData(BaseModel):
     blocked: int = 0
     blocked_pct: float = 0.0
     override_required: int = 0
+    starter_pack: str = "conservative"
+    insights: SimulationInsightsData = Field(default_factory=SimulationInsightsData)
+    summary: Optional[str] = None
     risk_distribution: Dict[str, int] = Field(default_factory=lambda: {"low": 0, "medium": 0, "high": 0})
     ran_at: Optional[str] = None
     has_run: bool = False
@@ -2981,6 +3074,81 @@ def _dashboard_generated_at() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_onboarding_metric(
+    *,
+    tenant_id: str,
+    metric_name: str,
+    metric_value: int = 1,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        incr(metric_name, value=metric_value, tenant_id=tenant_id, metadata=metadata)
+    except Exception:
+        pass
+
+
+def _record_onboarding_duration_metric(
+    *,
+    tenant_id: str,
+    metric_name: str,
+    started_at: Optional[str],
+    completed_at: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    raw_started = str(started_at or "").strip()
+    if not raw_started:
+        return
+    started_text = raw_started.replace("Z", "+00:00")
+    completed_text = str(completed_at or _dashboard_generated_at()).strip().replace("Z", "+00:00")
+    try:
+        started_dt = datetime.fromisoformat(started_text)
+        completed_dt = datetime.fromisoformat(completed_text)
+    except ValueError:
+        return
+    if started_dt.tzinfo is None:
+        started_dt = started_dt.replace(tzinfo=timezone.utc)
+    if completed_dt.tzinfo is None:
+        completed_dt = completed_dt.replace(tzinfo=timezone.utc)
+    duration_seconds = max(0, int((completed_dt.astimezone(timezone.utc) - started_dt.astimezone(timezone.utc)).total_seconds()))
+    _record_onboarding_metric(
+        tenant_id=tenant_id,
+        metric_name=metric_name,
+        metric_value=duration_seconds,
+        metadata=metadata,
+    )
+
+
+def _latest_metric_event(tenant_id: str, metric_name: str) -> Optional[Dict[str, Any]]:
+    try:
+        return get_storage_backend().fetchone(
+            """
+            SELECT metric_value, created_at, metadata_json
+            FROM metrics_events
+            WHERE tenant_id = ? AND metric_name = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (tenant_id, metric_name),
+        )
+    except Exception:
+        return None
+
+
+def _metric_event_metadata(event: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    raw_metadata = event.get("metadata_json")
+    if not raw_metadata:
+        return {}
+    if isinstance(raw_metadata, dict):
+        return dict(raw_metadata)
+    try:
+        parsed = json.loads(str(raw_metadata))
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
 def _dashboard_error_code(status_code: int) -> str:
     if status_code == 401:
         return "AUTH_REQUIRED"
@@ -4684,10 +4852,12 @@ def onboarding_setup_endpoint(
         rate_profile="default",
     ),
 ):
-    from releasegate.onboarding.service import save_onboarding_config
+    from releasegate.onboarding.service import get_onboarding_status, save_onboarding_config
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
     trace_id = _dashboard_trace_id(request)
+    previous_status = get_onboarding_status(tenant_id=effective_tenant)
+    previous_config = previous_status.get("config") or {}
     try:
         status_payload = save_onboarding_config(
             tenant_id=effective_tenant,
@@ -4700,6 +4870,25 @@ def onboarding_setup_endpoint(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    next_config = status_payload.get("config") or {}
+    if not str(previous_config.get("jira_instance_id") or "").strip() and str(next_config.get("jira_instance_id") or "").strip():
+        _record_onboarding_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_jira_connected",
+            metadata={
+                "project_count": len(list(next_config.get("project_keys") or [])),
+                "workflow_count": len(list(next_config.get("workflow_ids") or [])),
+            },
+        )
+    if not list(previous_config.get("transition_ids") or []) and list(next_config.get("transition_ids") or []):
+        _record_onboarding_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_transition_scope_ready",
+            metadata={
+                "transition_count": len(list(next_config.get("transition_ids") or [])),
+                "workflow_count": len(list(next_config.get("workflow_ids") or [])),
+            },
+        )
     response.headers["X-Request-Id"] = trace_id
     response.headers["Cache-Control"] = "private, no-store"
     return {
@@ -4747,10 +4936,16 @@ def onboarding_activation_update_endpoint(
         rate_profile="default",
     ),
 ):
-    from releasegate.onboarding.service import save_onboarding_activation
+    from releasegate.onboarding.service import (
+        get_onboarding_activation,
+        get_onboarding_status,
+        save_onboarding_activation,
+    )
 
     effective_tenant = _effective_tenant(auth, payload.tenant_id)
     trace_id = _dashboard_trace_id(request)
+    previous_activation = get_onboarding_activation(tenant_id=effective_tenant)
+    onboarding_status = get_onboarding_status(tenant_id=effective_tenant)
     try:
         activation_payload = save_onboarding_activation(
             tenant_id=effective_tenant,
@@ -4758,7 +4953,62 @@ def onboarding_activation_update_endpoint(
             canary_pct=payload.canary_pct,
         )
     except ValueError as exc:
+        if "Select at least one protected transition" in str(exc):
+            _record_onboarding_metric(
+                tenant_id=effective_tenant,
+                metric_name="onboarding_zero_transition_guard_triggered",
+                metadata={"target_mode": str(payload.mode or "simulation")},
+            )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if str(previous_activation.get("mode") or "") != str(activation_payload.get("mode") or ""):
+        _record_onboarding_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_protection_mode_changed",
+            metadata={
+                "from_mode": str(previous_activation.get("mode") or "simulation"),
+                "to_mode": str(activation_payload.get("mode") or "simulation"),
+            },
+        )
+    if str(previous_activation.get("mode") or "") != "canary" and str(activation_payload.get("mode") or "") == "canary":
+        _record_onboarding_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_canary_enabled",
+            metadata={"canary_pct": int(activation_payload.get("canary_pct") or 0)},
+        )
+        _record_onboarding_duration_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_time_to_canary_seconds",
+            started_at=((onboarding_status.get("config") or {}).get("created_at")),
+            completed_at=activation_payload.get("updated_at"),
+            metadata={"canary_pct": int(activation_payload.get("canary_pct") or 0)},
+        )
+        latest_snapshot_event = _latest_metric_event(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_snapshot_shown",
+        )
+        if latest_snapshot_event and latest_snapshot_event.get("created_at"):
+            snapshot_metadata = _metric_event_metadata(latest_snapshot_event)
+            hesitation_metadata: Dict[str, Any] = {
+                "canary_pct": int(activation_payload.get("canary_pct") or 0),
+            }
+            if snapshot_metadata.get("snapshot_ran_at"):
+                hesitation_metadata["snapshot_ran_at"] = str(snapshot_metadata.get("snapshot_ran_at"))
+            if snapshot_metadata.get("starter_pack"):
+                hesitation_metadata["starter_pack"] = str(snapshot_metadata.get("starter_pack"))
+            total_transitions_value = snapshot_metadata.get("total_transitions")
+            if total_transitions_value is not None:
+                try:
+                    hesitation_metadata["total_transitions"] = int(total_transitions_value)
+                except (TypeError, ValueError):
+                    pass
+            _record_onboarding_duration_metric(
+                tenant_id=effective_tenant,
+                metric_name="onboarding_snapshot_hesitation_seconds",
+                started_at=str(latest_snapshot_event.get("created_at") or ""),
+                completed_at=activation_payload.get("updated_at"),
+                metadata=hesitation_metadata,
+            )
 
     log_security_event(
         tenant_id=effective_tenant,
@@ -4816,6 +5066,85 @@ def onboarding_activation_history_endpoint(
     }
 
 
+@app.post("/onboarding/telemetry", response_model=OnboardingTelemetryResponse)
+def onboarding_telemetry_endpoint(
+    request: Request,
+    response: Response,
+    payload: OnboardingTelemetryRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    trace_id = _dashboard_trace_id(request)
+    event_name = str(payload.event_name or "").strip().lower()
+    metric_name = {
+        "snapshot_shown": "onboarding_snapshot_shown",
+    }.get(event_name)
+    if not metric_name:
+        raise HTTPException(status_code=400, detail="Unsupported onboarding telemetry event")
+
+    recorded_at = _dashboard_generated_at()
+    _record_onboarding_metric(
+        tenant_id=effective_tenant,
+        metric_name=metric_name,
+        metadata=dict(payload.metadata or {}),
+    )
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": recorded_at,
+        "trace_id": trace_id,
+        "data": {
+            "status": "recorded",
+            "event_name": event_name,
+            "recorded_at": recorded_at,
+        },
+    }
+
+
+@app.get("/internal/onboarding/phase1/validation", response_model=Phase1ValidationResponse)
+def onboarding_phase1_validation_endpoint(
+    request: Request,
+    response: Response,
+    days: int = 30,
+    tenant_id: Optional[str] = None,
+    tenant_prefix: Optional[str] = None,
+    limit: int = 50,
+    auth: AuthContext = require_access(
+        roles=["admin"],
+        scopes=["policy:read"],
+        allow_internal_service=True,
+        rate_profile="default",
+    ),
+):
+    from releasegate.onboarding.validation import build_phase1_validation_report
+
+    resolved_tenant = _effective_tenant(auth, tenant_id) if str(tenant_id or "").strip() else None
+    trace_id = _dashboard_trace_id(request)
+    try:
+        report = build_phase1_validation_report(
+            days=days,
+            tenant_id=resolved_tenant,
+            tenant_prefix=tenant_prefix,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response.headers["X-Request-Id"] = trace_id
+    response.headers["Cache-Control"] = "private, no-store"
+    return {
+        "generated_at": _dashboard_generated_at(),
+        "trace_id": trace_id,
+        "data": report,
+    }
+
+
 @app.post("/onboarding/activation/rollback", response_model=OnboardingActivationRollbackResponse)
 def onboarding_activation_rollback_endpoint(
     request: Request,
@@ -4836,6 +5165,15 @@ def onboarding_activation_rollback_endpoint(
         activation_payload = rollback_onboarding_activation(tenant_id=effective_tenant)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _record_onboarding_metric(
+        tenant_id=effective_tenant,
+        metric_name="onboarding_protection_rolled_back",
+        metadata={
+            "mode": str((activation_payload.get("activation") or {}).get("mode") or "simulation"),
+            "canary_pct": int(((activation_payload.get("activation") or {}).get("canary_pct")) or 0),
+        },
+    )
 
     log_security_event(
         tenant_id=effective_tenant,
@@ -4872,7 +5210,11 @@ def simulation_run_endpoint(
         rate_profile="heavy",
     ),
 ):
-    from releasegate.onboarding.simulation import run_historical_simulation
+    from releasegate.onboarding.service import get_onboarding_status
+    from releasegate.onboarding.simulation import (
+        get_last_historical_simulation,
+        run_historical_simulation,
+    )
     from releasegate.saas.plans import get_plan_tier
     from releasegate.saas.tenants import get_tenant_profile
 
@@ -4885,6 +5227,10 @@ def simulation_run_endpoint(
             status_code=400,
             detail=f"lookback_days exceeds plan limit ({plan.simulation_history_days} days for {plan.name})",
         )
+    previous_run = get_last_historical_simulation(
+        tenant_id=effective_tenant,
+        lookback_days=payload.lookback_days,
+    )
     try:
         result = run_historical_simulation(
             tenant_id=effective_tenant,
@@ -4907,6 +5253,28 @@ def simulation_run_endpoint(
             "override_required": int(result.get("override_required") or 0),
         },
     )
+    if not bool(previous_run.get("has_run")):
+        _record_onboarding_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_first_value_ready",
+            metadata={
+                "lookback_days": int(result.get("lookback_days") or payload.lookback_days),
+                "total_transitions": int(result.get("total_transitions") or 0),
+                "blocked": int(result.get("blocked") or 0),
+                "starter_pack": str(result.get("starter_pack") or "conservative"),
+            },
+        )
+        onboarding_status = get_onboarding_status(tenant_id=effective_tenant)
+        _record_onboarding_duration_metric(
+            tenant_id=effective_tenant,
+            metric_name="onboarding_time_to_first_value_seconds",
+            started_at=((onboarding_status.get("config") or {}).get("created_at")),
+            completed_at=result.get("ran_at"),
+            metadata={
+                "lookback_days": int(result.get("lookback_days") or payload.lookback_days),
+                "total_transitions": int(result.get("total_transitions") or 0),
+            },
+        )
 
     response.headers["X-Request-Id"] = trace_id
     response.headers["Cache-Control"] = "private, no-store"

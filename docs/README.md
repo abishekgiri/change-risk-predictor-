@@ -37,6 +37,9 @@ Current source-of-truth docs:
 - `forge-hardening.md` — Forge runtime hardening behavior
 - `ops/external-anchoring-runbook.md` — daily anchoring operations runbook
 - `ops/phase0-checkpoint-log.md` — manual Phase 0 reliability checkpoint history
+- `ops/phase1-onboarding-session-script.md` — facilitation guide for live onboarding validation sessions
+- `ops/phase1-validation-playbook.md` — how to prove Phase 1 with telemetry and real-user batches
+- `ops/phase1-validation-log-template.md` — note template and daily session table for Phase 1 validation
 - `attestations/dsse-intoto.md` — DSSE + in-toto interoperability contract
 - `contracts/` — versioned artifact contracts (`soc2_v1`, `checkpoint_v1`, `proof_pack_v1`)
 - `contracts/versioning_policy.md` — public artifact compatibility and deprecation policy

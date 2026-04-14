@@ -516,6 +516,9 @@ def save_onboarding_activation(
         raise ValueError("canary_pct is required when mode is canary")
     status_payload = get_onboarding_status(tenant_id=tenant_id)
     config = status_payload.get("config") or {}
+    transition_ids = _normalize_str_list(list(config.get("transition_ids") or []))
+    if normalized_mode in {"canary", "strict"} and not transition_ids:
+        raise ValueError("Select at least one protected transition before enabling canary or strict mode")
     previous_state = _activation_state_from_status(status_payload)
     normalized_canary_pct = normalize_canary_pct(mode=normalized_mode, canary_pct=canary_pct)
     if previous_state.mode != normalized_mode or previous_state.canary_pct != normalized_canary_pct:
