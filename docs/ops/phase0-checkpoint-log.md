@@ -93,7 +93,7 @@ Notes:
 - Onboarding 500s: `0`
 - Activation 500s: `0`
 - Tenant 500s: `0`
-- p95 latency: `PASS`
+- p95 latency: 319.537 ms
 - 5xx error rate: `0.0%`
 - Status: `PASS`
 
