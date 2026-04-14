@@ -13,6 +13,7 @@ from releasegate.storage.base import resolve_tenant_id
 DEFAULT_LOOKBACK_DAYS = 30
 MAX_LOOKBACK_DAYS = 90
 MAX_SIMULATION_ROWS = 20000
+DEFAULT_STARTER_PACK = "conservative"
 
 
 def _utc_now() -> datetime:
@@ -167,14 +168,61 @@ def _extract_event(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "environment": _normalize_text(request.get("environment")) or None,
         "actor": _normalize_text(row.get("link_actor")) or _normalize_text(request.get("actor_account_id")) or None,
         "risk_bucket": _risk_bucket(risk_score),
+        "signal_map": signal_map,
         "created_at": created_at,
     }
 
 
-def _evaluate_event(*, tenant_id: str, event: Dict[str, Any]) -> bool:
+def _approvals_missing(signal_map: Dict[str, Any]) -> bool:
+    if not isinstance(signal_map, dict):
+        return False
+
+    approvals = signal_map.get("approvals")
+    if isinstance(approvals, dict):
+        required = approvals.get("required")
+        satisfied = approvals.get("satisfied")
+        if required is not None or satisfied is not None:
+            return bool(required) and not bool(satisfied)
+
+    required = signal_map.get("approvals.required")
+    satisfied = signal_map.get("approvals.satisfied")
+    if required is None and satisfied is None:
+        return False
+    return bool(required) and not bool(satisfied)
+
+
+def _build_summary(*, total_transitions: int, insights: Dict[str, int]) -> Optional[str]:
+    if total_transitions <= 0:
+        return "No recent release decisions were available yet. Connect Jira and complete a few transitions to generate your first risk snapshot."
+
+    findings: List[str] = []
+    high_risk = int(insights.get("high_risk_releases") or 0)
+    missing_approvals = int(insights.get("missing_approvals") or 0)
+    unmapped_transitions = int(insights.get("unmapped_transitions") or 0)
+
+    if high_risk:
+        findings.append(f"{high_risk} looked high risk")
+    if missing_approvals:
+        findings.append(f"{missing_approvals} were missing approvals")
+    if unmapped_transitions:
+        findings.append(f"{unmapped_transitions} had no mapped protection")
+
+    if not findings:
+        return f"We analyzed your last {total_transitions} releases and found a clean baseline under the starter checks."
+
+    return f"We analyzed your last {total_transitions} releases. " + "; ".join(findings) + "."
+
+
+def _evaluate_event(*, tenant_id: str, event: Dict[str, Any]) -> Dict[str, Any]:
     transition_id = _normalize_text(event.get("transition_id"))
     if not transition_id:
-        return True
+        return {
+            "allow": True,
+            "has_policy": False,
+            "starter_pack_blocked": False,
+            "missing_approvals": False,
+            "high_risk": False,
+        }
     resolved = resolve_registry_policy(
         tenant_id=tenant_id,
         org_id=tenant_id,
@@ -189,6 +237,7 @@ def _evaluate_event(*, tenant_id: str, event: Dict[str, Any]) -> bool:
         if isinstance(resolved.get("effective_policy"), dict)
         else {}
     )
+    has_policy = bool(effective_policy)
     decision = _evaluate_effective_policy(
         effective_policy=effective_policy,
         transition_id=transition_id,
@@ -196,7 +245,17 @@ def _evaluate_event(*, tenant_id: str, event: Dict[str, Any]) -> bool:
         workflow_id=event.get("workflow_id"),
         environment=event.get("environment"),
     )
-    return bool(decision.get("allow"))
+    registry_allow = bool(decision.get("allow"))
+    high_risk = str(event.get("risk_bucket") or "").lower() == "high"
+    missing_approvals = _approvals_missing(event.get("signal_map") if isinstance(event.get("signal_map"), dict) else {})
+    starter_pack_blocked = high_risk or missing_approvals
+    return {
+        "allow": bool(registry_allow and not starter_pack_blocked),
+        "has_policy": has_policy,
+        "starter_pack_blocked": starter_pack_blocked,
+        "missing_approvals": missing_approvals,
+        "high_risk": high_risk,
+    }
 
 
 def _zero_result(*, tenant_id: str, lookback_days: int, has_run: bool, ran_at: Optional[str]) -> Dict[str, Any]:
@@ -208,6 +267,20 @@ def _zero_result(*, tenant_id: str, lookback_days: int, has_run: bool, ran_at: O
         "blocked": 0,
         "blocked_pct": 0.0,
         "override_required": 0,
+        "starter_pack": DEFAULT_STARTER_PACK,
+        "insights": {
+            "high_risk_releases": 0,
+            "missing_approvals": 0,
+            "unmapped_transitions": 0,
+        },
+        "summary": _build_summary(
+            total_transitions=0,
+            insights={
+                "high_risk_releases": 0,
+                "missing_approvals": 0,
+                "unmapped_transitions": 0,
+            },
+        ),
         "risk_distribution": {"low": 0, "medium": 0, "high": 0},
         "ran_at": ran_at,
         "has_run": bool(has_run),
@@ -234,6 +307,11 @@ def run_historical_simulation(
     allowed = 0
     blocked = 0
     risk_distribution = {"low": 0, "medium": 0, "high": 0}
+    insights = {
+        "high_risk_releases": 0,
+        "missing_approvals": 0,
+        "unmapped_transitions": 0,
+    }
 
     for row in rows:
         event = _extract_event(row)
@@ -244,7 +322,14 @@ def run_historical_simulation(
         if risk_key not in risk_distribution:
             risk_key = "low"
         risk_distribution[risk_key] += 1
-        if _evaluate_event(tenant_id=effective_tenant, event=event):
+        evaluation = _evaluate_event(tenant_id=effective_tenant, event=event)
+        if evaluation.get("high_risk"):
+            insights["high_risk_releases"] += 1
+        if evaluation.get("missing_approvals"):
+            insights["missing_approvals"] += 1
+        if not evaluation.get("has_policy", False):
+            insights["unmapped_transitions"] += 1
+        if evaluation.get("allow"):
             allowed += 1
         else:
             blocked += 1
@@ -262,6 +347,9 @@ def run_historical_simulation(
         "blocked": int(blocked),
         "blocked_pct": float(blocked_pct),
         "override_required": int(blocked),
+        "starter_pack": DEFAULT_STARTER_PACK,
+        "insights": insights,
+        "summary": _build_summary(total_transitions=total_transitions, insights=insights),
         "risk_distribution": risk_distribution,
         "ran_at": ran_at,
         "has_run": True,
@@ -337,6 +425,20 @@ def get_last_historical_simulation(
             "blocked": int(result.get("blocked") or 0),
             "blocked_pct": float(result.get("blocked_pct") or 0.0),
             "override_required": int(result.get("override_required") or 0),
+            "starter_pack": _normalize_text(result.get("starter_pack")) or DEFAULT_STARTER_PACK,
+            "insights": {
+                "high_risk_releases": int(((result.get("insights") or {}).get("high_risk_releases")) or 0),
+                "missing_approvals": int(((result.get("insights") or {}).get("missing_approvals")) or 0),
+                "unmapped_transitions": int(((result.get("insights") or {}).get("unmapped_transitions")) or 0),
+            },
+            "summary": _normalize_text(result.get("summary")) or _build_summary(
+                total_transitions=int(result.get("total_transitions") or 0),
+                insights={
+                    "high_risk_releases": int(((result.get("insights") or {}).get("high_risk_releases")) or 0),
+                    "missing_approvals": int(((result.get("insights") or {}).get("missing_approvals")) or 0),
+                    "unmapped_transitions": int(((result.get("insights") or {}).get("unmapped_transitions")) or 0),
+                },
+            ),
             "risk_distribution": {
                 "low": int(((result.get("risk_distribution") or {}).get("low")) or 0),
                 "medium": int(((result.get("risk_distribution") or {}).get("medium")) or 0),

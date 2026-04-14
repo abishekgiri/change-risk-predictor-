@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import json
 import uuid
 
@@ -15,7 +15,12 @@ _lock = Lock()
 _counters_by_tenant = defaultdict(Counter)
 
 
-def incr(metric: str, value: int = 1, tenant_id: Optional[str] = None) -> None:
+def incr(
+    metric: str,
+    value: int = 1,
+    tenant_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
     effective_tenant = resolve_tenant_id(tenant_id)
     with _lock:
         _counters_by_tenant[effective_tenant][metric] += int(value)
@@ -31,7 +36,7 @@ def incr(metric: str, value: int = 1, tenant_id: Optional[str] = None) -> None:
                 metric,
                 int(value),
                 datetime.now(timezone.utc).isoformat(),
-                json.dumps({}),
+                json.dumps(metadata or {}, separators=(",", ":"), ensure_ascii=False),
             ),
         )
     except Exception:

@@ -408,6 +408,13 @@ export interface SimulationResult {
   blocked: number;
   blocked_pct: number;
   override_required: number;
+  starter_pack: string;
+  insights: {
+    high_risk_releases: number;
+    missing_approvals: number;
+    unmapped_transitions: number;
+  };
+  summary: string | null;
   risk_distribution: {
     low: number;
     medium: number;
