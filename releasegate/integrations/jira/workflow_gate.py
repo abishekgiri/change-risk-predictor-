@@ -29,9 +29,11 @@ from releasegate.integrations.jira.config import (
 from releasegate.integrations.jira.approvals_orchestration import (
     build_approval_scope_payload,
     compute_approval_scope_hash,
+    evaluate_scope_approval_freshness,
     evaluate_cab_groups,
     list_active_scope_approvals,
     normalize_cab_groups,
+    resolve_approval_freshness_policy,
 )
 from releasegate.audit.recorder import AuditRecorder
 from releasegate.decision.types import Decision, EnforcementTargets, DecisionType, PolicyBinding
@@ -1152,6 +1154,7 @@ class WorkflowGate:
                 else {}
             )
             registry_effective_hash = str(registry_resolution.get("effective_policy_hash") or "").strip()
+            registry_resolution_hash = str(registry_resolution.get("policy_resolution_hash") or "").strip()
             registry_component_ids = [
                 str(policy_id)
                 for policy_id in (registry_resolution.get("component_policy_ids") or [])
@@ -1186,6 +1189,7 @@ class WorkflowGate:
                         "scope_type": component.get("scope_type"),
                         "scope_id": component.get("scope_id"),
                         "policy_hash": component.get("policy_hash"),
+                        "created_by": component.get("created_by"),
                     }
                 )
             if registry_effective_hash and registry_component_ids:
@@ -1232,6 +1236,7 @@ class WorkflowGate:
                         "risk_meta": risk_meta,
                         "registry_policy": {
                             "effective_policy_hash": registry_effective_hash,
+                            "policy_resolution_hash": registry_resolution_hash or None,
                             "component_policy_ids": registry_component_ids,
                             "component_lineage": registry_component_lineage,
                             "staged_component_lineage": registry_staged_lineage,
@@ -1256,6 +1261,18 @@ class WorkflowGate:
                     "policies_requested": policies,
                     "strict_mode": strict_mode,
                     "risk_meta": risk_meta,
+                    "policy_resolution_hash": registry_resolution_hash or None,
+                    "registry_policy": {
+                        "effective_policy_hash": registry_effective_hash,
+                        "policy_resolution_hash": registry_resolution_hash or None,
+                        "component_policy_ids": registry_component_ids,
+                        "component_lineage": registry_component_lineage,
+                        "staged_component_lineage": registry_staged_lineage,
+                        "resolution_conflicts": registry_resolution_conflicts,
+                        "component_policies": registry_component_policies,
+                        "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                        "shadow_evaluation": shadow_evaluation,
+                    },
                 }
                 if strict_mode:
                     return self._deny(
@@ -1389,10 +1406,62 @@ class WorkflowGate:
                     approval_scope_hash=approval_scope_hash,
                     limit=1000,
                 )
-            except Exception as e:
-                logger.warning("Failed to list active scope approvals: %s", e)
+            except TimeoutError as exc:
+                if strict_mode:
+                    return self._dependency_timeout_response(
+                        request,
+                        dependency="approval_source",
+                        evaluation_key=evaluation_key,
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        detail=str(exc),
+                    )
+                logger.warning("Timed out listing active scope approvals: %s", exc)
                 persisted_scope_approvals = []
-            for approval in persisted_scope_approvals:
+            except Exception as exc:
+                if strict_mode:
+                    return self._deny(
+                        request,
+                        evaluation_key=f"{evaluation_key}:approval-source-error",
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        reason_code="APPROVALS_UNAVAILABLE",
+                        message="BLOCKED: approval evidence source unavailable in strict mode",
+                        unlock_conditions=["Retry after the approval evidence source recovers."],
+                        event="jira.transition.approval_source_unavailable",
+                        dependency="approval_source",
+                        error_code="APPROVALS_UNAVAILABLE",
+                        policy_hash=policy_hash,
+                        policy_bindings=policy_bindings,
+                        inputs_present={"releasegate_risk": True},
+                        input_snapshot={
+                            "request": request.model_dump(mode="json"),
+                            "policy_resolution_hash": registry_resolution_hash or None,
+                            "risk_meta": risk_meta,
+                            "approval_scope": {
+                                "hash": approval_scope_hash,
+                                "payload": approval_scope_payload,
+                            },
+                            "approval_source_error": {
+                                "dependency": "approval_source",
+                                "detail": str(exc),
+                            },
+                        },
+                    )
+                logger.warning("Failed to list active scope approvals: %s", exc)
+                persisted_scope_approvals = []
+            approval_freshness_policy = resolve_approval_freshness_policy(registry_effective_policy)
+            approval_freshness = evaluate_scope_approval_freshness(
+                approvals=persisted_scope_approvals,
+                policy=approval_freshness_policy,
+                evaluation_time=datetime.now(timezone.utc),
+            )
+            effective_scope_approvals = list(approval_freshness.get("active_approvals") or [])
+            for approval in effective_scope_approvals:
                 actor_id = str(approval.get("approver_actor") or "").strip()
                 role = str(approval.get("approver_role") or "").strip()
                 if not actor_id:
@@ -1437,8 +1506,98 @@ class WorkflowGate:
                 or request.context_overrides.get("override_requested_by")
                 or ""
             ).strip()
+            policy_creator_principals = self._principal_set(
+                [
+                    component.get("created_by")
+                    for component in (registry_resolution.get("components") or [])
+                    if isinstance(component, dict)
+                ]
+            )
+            release_triggered_by = self._principal_set(
+                request.actor_account_id,
+                request.actor_email,
+            )
+            release_approved_by = {
+                str(approval.actor_id or "").strip().lower()
+                for approval in core_approvals
+                if str(approval.actor_id or "").strip()
+            }
             sod_inputs_present = bool(pr_author_id or override_requester_id or override_approvers or core_approvals)
             enforce_sod = bool(sod_inputs_present and sod_config.get("enabled", True))
+            if policy_creator_principals and enforce_sod:
+                policy_author_violation = evaluate_separation_of_duties(
+                    actors={
+                        "policy_created_by": policy_creator_principals,
+                        "release_approved_by": release_approved_by,
+                        "release_triggered_by": release_triggered_by,
+                        "pr_author": {pr_author_id} if pr_author_id else set(),
+                        "override_requested_by": {override_requester_id} if override_requester_id else set(),
+                        "override_approved_by": set(override_approvers),
+                    },
+                    config=sod_config,
+                )
+                if policy_author_violation:
+                    reason_code = str(policy_author_violation.get("reason_code") or "SOD_CONFLICT")
+                    message = str(policy_author_violation.get("message") or "separation-of-duties conflict")
+                    unlock_conditions = ["Use release approvers who did not author the active policy."]
+                    event = "jira.transition.sod_policy_author"
+                    if reason_code != "SOD_POLICY_AUTHOR_APPROVER_CONFLICT":
+                        unlock_conditions = ["Resolve separation-of-duties conflicts before retrying the release."]
+                        event = "jira.transition.sod_conflict"
+                    return self._deny(
+                        request,
+                        evaluation_key=f"{evaluation_key}:policy-author-sod",
+                        repo=repo,
+                        pr_number=pr_number,
+                        tenant_id=tenant_id,
+                        strict_mode=strict_mode,
+                        reason_code=reason_code,
+                        message=f"BLOCKED: {message}",
+                        unlock_conditions=unlock_conditions,
+                        event=event,
+                        error_code=reason_code,
+                        policy_hash=policy_hash,
+                        policy_bindings=policy_bindings,
+                        inputs_present={"releasegate_risk": True},
+                        input_snapshot={
+                            "request": request.model_dump(mode="json"),
+                            "policy_resolution_hash": registry_resolution_hash or None,
+                            "signal_map": signal_map,
+                            "policies_requested": policies,
+                            "registry_policy": {
+                                "effective_policy_hash": registry_effective_hash,
+                                "policy_resolution_hash": registry_resolution_hash or None,
+                                "component_policy_ids": registry_component_ids,
+                                "component_lineage": registry_component_lineage,
+                                "staged_component_lineage": registry_staged_lineage,
+                                "resolution_conflicts": registry_resolution_conflicts,
+                                "component_policies": registry_component_policies,
+                                "resolution_inputs": registry_resolution.get("resolution_inputs", {}),
+                                "shadow_evaluation": shadow_evaluation,
+                            },
+                            "strict_mode": strict_mode,
+                            "risk_meta": risk_meta,
+                            "approval_scope": {
+                                "hash": approval_scope_hash,
+                                "payload": approval_scope_payload,
+                                "approval_count": len(effective_scope_approvals),
+                                "stored_approval_count": len(persisted_scope_approvals),
+                            },
+                            "approval_freshness": {
+                                "enforced": bool(approval_freshness.get("enforced")),
+                                "max_age_seconds": approval_freshness.get("max_age_seconds"),
+                                "active_count": int(approval_freshness.get("active_count") or 0),
+                                "expired_count": int(approval_freshness.get("expired_count") or 0),
+                                "expired_actor_ids": list(approval_freshness.get("expired_actor_ids") or []),
+                            },
+                            "separation_of_duties": {
+                                "violation": policy_author_violation,
+                                "policy_created_by": sorted(policy_creator_principals),
+                                "release_approved_by": sorted(release_approved_by),
+                                "release_triggered_by": sorted(release_triggered_by),
+                            },
+                        },
+                    )
 
             core_condition_rules: List[CoreConditionRule] = []
             if isinstance(registry_effective_policy.get("rules"), list):
@@ -1513,7 +1672,7 @@ class WorkflowGate:
             cab_group_policy = normalize_cab_groups(registry_effective_policy)
             cab_result = evaluate_cab_groups(
                 groups=cab_group_policy,
-                approvals=persisted_scope_approvals,
+                approvals=effective_scope_approvals,
                 submitter_actor=request.actor_account_id,
             )
             if cab_result.get("required") and not cab_result.get("satisfied"):
@@ -1522,6 +1681,22 @@ class WorkflowGate:
                 if not decision_reason_code or decision_reason_code == "POLICY_ALLOWED":
                     decision_reason_code = "CAB_APPROVALS_REQUIRED"
                 requirements.extend([str(item) for item in (cab_result.get("missing_requirements") or []) if str(item).strip()])
+            expired_approval_count = int(approval_freshness.get("expired_count") or 0)
+            max_age_seconds = approval_freshness.get("max_age_seconds")
+            if expired_approval_count > 0 and (status != DecisionType.ALLOWED or (cab_result.get("required") and not cab_result.get("satisfied"))):
+                requirements.append(
+                    f"{expired_approval_count} stored approval"
+                    f"{'' if expired_approval_count == 1 else 's'} expired under the "
+                    f"{max_age_seconds}-second freshness window. Collect fresh approvals."
+                )
+                if not decision_reason_code or decision_reason_code in {
+                    "POLICY_ALLOWED",
+                    "POLICY_CONDITIONAL",
+                    "POLICY_RULE_CONDITIONAL",
+                    "POLICY_RULE_REQUIREMENTS_UNMET",
+                    "CAB_APPROVALS_REQUIRED",
+                }:
+                    decision_reason_code = "APPROVALS_EXPIRED"
 
             # Construct Decision Object manually since Engine returns ComplianceRunResult
             decision = self._build_decision(
@@ -1537,10 +1712,12 @@ class WorkflowGate:
                 policy_bindings=policy_bindings,
                 input_snapshot={
                     "request": request.model_dump(mode="json"),
+                    "policy_resolution_hash": registry_resolution_hash or None,
                     "signal_map": signal_map,
                     "policies_requested": policies,
                     "registry_policy": {
                         "effective_policy_hash": registry_effective_hash,
+                        "policy_resolution_hash": registry_resolution_hash or None,
                         "component_policy_ids": registry_component_ids,
                         "component_lineage": registry_component_lineage,
                         "staged_component_lineage": registry_staged_lineage,
@@ -1554,7 +1731,16 @@ class WorkflowGate:
                     "approval_scope": {
                         "hash": approval_scope_hash,
                         "payload": approval_scope_payload,
-                        "approval_count": len(persisted_scope_approvals),
+                        "approval_count": len(effective_scope_approvals),
+                        "stored_approval_count": len(persisted_scope_approvals),
+                        "expired_approval_count": expired_approval_count,
+                    },
+                    "approval_freshness": {
+                        "enforced": bool(approval_freshness.get("enforced")),
+                        "max_age_seconds": max_age_seconds,
+                        "active_count": int(approval_freshness.get("active_count") or 0),
+                        "expired_count": expired_approval_count,
+                        "expired_actor_ids": list(approval_freshness.get("expired_actor_ids") or []),
                     },
                     "approval_groups": cab_result,
                     "engine_core": {

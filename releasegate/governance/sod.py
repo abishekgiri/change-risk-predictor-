@@ -20,6 +20,13 @@ _DEFAULT_RULES = (
         "reason_code": "SOD_REQUESTER_APPROVER_CONFLICT",
         "message": "override requestor cannot self-approve",
     },
+    {
+        "name": "policy-author-cannot-approve-release",
+        "left": "policy_created_by",
+        "right": "release_approved_by",
+        "reason_code": "SOD_POLICY_AUTHOR_APPROVER_CONFLICT",
+        "message": "policy author cannot approve release",
+    },
 )
 
 

@@ -87,6 +87,9 @@ def _human_block_reason(reason_code: str) -> Optional[str]:
         "RISK_TOO_HIGH": "Blocked because risk score exceeded the configured threshold.",
         "OVERRIDE_EXPIRED": "Blocked because the override expired.",
         "OVERRIDE_REQUIRED": "Blocked because an approved override was required.",
+        "APPROVALS_EXPIRED": "Blocked because previously granted approvals were no longer fresh enough to count.",
+        "APPROVALS_UNAVAILABLE": "Blocked because approval evidence could not be loaded from the approval source.",
+        "SOD_POLICY_AUTHOR_APPROVER_CONFLICT": "Blocked because the same person authored the active policy and approved the release.",
         "TENANT_LOCKED": "Blocked because tenant security state is locked.",
         "MISSING_SIGNAL": "Blocked because a required signal attestation is missing.",
         "STALE_SIGNAL": "Blocked because a required signal attestation is stale.",
@@ -264,6 +267,7 @@ def build_decision_explainer(
     request = _request_payload(full_decision)
     signals = _signal_payload(full_decision)
     risk = _risk_payload(full_decision)
+    input_snapshot = full_decision.get("input_snapshot") if isinstance(full_decision.get("input_snapshot"), dict) else {}
     reason_code = str(full_decision.get("reason_code") or "")
     decision_status = str(decision_row.get("release_status") or "")
 
@@ -279,6 +283,7 @@ def build_decision_explainer(
     primary_binding = policy_bindings[0] if policy_bindings and isinstance(policy_bindings[0], dict) else {}
 
     context_overrides = request.get("context_overrides") if isinstance(request.get("context_overrides"), dict) else {}
+    registry_policy = input_snapshot.get("registry_policy") if isinstance(input_snapshot.get("registry_policy"), dict) else {}
     workflow_id = str(
         context_overrides.get("workflow_id")
         or request.get("workflow_id")
@@ -292,6 +297,11 @@ def build_decision_explainer(
     normalized_risk = _normalize_risk(risk, normalized_signals)
     evaluation_tree = _normalize_evaluation_tree(evidence.get("graph"))
     snapshot_hash = str(snapshot.get("policy_hash") or "") or None
+    policy_resolution_hash = (
+        str(input_snapshot.get("policy_resolution_hash") or "")
+        or str(registry_policy.get("policy_resolution_hash") or "")
+        or None
+    )
     policy_hash = (
         str(primary_binding.get("policy_hash") or "")
         or str(binding.get("policy_hash") or "")
@@ -299,6 +309,7 @@ def build_decision_explainer(
         or None
     )
     decision_hash = str(decision_row.get("decision_hash") or "") or None
+    signal_bundle_hash = str(binding.get("signal_bundle_hash") or "") or None
     replay_token = (
         str(decision_row.get("replay_hash") or "").strip()
         or str(decision_hash or "").strip()
@@ -335,12 +346,17 @@ def build_decision_explainer(
             "policy_hash": policy_hash,
             "snapshot_hash": snapshot_hash,
             "decision_hash": decision_hash,
+            "policy_resolution_hash": policy_resolution_hash,
+            "signal_bundle_hash": signal_bundle_hash,
             "binding_verified": bool(binding_verify.get("verified")),
         },
         "evaluation_tree": evaluation_tree,
         "signals": normalized_signals,
         "risk": normalized_risk,
         "evidence_links": evidence_links,
+        "approval_freshness": input_snapshot.get("approval_freshness")
+        if isinstance(input_snapshot.get("approval_freshness"), dict)
+        else {},
         "replay": {
             "path": replay_path,
             "token": replay_token,
@@ -355,6 +371,7 @@ def build_decision_explainer(
         "policy_id": primary_binding.get("policy_id") or binding.get("policy_id"),
         "policy_version": primary_binding.get("policy_version") or binding.get("snapshot_id"),
         "policy_hash": policy_hash,
+        "policy_resolution_hash": policy_resolution_hash,
         "snapshot_hash": snapshot_hash,
         "binding_verified": bool(binding_verify.get("verified")),
         "binding": binding_verify,

@@ -52,6 +52,7 @@ def _seed_decision_with_snapshot(*, tenant_id: str, decision_id: str) -> None:
     full_decision = {
         "reason_code": "RISK_TOO_HIGH",
         "input_snapshot": {
+            "policy_resolution_hash": "resolution-hash-1",
             "request": {
                 "issue_key": "RG-42",
                 "transition_id": "31",
@@ -64,6 +65,13 @@ def _seed_decision_with_snapshot(*, tenant_id: str, decision_id: str) -> None:
             },
             "signal_map": {"risk": {"score": 0.91, "level": "HIGH"}},
             "risk_meta": {"risk_score": 0.91, "risk_level": "HIGH"},
+            "approval_freshness": {
+                "enforced": True,
+                "max_age_seconds": 3600,
+                "active_count": 1,
+                "expired_count": 1,
+                "expired_actor_ids": ["acct-stale-1"],
+            },
         },
         "policy_bindings": [{"policy_id": "policy-prod", "policy_version": "2", "policy_hash": policy_hash}],
     }
@@ -136,6 +144,8 @@ def test_dashboard_decision_explainer_returns_binding_and_replay_link():
     assert body["snapshot_binding"]["policy_hash"]
     assert body["snapshot_binding"]["snapshot_hash"]
     assert body["snapshot_binding"]["decision_hash"] == f"decision-hash-{decision_id}"
+    assert body["snapshot_binding"]["policy_resolution_hash"] == "resolution-hash-1"
+    assert body["snapshot_binding"]["signal_bundle_hash"] == "signal-bundle-1"
     assert isinstance(body["signals"], list)
     assert body["signals"][0]["name"] == "risk"
     assert "source" in body["signals"][0]
@@ -143,6 +153,8 @@ def test_dashboard_decision_explainer_returns_binding_and_replay_link():
     assert isinstance(body["risk"]["components"], list)
     assert body["risk"]["score"] == 0.91
     assert isinstance(body["evidence_links"], list)
+    assert body["approval_freshness"]["enforced"] is True
+    assert body["approval_freshness"]["expired_count"] == 1
     assert body["replay"]["path"] == f"/decisions/{decision_id}/replay"
     assert body["replay"]["token"] == f"replay-hash-{decision_id}"
     assert "expires_at" in body["replay"]

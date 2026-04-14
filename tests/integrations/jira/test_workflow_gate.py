@@ -878,6 +878,318 @@ def test_gate_logs_shadow_evaluation_when_staged_policy_exists(MockEngine, base_
     assert snapshot["active_decision"] == "ALLOWED"
     assert snapshot["staged_decision"] == "BLOCKED"
     assert snapshot["staged_policy_ids"] == ["staged-2"]
+
+
+@patch("releasegate.engine.ComplianceEngine")
+def test_gate_expires_stored_approvals_under_freshness_window(MockEngine, base_request):
+    gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_run_result = MagicMock()
+    mock_policy_result = MagicMock()
+    mock_policy_result.policy_id = "SEC-PR-001"
+    mock_policy_result.status = "COMPLIANT"
+    mock_run_result.results = [mock_policy_result]
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    active_resolution = {
+        "effective_policy": {
+            "approvals": {"max_age_seconds": 300},
+            "rules": [
+                {
+                    "rule_id": "fresh-approval-required",
+                    "when": {"environment": "PRODUCTION"},
+                    "result": "WARN",
+                    "require": {"approvals": 1},
+                }
+            ],
+        },
+        "effective_policy_hash": "sha256:active",
+        "policy_resolution_hash": "resolution-hash-active",
+        "component_policy_ids": ["active-1"],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [
+            {
+                "policy_id": "active-1",
+                "scope_type": "transition",
+                "scope_id": "31",
+                "version": 1,
+                "policy_hash": "sha256:active",
+                "status": "ACTIVE",
+                "resolved_from_status": "ACTIVE",
+            }
+        ],
+        "resolution_inputs": {"org_id": "tenant-test", "project_id": "TEST", "workflow_id": "default", "transition_id": "31"},
+    }
+    staged_resolution = {
+        "effective_policy": {},
+        "effective_policy_hash": "",
+        "policy_resolution_hash": "",
+        "component_policy_ids": [],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [],
+        "resolution_inputs": {},
+    }
+    stale_created_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    captured = {}
+
+    def _record_with_timeout(decision, **_kwargs):
+        captured["decision"] = decision
+        return decision
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.policy.registry.resolve_registry_policy",
+        side_effect=[active_resolution, staged_resolution],
+    ), patch(
+        "releasegate.integrations.jira.workflow_gate.list_active_scope_approvals",
+        return_value=[
+            {
+                "approval_id": "approval-1",
+                "approver_actor": "alice",
+                "approver_role": "manager",
+                "created_at": stale_created_at,
+            }
+        ],
+    ), patch.object(gate, "_record_with_timeout", side_effect=_record_with_timeout):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "APPROVALS_EXPIRED"
+    assert captured["decision"].input_snapshot["policy_resolution_hash"] == "resolution-hash-active"
+    assert captured["decision"].input_snapshot["approval_freshness"]["expired_count"] == 1
+    assert captured["decision"].input_snapshot["approval_scope"]["approval_count"] == 0
+    assert captured["decision"].input_snapshot["approval_scope"]["stored_approval_count"] == 1
+
+
+@patch("releasegate.engine.ComplianceEngine")
+def test_gate_strict_blocks_when_stored_approval_source_times_out(MockEngine, base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_run_result = MagicMock()
+    mock_policy_result = MagicMock()
+    mock_policy_result.policy_id = "SEC-PR-001"
+    mock_policy_result.status = "COMPLIANT"
+    mock_run_result.results = [mock_policy_result]
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    active_resolution = {
+        "effective_policy": {
+            "approvals": {"max_age_seconds": 300},
+            "rules": [
+                {
+                    "rule_id": "fresh-approval-required",
+                    "when": {"environment": "PRODUCTION"},
+                    "result": "WARN",
+                    "require": {"approvals": 1},
+                }
+            ],
+        },
+        "effective_policy_hash": "sha256:active",
+        "policy_resolution_hash": "resolution-hash-active",
+        "component_policy_ids": ["active-1"],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [
+            {
+                "policy_id": "active-1",
+                "scope_type": "transition",
+                "scope_id": "31",
+                "version": 1,
+                "policy_hash": "sha256:active",
+                "status": "ACTIVE",
+                "resolved_from_status": "ACTIVE",
+            }
+        ],
+        "resolution_inputs": {"org_id": "tenant-test", "project_id": "TEST", "workflow_id": "default", "transition_id": "31"},
+    }
+    staged_resolution = {
+        "effective_policy": {},
+        "effective_policy_hash": "",
+        "policy_resolution_hash": "",
+        "component_policy_ids": [],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [],
+        "resolution_inputs": {},
+    }
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.policy.registry.resolve_registry_policy",
+        side_effect=[active_resolution, staged_resolution],
+    ), patch(
+        "releasegate.integrations.jira.workflow_gate.list_active_scope_approvals",
+        side_effect=TimeoutError("approval store timed out"),
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "DEPENDENCY_TIMEOUT"
+    assert "approval_source" in resp.reason
+
+
+@patch("releasegate.engine.ComplianceEngine")
+def test_gate_strict_blocks_when_stored_approval_source_errors(MockEngine, base_request):
+    with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "true"}):
+        gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_run_result = MagicMock()
+    mock_policy_result = MagicMock()
+    mock_policy_result.policy_id = "SEC-PR-001"
+    mock_policy_result.status = "COMPLIANT"
+    mock_run_result.results = [mock_policy_result]
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    active_resolution = {
+        "effective_policy": {
+            "approvals": {"max_age_seconds": 300},
+            "rules": [
+                {
+                    "rule_id": "fresh-approval-required",
+                    "when": {"environment": "PRODUCTION"},
+                    "result": "WARN",
+                    "require": {"approvals": 1},
+                }
+            ],
+        },
+        "effective_policy_hash": "sha256:active",
+        "policy_resolution_hash": "resolution-hash-active",
+        "component_policy_ids": ["active-1"],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [
+            {
+                "policy_id": "active-1",
+                "scope_type": "transition",
+                "scope_id": "31",
+                "version": 1,
+                "policy_hash": "sha256:active",
+                "status": "ACTIVE",
+                "resolved_from_status": "ACTIVE",
+            }
+        ],
+        "resolution_inputs": {"org_id": "tenant-test", "project_id": "TEST", "workflow_id": "default", "transition_id": "31"},
+    }
+    staged_resolution = {
+        "effective_policy": {},
+        "effective_policy_hash": "",
+        "policy_resolution_hash": "",
+        "component_policy_ids": [],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [],
+        "resolution_inputs": {},
+    }
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.policy.registry.resolve_registry_policy",
+        side_effect=[active_resolution, staged_resolution],
+    ), patch(
+        "releasegate.integrations.jira.workflow_gate.list_active_scope_approvals",
+        side_effect=RuntimeError("approval store unavailable"),
+    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "APPROVALS_UNAVAILABLE"
+    assert "approval evidence source unavailable" in resp.reason.lower()
+
+
+@patch("releasegate.engine.ComplianceEngine")
+def test_gate_blocks_when_policy_author_also_approves_release(MockEngine, base_request):
+    gate = WorkflowGate()
+    base_request.environment = "PRODUCTION"
+    gate.client.get_issue_property = MagicMock(return_value=_risk_property("LOW"))
+
+    mock_run_result = MagicMock()
+    mock_policy_result = MagicMock()
+    mock_policy_result.policy_id = "SEC-PR-001"
+    mock_policy_result.status = "COMPLIANT"
+    mock_run_result.results = [mock_policy_result]
+    MockEngine.return_value.evaluate.return_value = mock_run_result
+
+    active_resolution = {
+        "effective_policy": {
+            "approvals": {"max_age_seconds": 3600},
+        },
+        "effective_policy_hash": "sha256:active",
+        "policy_resolution_hash": "resolution-hash-active",
+        "component_policy_ids": ["active-1"],
+        "component_lineage": {
+            "transition": {
+                "policy_id": "active-1",
+                "version": 1,
+                "policy_hash": "sha256:active",
+                "scope_id": "31",
+                "created_by": "alice",
+                "status": "ACTIVE",
+                "resolved_from_status": "ACTIVE",
+            }
+        },
+        "resolution_conflicts": [],
+        "components": [
+            {
+                "policy_id": "active-1",
+                "scope_type": "transition",
+                "scope_id": "31",
+                "version": 1,
+                "policy_hash": "sha256:active",
+                "created_by": "alice",
+                "status": "ACTIVE",
+                "resolved_from_status": "ACTIVE",
+            }
+        ],
+        "resolution_inputs": {"org_id": "tenant-test", "project_id": "TEST", "workflow_id": "default", "transition_id": "31"},
+    }
+    staged_resolution = {
+        "effective_policy": {},
+        "effective_policy_hash": "",
+        "policy_resolution_hash": "",
+        "component_policy_ids": [],
+        "component_lineage": {},
+        "resolution_conflicts": [],
+        "components": [],
+        "resolution_inputs": {},
+    }
+    captured = {}
+
+    def _record_with_timeout(decision, **_kwargs):
+        captured["decision"] = decision
+        return decision
+
+    with patch.object(gate, "_resolve_policies", return_value=["SEC-PR-001"]), patch(
+        "releasegate.policy.registry.resolve_registry_policy",
+        side_effect=[active_resolution, staged_resolution],
+    ), patch(
+        "releasegate.integrations.jira.workflow_gate.list_active_scope_approvals",
+        return_value=[
+            {
+                "approval_id": "approval-1",
+                "approver_actor": "alice",
+                "approver_role": "manager",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ],
+    ), patch.object(gate, "_record_with_timeout", side_effect=_record_with_timeout):
+        resp = gate.check_transition(base_request)
+
+    assert resp.allow is False
+    assert resp.status == "BLOCKED"
+    assert resp.reason_code == "SOD_POLICY_AUTHOR_APPROVER_CONFLICT"
+    assert captured["decision"].input_snapshot["separation_of_duties"]["violation"]["reason_code"] == "SOD_POLICY_AUTHOR_APPROVER_CONFLICT"
+    assert captured["decision"].input_snapshot["registry_policy"]["component_policies"][0]["created_by"] == "alice"
+
+
 def test_gate_policy_registry_timeout_permissive_returns_skipped(base_request):
     with patch.dict(os.environ, {"RELEASEGATE_STRICT_MODE": "false"}):
         gate = WorkflowGate()
@@ -999,16 +1311,16 @@ def test_gate_strict_blocks_when_risk_fallback_fetch_fails(base_request):
         {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
     ):
         gate = WorkflowGate()
-    base_request.environment = "STAGING"
-    base_request.context_overrides = {
-        "repo": "abishekgiri/change-risk-predictor-",
-        "pr_number": 27,
-    }
-    gate.client.get_issue_property = MagicMock(return_value={})
-    with patch("releasegate.integrations.jira.workflow_gate.requests.get", side_effect=requests.RequestException("boom")), patch.object(
-        gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
-    ):
-        resp = gate.check_transition(base_request)
+        base_request.environment = "STAGING"
+        base_request.context_overrides = {
+            "repo": "abishekgiri/change-risk-predictor-",
+            "pr_number": 27,
+        }
+        gate.client.get_issue_property = MagicMock(return_value={})
+        with patch("releasegate.integrations.jira.workflow_gate.requests.get", side_effect=requests.RequestException("boom")), patch.object(
+            gate, "_record_with_timeout", side_effect=lambda decision, **_: decision
+        ):
+            resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
     assert resp.reason_code == "GITHUB_UNAVAILABLE"
@@ -1021,19 +1333,19 @@ def test_gate_strict_blocks_when_risk_scoring_fails(base_request):
         {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
     ):
         gate = WorkflowGate()
-    base_request.environment = "PRODUCTION"
-    base_request.context_overrides = {
-        "repo": "abishekgiri/change-risk-predictor-",
-        "pr_number": 27,
-    }
-    gate.client.get_issue_property = MagicMock(return_value={})
-    ok_pr = MagicMock(status_code=200)
-    ok_pr.json.return_value = {"changed_files": 3, "additions": 10, "deletions": 1}
-    with patch("releasegate.integrations.jira.workflow_gate.requests.get", return_value=ok_pr), patch(
-        "releasegate.integrations.jira.workflow_gate.classify_pr_risk",
-        side_effect=RuntimeError("model load failed"),
-    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
-        resp = gate.check_transition(base_request)
+        base_request.environment = "PRODUCTION"
+        base_request.context_overrides = {
+            "repo": "abishekgiri/change-risk-predictor-",
+            "pr_number": 27,
+        }
+        gate.client.get_issue_property = MagicMock(return_value={})
+        ok_pr = MagicMock(status_code=200)
+        ok_pr.json.return_value = {"changed_files": 3, "additions": 10, "deletions": 1}
+        with patch("releasegate.integrations.jira.workflow_gate.requests.get", return_value=ok_pr), patch(
+            "releasegate.integrations.jira.workflow_gate.classify_pr_risk",
+            side_effect=RuntimeError("model load failed"),
+        ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+            resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
     assert resp.reason_code == "RISK_SCORING_FAILED"
@@ -1046,16 +1358,16 @@ def test_gate_strict_blocks_when_repo_or_pr_not_found(base_request):
         {"RELEASEGATE_STRICT_MODE": "true", "GITHUB_TOKEN": "test-github-token"},
     ):
         gate = WorkflowGate()
-    base_request.environment = "STAGING"
-    base_request.context_overrides = {
-        "repo": "abishekgiri/change-risk-predictor-",
-        "pr_number": 999999,
-    }
-    with patch(
-        "releasegate.integrations.jira.workflow_gate.requests.get",
-        return_value=MagicMock(status_code=404),
-    ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
-        resp = gate.check_transition(base_request)
+        base_request.environment = "STAGING"
+        base_request.context_overrides = {
+            "repo": "abishekgiri/change-risk-predictor-",
+            "pr_number": 999999,
+        }
+        with patch(
+            "releasegate.integrations.jira.workflow_gate.requests.get",
+            return_value=MagicMock(status_code=404),
+        ), patch.object(gate, "_record_with_timeout", side_effect=lambda decision, **_: decision):
+            resp = gate.check_transition(base_request)
     assert resp.allow is False
     assert resp.status == "BLOCKED"
     assert resp.reason_code == "REPO_OR_PR_NOT_FOUND"

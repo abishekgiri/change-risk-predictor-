@@ -122,3 +122,20 @@ def test_latest_review_per_user_wins():
 
     assert result.total_approvals == 1
     assert result.reason_codes == []
+
+
+def test_approval_freshness_window_expires_old_reviews():
+    now = datetime.now(timezone.utc)
+    policy = normalize_approval_policy({"min_total": 1, "max_age_seconds": 300})
+    result = evaluate_role_aware_approvals(
+        reviews=[_review("alice", "APPROVED", now - timedelta(minutes=10))],
+        policy=policy,
+        head_sha="head123",
+        pr_author="bob",
+        evaluation_time=now,
+    )
+
+    assert result.total_approvals == 0
+    assert result.expired_reviewers == ["alice"]
+    assert result.max_age_seconds == 300
+    assert "APPROVALS_EXPIRED" in result.reason_codes
