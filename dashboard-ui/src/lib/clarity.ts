@@ -82,7 +82,7 @@ export function describeDecisionOutcome({
   const risk = decisionRiskBand(riskScore);
   const environment = decision.environment ? ` for ${decision.environment}` : "";
   const workflow = decision.workflow_id ? ` in workflow ${decision.workflow_id}` : "";
-  const blockedReason = decision.reason_code ? humanizeReasonCode(decision.reason_code) : decision.blocked_because || humanizeReasonCode(decision.reason_code);
+  const blockedReason = decision.blocked_because || humanizeReasonCode(decision.reason_code);
   const normalizedReason = String(decision.reason_code || "").trim().toUpperCase();
 
   if (decision.outcome === "BLOCK") {
