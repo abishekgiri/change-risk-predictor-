@@ -9076,10 +9076,13 @@ def jira_oauth_callback(
         expires_in=tokens.get("expires_in", 3600),
     )
 
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9_\-]{1,128}$", tenant_id):
+        raise HTTPException(status_code=400, detail="Invalid tenant identifier")
     base_url = os.getenv("RELEASEGATE_BASE_URL", "https://app.releasegate.io").rstrip("/")
-    redirect_url = f"{base_url}/onboarding?tenant_id={tenant_id}&jira=connected"
+    safe_path = f"/onboarding?tenant_id={requests.utils.quote(tenant_id, safe='')}&jira=connected"
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=redirect_url, status_code=302)
+    return RedirectResponse(url=f"{base_url}{safe_path}", status_code=302)
 
 
 @app.get("/integrations/jira/oauth/status")

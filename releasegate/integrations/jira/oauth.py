@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -214,8 +215,15 @@ def _encode_state(tenant_id: str, nonce: str) -> str:
     return base64.urlsafe_b64encode(f"{material}|{sig}".encode()).decode()
 
 
+_SAFE_TENANT_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,128}$")
+
+
 def decode_state(state: str) -> Optional[str]:
-    """Decode and verify the state param, returning the tenant_id or None."""
+    """Decode and verify the state param, returning the tenant_id or None.
+
+    The tenant_id is validated against a strict allowlist pattern to prevent
+    open-redirect or injection via crafted state values.
+    """
     import base64
     try:
         raw = base64.urlsafe_b64decode(state.encode()).decode()
@@ -224,7 +232,10 @@ def decode_state(state: str) -> Optional[str]:
         if sig != expected:
             return None
         data = json.loads(material)
-        return data.get("t")
+        tenant_id = data.get("t")
+        if not tenant_id or not _SAFE_TENANT_RE.match(str(tenant_id)):
+            return None
+        return str(tenant_id)
     except Exception:
         return None
 
