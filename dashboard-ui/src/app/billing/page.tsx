@@ -38,13 +38,18 @@ export default async function BillingPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Billing & Quotas</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {payload.tenant_id}</p>
           <p className="mt-1 text-sm text-slate-600">
             Plan: <span className="font-medium text-slate-900">{payload.plan}</span>
           </p>
         </div>
-        <TraceInfo traceId={payload.trace_id ?? usage.traceId} />
       </div>
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer w-fit">Debug</summary>
+        <div className="mt-1 space-y-0.5">
+          <p className="text-sm text-slate-600">Tenant: {payload.tenant_id}</p>
+          <TraceInfo traceId={payload.trace_id ?? usage.traceId} />
+        </div>
+      </details>
 
       <section className="grid gap-4 md:grid-cols-3">
         <KpiCard

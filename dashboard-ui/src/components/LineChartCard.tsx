@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -35,33 +35,57 @@ export function LineChartCard({
   height = 260,
   showDots = false,
 }: LineChartCardProps) {
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const hasData =
+    Array.isArray(data) &&
+    data.length > 0 &&
+    data.some((row) =>
+      series.some((s) => {
+        const v = row[s.key];
+        return v !== null && v !== undefined && Number(v) !== 0;
+      }),
+    );
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
-      <div className="mt-3" style={{ height }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} padding={{ left: 16, right: 16 }} />
-            <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
-            <Legend />
-            {series.map((entry) => (
-              <Line
-                key={entry.key}
-                type="monotone"
-                dataKey={entry.key}
-                name={entry.label}
-                stroke={entry.color}
-                strokeWidth={2}
-                dot={showDots}
-                activeDot={showDots ? { r: 5 } : false}
-                isAnimationActive={false}
-              />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      {!hasData ? (
+        <p className="mt-3 text-sm text-slate-500">No trend data available.</p>
+      ) : !mounted ? (
+        <div className="mt-3 flex items-center justify-center text-sm text-slate-400" style={{ height }}>
+          Loading chart…
+        </div>
+      ) : (
+        <div className="mt-3" style={{ height }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 11 }} padding={{ left: 16, right: 16 }} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip />
+              <Legend />
+              {series.map((entry) => (
+                <Line
+                  key={entry.key}
+                  type="monotone"
+                  dataKey={entry.key}
+                  name={entry.label}
+                  stroke={entry.color}
+                  strokeWidth={2}
+                  dot={showDots}
+                  activeDot={showDots ? { r: 5 } : false}
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
     </div>
   );
 }

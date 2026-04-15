@@ -3,7 +3,7 @@
 **Date:** 2026-04-14
 **Site:** https://app.releasegate.io
 **Tenant:** local
-**Tester:** Claude Code (automated)
+**Tester:** Automated QA
 
 ---
 

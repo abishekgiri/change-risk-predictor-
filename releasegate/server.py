@@ -5117,7 +5117,7 @@ def onboarding_phase1_validation_endpoint(
     tenant_prefix: Optional[str] = None,
     limit: int = 50,
     auth: AuthContext = require_access(
-        roles=["admin"],
+        roles=["admin", "operator"],
         scopes=["policy:read"],
         allow_internal_service=True,
         rate_profile="default",

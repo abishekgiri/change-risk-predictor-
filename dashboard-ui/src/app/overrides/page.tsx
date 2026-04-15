@@ -45,10 +45,15 @@ export default async function OverridesPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Override Breakdown</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
-        <TraceInfo traceId={breakdown.data.trace_id ?? breakdown.traceId} />
       </div>
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer w-fit">Debug</summary>
+        <div className="mt-1 space-y-0.5">
+          <p className="text-sm text-slate-600">Tenant: {scope.tenantId}</p>
+          <TraceInfo traceId={breakdown.data.trace_id ?? breakdown.traceId} />
+        </div>
+      </details>
 
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <form action="/overrides" method="get" className="flex flex-wrap items-end gap-3">

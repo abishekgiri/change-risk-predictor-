@@ -80,10 +80,15 @@ export default async function CustomerSuccessPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Executive Impact</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
-        <TraceInfo traceId={traceId} />
       </div>
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer w-fit">Debug</summary>
+        <div className="mt-1 space-y-0.5">
+          <p className="text-sm text-slate-600">Tenant: {scope.tenantId}</p>
+          <TraceInfo traceId={traceId} />
+        </div>
+      </details>
 
       <section className="grid gap-4 md:grid-cols-3">
         <KpiCard

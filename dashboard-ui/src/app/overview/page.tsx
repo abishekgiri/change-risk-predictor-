@@ -200,8 +200,11 @@ export default async function OverviewPage({
     href?: string;
     source: string;
   }> = [];
+  const seenTitles = new Set<string>();
   for (const alert of alertsResp.data.alerts.slice(0, 5)) {
     const narrative = plainEnglishRiskCardFromAlert(alert);
+    if (seenTitles.has(narrative.title)) continue;
+    seenTitles.add(narrative.title);
     topRisks.push({
       title: narrative.title,
       whatHappened: narrative.whatHappened,
@@ -216,6 +219,8 @@ export default async function OverviewPage({
   for (const reco of recommendationsResp.data.recommendations) {
     if (topRisks.length >= 3) break;
     const narrative = plainEnglishRiskCardFromRecommendation(reco);
+    if (seenTitles.has(narrative.title)) continue;
+    seenTitles.add(narrative.title);
     topRisks.push({
       title: narrative.title,
       whatHappened: narrative.whatHappened,
@@ -229,16 +234,19 @@ export default async function OverviewPage({
   if (topRisks.length < 3 && blockedResp.data.items[0]) {
     const item = blockedResp.data.items[0];
     const narrative = plainEnglishRiskCardFromBlocked(item);
-    topRisks.push({
-      title: narrative.title,
-      whatHappened: narrative.whatHappened,
-      whyItMatters: narrative.whyItMatters,
-      consequence: narrative.consequence,
-      whatToDo: narrative.whatToDo,
-      href: `/decisions/${item.decision_id}?tenant_id=${encodeURIComponent(scope.tenantId)}`,
-      severity: narrative.severity === "high" ? "high" : narrative.severity === "low" ? "low" : "medium",
-      source: "Blocked release",
-    });
+    if (!seenTitles.has(narrative.title)) {
+      seenTitles.add(narrative.title);
+      topRisks.push({
+        title: narrative.title,
+        whatHappened: narrative.whatHappened,
+        whyItMatters: narrative.whyItMatters,
+        consequence: narrative.consequence,
+        whatToDo: narrative.whatToDo,
+        href: `/decisions/${item.decision_id}?tenant_id=${encodeURIComponent(scope.tenantId)}`,
+        severity: narrative.severity === "high" ? "high" : narrative.severity === "low" ? "low" : "medium",
+        source: "Blocked release",
+      });
+    }
   }
 
   const execDashboardItems = [
@@ -284,10 +292,15 @@ export default async function OverviewPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Executive Overview</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
         </div>
-        <TraceInfo traceId={overviewResp.data.trace_id ?? overviewResp.traceId} />
       </div>
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer w-fit">Debug</summary>
+        <div className="mt-1 space-y-0.5">
+          <p className="text-sm text-slate-600">Tenant: {scope.tenantId}</p>
+          <TraceInfo traceId={overviewResp.data.trace_id ?? overviewResp.traceId} />
+        </div>
+      </details>
 
       <section className={`rounded-2xl border p-6 shadow-sm ${statusTheme.classes}`}>
         <div className="flex flex-wrap items-start justify-between gap-4">

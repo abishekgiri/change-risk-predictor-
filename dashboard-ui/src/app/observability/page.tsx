@@ -117,13 +117,18 @@ export default async function ObservabilityPage({
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Observability</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {scope.tenantId}</p>
           <p className="mt-1 text-sm text-slate-500">
             Detailed governance metrics for engineering and security teams.
           </p>
         </div>
-        <TraceInfo traceId={traceId} />
       </div>
+      <details className="text-xs text-slate-400">
+        <summary className="cursor-pointer w-fit">Debug</summary>
+        <div className="mt-1 space-y-0.5">
+          <p className="text-sm text-slate-600">Tenant: {scope.tenantId}</p>
+          <TraceInfo traceId={traceId} />
+        </div>
+      </details>
 
       <section className="grid gap-4 md:grid-cols-4">
         {metricOptions.map((entry) => (
