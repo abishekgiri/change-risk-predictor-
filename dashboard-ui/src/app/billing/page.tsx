@@ -1,5 +1,5 @@
+import { BillingActions } from "@/components/BillingActions";
 import { KpiCard } from "@/components/KpiCard";
-import { TraceInfo } from "@/components/TraceInfo";
 import { backendFetch } from "@/lib/backend";
 import { resolveDashboardScope } from "@/lib/dashboard-scope";
 import type { BillingUsage } from "@/lib/types";
@@ -15,6 +15,12 @@ function renderUsagePercent(value: number | null): string {
   if (value === null) return "N/A";
   return `${value.toFixed(2)}%`;
 }
+
+const planFeatures: Record<string, { price: string; features: string[] }> = {
+  starter: { price: "Free", features: ["5,000 decisions/mo", "200 overrides/mo", "7-day history"] },
+  growth: { price: "$299/mo", features: ["50,000 decisions/mo", "2,000 overrides/mo", "30-day history"] },
+  enterprise: { price: "Custom", features: ["Unlimited decisions", "Unlimited overrides", "365-day history"] },
+};
 
 export default async function BillingPage({
   searchParams,
@@ -32,19 +38,51 @@ export default async function BillingPage({
   });
 
   const payload = usage.data;
+  const currentPlan = payload.plan || "starter";
 
   return (
     <div className="space-y-6">
       <div className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Billing & Quotas</h1>
-          <p className="mt-1 text-sm text-slate-600">Tenant: {payload.tenant_id}</p>
           <p className="mt-1 text-sm text-slate-600">
-            Plan: <span className="font-medium text-slate-900">{payload.plan}</span>
+            Plan: <span className="font-medium text-slate-900 capitalize">{currentPlan}</span>
           </p>
         </div>
-        <TraceInfo traceId={payload.trace_id ?? usage.traceId} />
+        <details className="text-right text-xs text-slate-400">
+          <summary className="cursor-pointer">Debug</summary>
+          <p>Tenant: {payload.tenant_id}</p>
+          <p>trace_id: {payload.trace_id ?? usage.traceId}</p>
+        </details>
       </div>
+
+      <section className="grid gap-4 md:grid-cols-3">
+        {Object.entries(planFeatures).map(([planId, info]) => (
+          <div
+            key={planId}
+            className={`rounded-xl border-2 p-5 ${
+              currentPlan === planId
+                ? "border-slate-900 bg-slate-50"
+                : "border-slate-200 bg-white"
+            }`}
+          >
+            <div className="flex items-baseline justify-between">
+              <h3 className="font-semibold capitalize text-slate-900">{planId}</h3>
+              <span className="text-sm font-medium text-slate-600">{info.price}</span>
+            </div>
+            <ul className="mt-3 space-y-1">
+              {info.features.map((f) => (
+                <li key={f} className="text-sm text-slate-600">{f}</li>
+              ))}
+            </ul>
+            {currentPlan === planId && (
+              <p className="mt-3 text-xs font-semibold text-slate-900">Current Plan</p>
+            )}
+          </div>
+        ))}
+      </section>
+
+      <BillingActions tenantId={scope.tenantId} currentPlan={currentPlan} />
 
       <section className="grid gap-4 md:grid-cols-3">
         <KpiCard
