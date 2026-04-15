@@ -19,9 +19,37 @@ class JiraClient:
         self.base_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
         self.email = os.getenv("JIRA_EMAIL", "")
         self.token = os.getenv("JIRA_API_TOKEN", "")
-        self.auth = (self.email, self.token)
+        self.auth = (self.email, self.token) if self.email and self.token else None
         self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
         self.default_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_TIMEOUT_SECONDS", "5"))
+
+    @classmethod
+    def from_tenant_credentials(cls, tenant_id: str) -> "JiraClient":
+        """Create a client using stored OAuth credentials for a tenant."""
+        from releasegate.integrations.jira.oauth import get_jira_credentials
+        creds = get_jira_credentials(tenant_id)
+        if not creds or not creds.get("access_token"):
+            raise JiraClientError(f"No Jira credentials found for tenant {tenant_id}")
+        client = cls.__new__(cls)
+        client.base_url = f"https://api.atlassian.com/ex/jira/{creds['cloud_id']}"
+        client.email = ""
+        client.token = ""
+        client.auth = None
+        client.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {creds['access_token']}",
+        }
+        client.default_timeout_seconds = float(os.getenv("RELEASEGATE_JIRA_TIMEOUT_SECONDS", "5"))
+        return client
+
+    @classmethod
+    def for_tenant(cls, tenant_id: str) -> "JiraClient":
+        """Create a client preferring OAuth credentials, falling back to env vars."""
+        try:
+            return cls.from_tenant_credentials(tenant_id)
+        except JiraClientError:
+            return cls()
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"

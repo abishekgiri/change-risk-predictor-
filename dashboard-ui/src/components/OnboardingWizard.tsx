@@ -277,6 +277,9 @@ export function OnboardingWizard({ defaultTenantId }: { defaultTenantId: string 
   const [transitions, setTransitions] = useState<JiraTransitionsDiscoveryResponse["items"]>([]);
 
   const [jiraInstanceId, setJiraInstanceId] = useState("");
+  const [jiraOAuthConnected, setJiraOAuthConnected] = useState(false);
+  const [jiraOAuthSiteUrl, setJiraOAuthSiteUrl] = useState("");
+  const [jiraOAuthLoading, setJiraOAuthLoading] = useState(false);
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
   const [selectedWorkflows, setSelectedWorkflows] = useState<string[]>([]);
   const [selectedTransitions, setSelectedTransitions] = useState<string[]>([]);
@@ -559,6 +562,18 @@ export function OnboardingWizard({ defaultTenantId }: { defaultTenantId: string 
 
   useEffect(() => {
     void loadStatusAndDiscovery();
+    fetch(`/api/integrations/jira/oauth/status?tenant_id=${encodeURIComponent(tenantId)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.connected) {
+          setJiraOAuthConnected(true);
+          setJiraOAuthSiteUrl(data.site_url || "");
+          if (data.site_url && !jiraInstanceId) {
+            setJiraInstanceId(data.site_url);
+          }
+        }
+      })
+      .catch(() => {});
   }, [tenantId]);
 
   useEffect(() => {
@@ -910,16 +925,70 @@ export function OnboardingWizard({ defaultTenantId }: { defaultTenantId: string 
           </div>
         </div>
 
-        <label className="mt-4 block text-sm font-medium text-slate-700">
-          Jira instance
-          <input
-            type="text"
-            value={jiraInstanceId}
-            onChange={(event) => setJiraInstanceId(event.target.value)}
-            placeholder="https://your-domain.atlassian.net"
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
-          />
-        </label>
+        {jiraOAuthConnected ? (
+          <div className="mt-4 flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <span className="text-xl text-emerald-600">&#10003;</span>
+            <div className="flex-1">
+              <p className="font-medium text-emerald-900">Connected to Jira</p>
+              <p className="text-sm text-emerald-700">{jiraOAuthSiteUrl}</p>
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                await fetch(`/api/integrations/jira/oauth/disconnect?tenant_id=${encodeURIComponent(tenantId)}`, { method: "POST" });
+                setJiraOAuthConnected(false);
+                setJiraOAuthSiteUrl("");
+              }}
+              className="text-sm text-red-600 hover:text-red-800"
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <div className="rounded-xl border-2 border-dashed border-blue-200 bg-blue-50 p-5 text-center">
+              <p className="text-sm font-medium text-slate-700">Connect with one click using OAuth</p>
+              <button
+                type="button"
+                disabled={jiraOAuthLoading}
+                onClick={async () => {
+                  setJiraOAuthLoading(true);
+                  try {
+                    const res = await fetch(`/api/integrations/jira/oauth/authorize?tenant_id=${encodeURIComponent(tenantId)}`);
+                    const data = await res.json();
+                    if (data.authorize_url) {
+                      window.location.href = data.authorize_url;
+                    }
+                  } catch {
+                    setError("Could not start Jira connection. Try the manual option below.");
+                  } finally {
+                    setJiraOAuthLoading(false);
+                  }
+                }}
+                className="mt-3 rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
+              >
+                {jiraOAuthLoading ? "Connecting..." : "Connect to Jira"}
+              </button>
+              <p className="mt-2 text-xs text-slate-500">Uses OAuth 2.0 — we never store your Jira password</p>
+            </div>
+
+            <details className="text-sm">
+              <summary className="cursor-pointer text-slate-500 hover:text-slate-700">
+                Or enter your Jira URL manually
+              </summary>
+              <label className="mt-3 block text-sm font-medium text-slate-700">
+                Jira instance
+                <input
+                  type="text"
+                  value={jiraInstanceId}
+                  onChange={(event) => setJiraInstanceId(event.target.value)}
+                  placeholder="https://your-domain.atlassian.net"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+                />
+              </label>
+            </details>
+          </div>
+        )}
         {jiraConnected ? (
           <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
             We found {discoveredProjectsCount} projects and {discoveredWorkflowsCount} workflows so far.

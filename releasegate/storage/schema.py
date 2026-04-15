@@ -3545,6 +3545,73 @@ def init_db() -> str:
         END;
         """
     )
+
+    # ---- Self-serve platform tables ----
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_accounts (
+            user_id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_login_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_accounts_email ON user_accounts(email)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_accounts_tenant ON user_accounts(tenant_id)")
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_jira_credentials (
+            tenant_id TEXT PRIMARY KEY,
+            cloud_id TEXT NOT NULL,
+            site_url TEXT NOT NULL,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT NOT NULL,
+            token_expires_at TEXT NOT NULL,
+            scopes TEXT NOT NULL DEFAULT '',
+            connected_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_billing_info (
+            tenant_id TEXT PRIMARY KEY,
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            subscription_status TEXT DEFAULT 'none',
+            current_plan TEXT DEFAULT 'starter',
+            billing_email TEXT,
+            trial_ends_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tenant_notification_preferences (
+            tenant_id TEXT PRIMARY KEY,
+            email_alerts_enabled INTEGER NOT NULL DEFAULT 1,
+            email_digest_enabled INTEGER NOT NULL DEFAULT 1,
+            digest_frequency TEXT NOT NULL DEFAULT 'weekly',
+            alert_recipients TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
     conn.commit()
     auto_migrate = (os.getenv("RELEASEGATE_AUTO_MIGRATE", "true").strip().lower() in {"1", "true", "yes", "on"})
     current_version = apply_sqlite_migrations(conn, auto_apply=auto_migrate)

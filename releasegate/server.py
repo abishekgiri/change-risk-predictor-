@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 from releasegate.security.auth import require_access, tenant_from_request
+from releasegate.security.headers import SecurityHeadersMiddleware
 from releasegate.security.audit import log_security_event
 from releasegate.security.api_keys import create_api_key, list_api_keys, revoke_api_key, rotate_api_key
 from releasegate.security.checkpoint_keys import list_checkpoint_signing_keys, rotate_checkpoint_signing_key
@@ -176,6 +177,8 @@ if ALLOWED_ORIGINS:
         allow_headers=["*"],
         expose_headers=["X-Request-Id"],
     )
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.middleware("http")
@@ -1262,6 +1265,28 @@ class DashboardBillingUsageResponse(BaseModel):
     generated_at: str
     trace_id: str
     data: DashboardBillingUsageData
+
+
+# --- Self-Serve Platform Models ---
+
+class SignupRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    org_name: str = Field(..., min_length=1, max_length=255)
+    plan: str = Field(default="starter")
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class BillingCheckoutRequest(BaseModel):
+    plan: str
+
+class NotificationPreferencesUpdate(BaseModel):
+    email_alerts_enabled: bool = True
+    email_digest_enabled: bool = True
+    digest_frequency: str = "weekly"
+    alert_recipients: List[str] = Field(default_factory=list)
 
 
 # --- Config ---
@@ -8961,3 +8986,240 @@ def verify_release_attestation(
         except Exception:
             pass
     return report
+
+
+# ============================================================================
+# Self-Serve Platform Endpoints
+# ============================================================================
+
+
+@app.post("/auth/signup")
+def auth_signup_endpoint(payload: SignupRequest):
+    from releasegate.auth.signup import create_user_account
+    try:
+        result = create_user_account(
+            email=payload.email,
+            password=payload.password,
+            org_name=payload.org_name,
+            plan=payload.plan,
+        )
+        return JSONResponse(content=result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/auth/login")
+def auth_login_endpoint(payload: LoginRequest):
+    from releasegate.auth.signup import authenticate_user
+    result = authenticate_user(email=payload.email, password=payload.password)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return JSONResponse(content=result)
+
+
+@app.get("/auth/me")
+def auth_me_endpoint(
+    auth: AuthContext = require_access(roles=["owner", "admin", "operator", "auditor", "viewer"]),
+):
+    from releasegate.auth.signup import get_user_profile
+    profile = get_user_profile(auth.principal_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    return JSONResponse(content=profile)
+
+
+# --- Jira OAuth ---
+
+@app.get("/integrations/jira/oauth/authorize")
+def jira_oauth_authorize(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"], allow_internal_service=True,
+    ),
+):
+    from releasegate.integrations.jira.oauth import generate_authorize_url, is_oauth_configured
+    if not is_oauth_configured():
+        raise HTTPException(status_code=501, detail="Jira OAuth not configured")
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    url = generate_authorize_url(effective_tenant)
+    return JSONResponse(content={"authorize_url": url})
+
+
+@app.get("/integrations/jira/oauth/callback")
+def jira_oauth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+):
+    from releasegate.integrations.jira.oauth import (
+        decode_state,
+        exchange_code_for_tokens,
+        get_accessible_resources,
+        store_jira_credentials,
+    )
+    tenant_id = decode_state(state)
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Invalid or expired state parameter")
+
+    tokens = exchange_code_for_tokens(code)
+    access_token = tokens["access_token"]
+    resources = get_accessible_resources(access_token)
+    if not resources:
+        raise HTTPException(status_code=400, detail="No accessible Jira sites found")
+
+    site = resources[0]
+    store_jira_credentials(
+        tenant_id=tenant_id,
+        cloud_id=site["id"],
+        site_url=site.get("url", ""),
+        access_token=access_token,
+        refresh_token=tokens.get("refresh_token", ""),
+        expires_in=tokens.get("expires_in", 3600),
+    )
+
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9_\-]{1,128}$", tenant_id):
+        raise HTTPException(status_code=400, detail="Invalid tenant identifier")
+    base_url = os.getenv("RELEASEGATE_BASE_URL", "https://app.releasegate.io").rstrip("/")
+    safe_path = f"/onboarding?tenant_id={requests.utils.quote(tenant_id, safe='')}&jira=connected"
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"{base_url}{safe_path}", status_code=302)
+
+
+@app.get("/integrations/jira/oauth/status")
+def jira_oauth_status(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"], allow_internal_service=True,
+    ),
+):
+    from releasegate.integrations.jira.oauth import get_jira_connection_status
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return JSONResponse(content=get_jira_connection_status(effective_tenant))
+
+
+@app.post("/integrations/jira/oauth/disconnect")
+def jira_oauth_disconnect(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin"], allow_internal_service=True,
+    ),
+):
+    from releasegate.integrations.jira.oauth import revoke_jira_credentials
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    revoke_jira_credentials(effective_tenant)
+    return JSONResponse(content={"ok": True})
+
+
+# --- Stripe Billing ---
+
+@app.post("/billing/checkout")
+def billing_checkout_endpoint(
+    payload: BillingCheckoutRequest,
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner"], allow_internal_service=True,
+    ),
+):
+    from releasegate.billing.stripe_service import create_checkout_session, is_stripe_configured
+    if not is_stripe_configured():
+        raise HTTPException(status_code=501, detail="Stripe billing not configured")
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    result = create_checkout_session(tenant_id=effective_tenant, plan=payload.plan)
+    return JSONResponse(content=result)
+
+
+@app.post("/billing/portal")
+def billing_portal_endpoint(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner"], allow_internal_service=True,
+    ),
+):
+    from releasegate.billing.stripe_service import create_portal_session, is_stripe_configured
+    if not is_stripe_configured():
+        raise HTTPException(status_code=501, detail="Stripe billing not configured")
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    result = create_portal_session(tenant_id=effective_tenant)
+    return JSONResponse(content=result)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook_endpoint(request: Request):
+    from releasegate.billing.stripe_service import handle_webhook_event
+    body = await request.body()
+    sig = request.headers.get("Stripe-Signature", "")
+    result = handle_webhook_event(body, sig)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Webhook processing failed"))
+    return JSONResponse(content=result)
+
+
+@app.get("/billing/subscription")
+def billing_subscription_endpoint(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner", "operator"], allow_internal_service=True,
+    ),
+):
+    from releasegate.billing.stripe_service import get_subscription_status
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return JSONResponse(content=get_subscription_status(effective_tenant))
+
+
+# --- Notification Preferences ---
+
+@app.get("/notifications/preferences")
+def get_notification_prefs_endpoint(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner", "operator"], allow_internal_service=True,
+    ),
+):
+    from releasegate.notifications.preferences import get_notification_preferences
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return JSONResponse(content=get_notification_preferences(effective_tenant))
+
+
+@app.put("/notifications/preferences")
+def update_notification_prefs_endpoint(
+    payload: NotificationPreferencesUpdate,
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner"], allow_internal_service=True,
+    ),
+):
+    from releasegate.notifications.preferences import update_notification_preferences
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        result = update_notification_preferences(
+            effective_tenant,
+            email_alerts_enabled=payload.email_alerts_enabled,
+            email_digest_enabled=payload.email_digest_enabled,
+            digest_frequency=payload.digest_frequency,
+            alert_recipients=payload.alert_recipients,
+        )
+        return JSONResponse(content=result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/notifications/test")
+def test_notification_endpoint(
+    tenant_id: str = Query(...),
+    auth: AuthContext = require_access(
+        roles=["admin", "owner"], allow_internal_service=True,
+    ),
+):
+    from releasegate.notifications.email_service import send_email
+    from releasegate.notifications.preferences import get_notification_recipients
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    recipients = get_notification_recipients(effective_tenant)
+    if not recipients:
+        raise HTTPException(status_code=400, detail="No alert recipients configured")
+    result = send_email(
+        to=recipients,
+        subject="[ReleaseGate] Test Notification",
+        body_html="<p>This is a test notification from ReleaseGate. Your email alerts are working.</p>",
+        body_text="This is a test notification from ReleaseGate. Your email alerts are working.",
+    )
+    return JSONResponse(content=result)
