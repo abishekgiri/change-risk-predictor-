@@ -9763,3 +9763,288 @@ def test_notification_endpoint(
         body_text="This is a test notification from ReleaseGate. Your email alerts are working.",
     )
     return JSONResponse(content=result)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Ops Maturity: system health + tenant health + alert checks
+# ---------------------------------------------------------------------------
+
+@app.get("/ops/system-health")
+def ops_system_health(
+    hours: int = Query(24, ge=1, le=168),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """SRE-level system health summary.
+
+    Returns aggregate stats across all tenants:
+    - Decision throughput and error rate
+    - Checkpoint coverage (% signed in window)
+    - Alert summary (how many alert conditions are active)
+    - DB health
+
+    Query param ``hours`` controls the look-back window (default 24, max 168).
+    """
+    storage = get_storage_backend()
+    now = datetime.now(timezone.utc)
+
+    # 1. Decision stats across all tenants
+    try:
+        total_row = storage.fetchone(
+            """SELECT COUNT(*) as total,
+                      SUM(CASE WHEN release_status = 'BLOCKED' THEN 1 ELSE 0 END) as blocked,
+                      SUM(CASE WHEN release_status = 'ALLOWED' THEN 1 ELSE 0 END) as allowed,
+                      SUM(CASE WHEN release_status = 'CONDITIONAL' THEN 1 ELSE 0 END) as conditional
+               FROM audit_decisions
+               WHERE created_at >= datetime('now', ?)""",
+            (f"-{hours} hours",),
+        )
+        total = int((total_row.get("total") or 0) if total_row else 0)
+        blocked = int((total_row.get("blocked") or 0) if total_row else 0)
+        allowed = int((total_row.get("allowed") or 0) if total_row else 0)
+        conditional = int((total_row.get("conditional") or 0) if total_row else 0)
+        block_rate = round(blocked / total * 100, 1) if total > 0 else 0.0
+    except Exception:
+        total = blocked = allowed = conditional = 0
+        block_rate = 0.0
+
+    # 2. Checkpoint coverage
+    try:
+        cp_row = storage.fetchone(
+            """SELECT COUNT(DISTINCT tenant_id) as tenants_with_checkpoint
+               FROM audit_checkpoints
+               WHERE created_at >= datetime('now', ?)""",
+            (f"-{hours} hours",),
+        )
+        tenants_with_checkpoint = int((cp_row.get("tenants_with_checkpoint") or 0) if cp_row else 0)
+        all_tenants_row = storage.fetchone(
+            "SELECT COUNT(DISTINCT tenant_id) as cnt FROM audit_decisions",
+            (),
+        )
+        all_tenants = int((all_tenants_row.get("cnt") or 0) if all_tenants_row else 0)
+        checkpoint_coverage_pct = round(tenants_with_checkpoint / all_tenants * 100, 1) if all_tenants > 0 else 100.0
+    except Exception:
+        tenants_with_checkpoint = all_tenants = 0
+        checkpoint_coverage_pct = 0.0
+
+    # 3. Recent alert conditions (sampled across known tenants)
+    alert_summary: Dict[str, Any] = {"stale_signals": 0, "checkpoint_missed": 0, "deploy_blocked": 0}
+    try:
+        from releasegate.ops.alerts import (
+            check_blocked_deploy_alert,
+            check_checkpoint_alert,
+            check_stale_signal_alert,
+        )
+        tenant_rows = storage.fetchall(
+            "SELECT DISTINCT tenant_id FROM audit_decisions LIMIT 50",
+            (),
+        )
+        for row in (tenant_rows or []):
+            tid = row.get("tenant_id") or ""
+            if not tid:
+                continue
+            if check_stale_signal_alert(tenant_id=tid, storage=storage) is not None:
+                alert_summary["stale_signals"] += 1
+            if check_checkpoint_alert(tenant_id=tid, storage=storage) is not None:
+                alert_summary["checkpoint_missed"] += 1
+            if check_blocked_deploy_alert(tenant_id=tid, storage=storage) is not None:
+                alert_summary["deploy_blocked"] += 1
+    except Exception:
+        logger.debug("alert condition sweep failed", exc_info=True)
+
+    # 4. DB health ping
+    db_ok = True
+    try:
+        storage.fetchone("SELECT 1 AS ping", ())
+    except Exception:
+        db_ok = False
+
+    return JSONResponse(content={
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "window_hours": hours,
+        "decisions": {
+            "total": total,
+            "allowed": allowed,
+            "blocked": blocked,
+            "conditional": conditional,
+            "block_rate_pct": block_rate,
+        },
+        "checkpoints": {
+            "tenants_with_checkpoint": tenants_with_checkpoint,
+            "all_active_tenants": all_tenants,
+            "coverage_pct": checkpoint_coverage_pct,
+        },
+        "alerts": alert_summary,
+        "db": {"ok": db_ok},
+    })
+
+
+@app.get("/ops/tenant-health/{tenant_id}")
+def ops_tenant_health(
+    tenant_id: str,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Per-tenant safety summary: is this tenant safe to deploy right now?
+
+    Checks:
+    - Signal freshness (latest risk signal age vs policy)
+    - Checkpoint freshness (last signed checkpoint age)
+    - Override chain integrity (cached)
+    - Recent blocked deploys (last hour)
+    - Open overrides (unexpired exceptions)
+    """
+    storage = get_storage_backend()
+    now = datetime.now(timezone.utc)
+    issues: List[str] = []
+    warnings: List[str] = []
+
+    # 1. Signal freshness
+    signal_ok = True
+    signal_age_hours: Optional[float] = None
+    try:
+        sig_row = storage.fetchone(
+            "SELECT MAX(computed_at) as latest FROM audit_decisions WHERE tenant_id = ?",
+            (tenant_id,),
+        )
+        if sig_row and sig_row.get("latest"):
+            latest = datetime.fromisoformat(str(sig_row["latest"]))
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=timezone.utc)
+            signal_age_hours = round((now - latest).total_seconds() / 3600, 2)
+            if signal_age_hours > 3:
+                signal_ok = False
+                issues.append(f"Risk signal stale ({signal_age_hours:.1f}h old)")
+            elif signal_age_hours > 1:
+                warnings.append(f"Risk signal aging ({signal_age_hours:.1f}h old)")
+        else:
+            warnings.append("No risk signals found")
+    except Exception:
+        warnings.append("Signal freshness check unavailable")
+
+    # 2. Checkpoint freshness
+    checkpoint_ok = True
+    checkpoint_age_hours: Optional[float] = None
+    try:
+        cp_row = storage.fetchone(
+            "SELECT MAX(created_at) as latest FROM audit_checkpoints WHERE tenant_id = ?",
+            (tenant_id,),
+        )
+        if cp_row and cp_row.get("latest"):
+            cp_latest = datetime.fromisoformat(str(cp_row["latest"]))
+            if cp_latest.tzinfo is None:
+                cp_latest = cp_latest.replace(tzinfo=timezone.utc)
+            checkpoint_age_hours = round((now - cp_latest).total_seconds() / 3600, 2)
+            if checkpoint_age_hours > 36:
+                checkpoint_ok = False
+                issues.append(f"Checkpoint overdue ({checkpoint_age_hours:.1f}h old)")
+            elif checkpoint_age_hours > 24:
+                warnings.append(f"Checkpoint aging ({checkpoint_age_hours:.1f}h old)")
+        else:
+            decision_row = storage.fetchone(
+                "SELECT COUNT(*) as cnt FROM audit_decisions WHERE tenant_id = ?",
+                (tenant_id,),
+            )
+            if decision_row and (decision_row.get("cnt") or 0) > 0:
+                checkpoint_ok = False
+                issues.append("No signed checkpoints exist")
+    except Exception:
+        warnings.append("Checkpoint check unavailable")
+
+    # 3. Override chain integrity (use cached result)
+    chain_ok = True
+    try:
+        chain_result = _cached_ledger_integrity(tenant_id)
+        if not chain_result.get("valid", True):
+            chain_ok = False
+            issues.append("Override chain integrity broken")
+    except Exception:
+        warnings.append("Chain integrity check unavailable")
+
+    # 4. Recent blocked deploys
+    blocked_last_hour = 0
+    try:
+        b_row = storage.fetchone(
+            """SELECT COUNT(*) as cnt FROM audit_decisions
+               WHERE tenant_id = ? AND release_status = 'BLOCKED'
+               AND created_at >= datetime('now', '-1 hour')""",
+            (tenant_id,),
+        )
+        blocked_last_hour = int((b_row.get("cnt") or 0) if b_row else 0)
+        if blocked_last_hour > 0:
+            warnings.append(f"{blocked_last_hour} deployment(s) blocked in last hour")
+    except Exception:
+        pass
+
+    # 5. Open/unexpired overrides
+    open_overrides = 0
+    try:
+        ov_row = storage.fetchone(
+            """SELECT COUNT(*) as cnt FROM audit_overrides
+               WHERE tenant_id = ?
+               AND (expires_at IS NULL OR expires_at > datetime('now'))""",
+            (tenant_id,),
+        )
+        open_overrides = int((ov_row.get("cnt") or 0) if ov_row else 0)
+        if open_overrides > 5:
+            warnings.append(f"{open_overrides} open exception overrides")
+    except Exception:
+        pass
+
+    safe_to_deploy = len(issues) == 0
+
+    return JSONResponse(content={
+        "ok": True,
+        "tenant_id": tenant_id,
+        "generated_at": now.isoformat(),
+        "safe_to_deploy": safe_to_deploy,
+        "issues": issues,
+        "warnings": warnings,
+        "signal": {
+            "ok": signal_ok,
+            "age_hours": signal_age_hours,
+        },
+        "checkpoint": {
+            "ok": checkpoint_ok,
+            "age_hours": checkpoint_age_hours,
+        },
+        "chain": {
+            "ok": chain_ok,
+        },
+        "blocked_last_hour": blocked_last_hour,
+        "open_overrides": open_overrides,
+    })
+
+
+@app.post("/ops/alerts/check")
+def ops_alerts_check(
+    tenant_id: Optional[str] = Query(None),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write"],
+        rate_profile="heavy",
+    ),
+):
+    """Run all ops alert condition checks for a tenant and dispatch any that fire.
+
+    This is called by the background scheduler tick; it can also be triggered
+    manually from the ops dashboard for immediate evaluation.
+    """
+    from releasegate.ops.alerts import run_all_checks
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    results = run_all_checks(tenant_id=effective_tenant, storage=storage)
+    return JSONResponse(content={
+        "ok": True,
+        "tenant_id": effective_tenant,
+        "alerts_fired": len(results),
+        "results": results,
+    })

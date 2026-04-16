@@ -1,0 +1,96 @@
+##############################################################################
+# ReleaseGate 5-minute demo stack
+#
+# Starts a fully self-contained ReleaseGate environment pre-loaded with
+# demo tenant data so you can walk through every dashboard page immediately.
+#
+# Usage:
+#   docker compose -f docker-compose.demo.yml up
+#   # API:       http://localhost:8000
+#   # Dashboard: http://localhost:3000
+#   # Docs:      http://localhost:3000/onboarding
+#
+# Default demo credentials:
+#   Tenant ID:  demo
+#   Auth token: demo-token-insecure   (set in RELEASEGATE_DEMO_TOKEN below)
+#
+# This compose file is for local demos ONLY. Do not use in production.
+##############################################################################
+services:
+
+  # ── Backend ──────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: releasegate-demo:latest
+    command: uvicorn releasegate.server:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      # Storage — use SQLite for zero-setup demo
+      RELEASEGATE_DB_BACKEND:    sqlite
+      RELEASEGATE_SQLITE_PATH:   /data/releasegate.db
+
+      # Auth — single static bearer token for demo convenience
+      RELEASEGATE_AUTH_MODE:     static
+      RELEASEGATE_DEMO_TOKEN:    demo-token-insecure
+      RELEASEGATE_DEFAULT_TENANT: demo
+
+      # Anchor scheduler — runs every 60 s so checkpoints appear quickly
+      RELEASEGATE_ANCHOR_INTERVAL_SECONDS: 60
+
+      # Signal freshness policy — lenient for demo
+      RELEASEGATE_SIGNAL_MAX_AGE_SECONDS: 7200
+      RELEASEGATE_SIGNAL_STRICT:          false
+
+      # Ops alerts disabled in demo (no real Slack/email)
+      RELEASEGATE_OPS_ALERT_ENABLED: false
+
+      # Feature flags
+      LEDGER_VERIFY_ON_STARTUP: false
+    volumes:
+      - demo_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      seeder:
+        condition: service_completed_successfully
+
+  # ── Dashboard UI ─────────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard-ui
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://api:8000
+    image: releasegate-dashboard-demo:latest
+    ports:
+      - "3000:3000"
+    environment:
+      RELEASEGATE_BACKEND_URL: http://api:8000
+      RELEASEGATE_TOKEN:       demo-token-insecure
+      NODE_ENV:                production
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ── Demo data seeder ─────────────────────────────────────────────────────
+  seeder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: releasegate-demo:latest
+    command: python3 /scripts/seed_demo.py
+    environment:
+      RELEASEGATE_DB_BACKEND:  sqlite
+      RELEASEGATE_SQLITE_PATH: /data/releasegate.db
+    volumes:
+      - demo_data:/data
+      - ./scripts:/scripts:ro
+
+volumes:
+  demo_data:
