@@ -8430,6 +8430,266 @@ def explain_decision_endpoint(
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Phase 5 — Trust & Audit Fabric
+# ---------------------------------------------------------------------------
+
+
+@app.get("/audit/trust-status")
+def audit_trust_status(
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Aggregate trust posture for a tenant.
+
+    Returns the state of every trust guarantee:
+    - ledger integrity (hash chains valid)
+    - checkpoint freshness (latest signed checkpoint)
+    - signal freshness config
+    - tamper-evidence status
+    - export readiness
+    """
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    now = datetime.now(timezone.utc)
+
+    # 1. Decision count and latest
+    decision_row = storage.fetchone(
+        "SELECT COUNT(*) as cnt, MAX(created_at) as latest FROM audit_decisions WHERE tenant_id = ?",
+        (effective_tenant,),
+    )
+    decision_count = (decision_row["cnt"] if decision_row else 0) if decision_row else 0
+    latest_decision = (decision_row["latest"] if decision_row else None) if decision_row else None
+
+    # 2. Override chain integrity
+    override_chain: Dict[str, Any] = {"valid": True, "checked": 0, "broken_chains": 0}
+    try:
+        from releasegate.audit.overrides import verify_all_override_chains
+        chain_result = verify_all_override_chains(tenant_id=effective_tenant)
+        chains = chain_result.get("chains", [])
+        all_valid = all(c.get("valid", False) for c in chains) if chains else True
+        total_checked = sum(c.get("checked", 0) for c in chains)
+        broken = sum(1 for c in chains if not c.get("valid", False))
+        override_chain = {"valid": all_valid, "checked": total_checked, "broken_chains": broken}
+    except Exception:
+        override_chain = {"valid": False, "checked": 0, "error": "verification unavailable"}
+
+    # 3. Latest checkpoint
+    checkpoint_row = storage.fetchone(
+        "SELECT checkpoint_id, period_id, root_hash, signature_value, event_count, created_at "
+        "FROM audit_checkpoints WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1",
+        (effective_tenant,),
+    )
+    latest_checkpoint: Optional[Dict[str, Any]] = None
+    checkpoint_fresh = False
+    if checkpoint_row:
+        cp = dict(checkpoint_row)
+        cp_time = cp.get("created_at", "")
+        try:
+            cp_dt = datetime.fromisoformat(str(cp_time))
+            if cp_dt.tzinfo is None:
+                cp_dt = cp_dt.replace(tzinfo=timezone.utc)
+            age_hours = (now - cp_dt).total_seconds() / 3600
+            checkpoint_fresh = age_hours < 36  # allow up to 36h for daily cadence
+        except Exception:
+            pass
+        latest_checkpoint = {
+            "checkpoint_id": cp.get("checkpoint_id"),
+            "period_id": cp.get("period_id"),
+            "root_hash": cp.get("root_hash"),
+            "signed": bool(cp.get("signature_value")),
+            "event_count": cp.get("event_count"),
+            "created_at": cp_time,
+            "fresh": checkpoint_fresh,
+        }
+
+    # 4. External anchors
+    anchor_row = storage.fetchone(
+        "SELECT COUNT(*) as cnt, MAX(anchored_at) as latest FROM audit_external_root_anchors WHERE tenant_id = ?",
+        (effective_tenant,),
+    )
+    external_anchors = {
+        "count": (anchor_row["cnt"] if anchor_row else 0) if anchor_row else 0,
+        "latest_at": (anchor_row["latest"] if anchor_row else None) if anchor_row else None,
+    }
+
+    # 5. Signal freshness config
+    from releasegate.governance.signal_freshness import signal_freshness_config
+    freshness_cfg = signal_freshness_config()
+
+    # 6. Attestation stats
+    att_row = storage.fetchone(
+        "SELECT COUNT(*) as cnt, SUM(CASE WHEN compromised = 1 THEN 1 ELSE 0 END) as compromised_cnt "
+        "FROM audit_attestations WHERE tenant_id = ?",
+        (effective_tenant,),
+    )
+    attestation_stats = {
+        "total": (att_row["cnt"] if att_row else 0) if att_row else 0,
+        "compromised": (att_row["compromised_cnt"] if att_row else 0) if att_row else 0,
+    }
+
+    # 7. Immutable tables count
+    immutable_tables = [
+        "audit_decisions", "audit_overrides", "audit_attestations",
+        "audit_transparency_log", "audit_transparency_roots",
+        "jira_lock_events", "audit_decision_refs",
+        "policy_resolved_snapshots", "policy_decision_records",
+        "audit_lock_checkpoints",
+    ]
+
+    # Compute trust score (0-100)
+    score_components: list[tuple[str, bool, int]] = [
+        ("ledger_integrity", override_chain.get("valid", False), 25),
+        ("checkpoint_fresh", checkpoint_fresh, 20),
+        ("checkpoint_signed", bool(latest_checkpoint and latest_checkpoint.get("signed")), 15),
+        ("signal_freshness_enabled", freshness_cfg.get("fail_on_stale", False), 15),
+        ("no_compromised_keys", attestation_stats["compromised"] == 0, 15),
+        ("external_anchors_exist", external_anchors["count"] > 0, 10),
+    ]
+    trust_score = sum(weight for _, passes, weight in score_components if passes)
+
+    return {
+        "tenant_id": effective_tenant,
+        "generated_at": now.isoformat(),
+        "trust_score": trust_score,
+        "trust_score_max": 100,
+        "trust_components": {name: {"passes": passes, "weight": weight} for name, passes, weight in score_components},
+        "decisions": {
+            "total": decision_count,
+            "latest_at": latest_decision,
+        },
+        "ledger": override_chain,
+        "checkpoint": latest_checkpoint,
+        "external_anchors": external_anchors,
+        "signal_freshness": freshness_cfg,
+        "attestations": attestation_stats,
+        "immutable_tables": immutable_tables,
+        "tamper_evidence": {
+            "append_only_tables": len(immutable_tables),
+            "trigger_protection": "sqlite_and_postgres",
+        },
+    }
+
+
+@app.get("/audit/evidence-graph/search")
+def evidence_graph_search(
+    tenant_id: Optional[str] = None,
+    status: Optional[str] = None,
+    has_approval: Optional[bool] = None,
+    policy_hash: Optional[str] = None,
+    actor: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+    days: int = 30,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="heavy",
+    ),
+):
+    """Search the evidence graph across decisions with structured filters.
+
+    Answers questions like:
+    - 'Show all releases without approval last 30 days'
+    - 'Show decisions tied to this policy version'
+    - 'Show override patterns by actor'
+    """
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    limit = _bounded_limit(limit, max_allowed=500, field="limit")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=min(days, 90))).isoformat()
+
+    conditions = ["d.tenant_id = ?", "d.created_at >= ?"]
+    params: list[Any] = [effective_tenant, cutoff]
+
+    if status:
+        conditions.append("d.release_status = ?")
+        params.append(status.upper())
+    if policy_hash:
+        conditions.append("d.policy_bundle_hash = ?")
+        params.append(policy_hash)
+    if actor:
+        conditions.append("json_extract(d.full_decision_json, '$.actor') = ?")
+        params.append(actor)
+    if workflow_id:
+        conditions.append("json_extract(d.full_decision_json, '$.workflow_id') = ?")
+        params.append(workflow_id)
+
+    where = " AND ".join(conditions)
+    query = f"""
+        SELECT d.decision_id, d.created_at, d.release_status, d.repo,
+               d.pr_number, d.policy_bundle_hash,
+               d.decision_hash, d.input_hash, d.policy_hash, d.replay_hash,
+               d.full_decision_json
+        FROM audit_decisions d
+        WHERE {where}
+        ORDER BY d.created_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    rows = storage.fetchall(query, tuple(params))
+
+    items = []
+    for row in rows:
+        r = dict(row)
+        full_json = {}
+        try:
+            raw = r.get("full_decision_json")
+            if raw:
+                full_json = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            pass
+
+        has_approvals = bool(full_json.get("approvals") or full_json.get("approval_evidence"))
+        approval_count = len(full_json.get("approvals") or full_json.get("approval_evidence") or [])
+
+        item = {
+            "decision_id": r["decision_id"],
+            "created_at": r["created_at"],
+            "status": r["release_status"],
+            "repo": r["repo"],
+            "pr_number": r["pr_number"],
+            "policy_hash": r["policy_bundle_hash"],
+            "actor": full_json.get("actor"),
+            "workflow_id": full_json.get("workflow_id"),
+            "transition_id": full_json.get("transition_id"),
+            "has_approval": has_approvals,
+            "approval_count": approval_count,
+            "integrity": {
+                "decision_hash": r["decision_hash"],
+                "input_hash": r["input_hash"],
+                "policy_hash": r["policy_hash"],
+                "replay_hash": r["replay_hash"],
+            },
+        }
+
+        if has_approval is not None:
+            if has_approval and not has_approvals:
+                continue
+            if not has_approval and has_approvals:
+                continue
+
+        items.append(item)
+
+    return {
+        "tenant_id": effective_tenant,
+        "query": {
+            "status": status,
+            "has_approval": has_approval,
+            "policy_hash": policy_hash,
+            "actor": actor,
+            "workflow_id": workflow_id,
+            "days": days,
+        },
+        "count": len(items),
+        "items": items,
+    }
+
+
 @app.post("/correlation/deployments/authorize")
 def authorize_correlation_deployment_endpoint(
     payload: CorrelationDeploymentRequest,

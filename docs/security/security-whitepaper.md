@@ -61,12 +61,51 @@ ReleaseGate publishes controls and behavior documentation that supports enterpri
 - Regional and residency strategy (`docs/multi_region_strategy.md`)
 - Proof verification and auditor workflows (`docs/compliance/*`)
 
-## 7. Validation and Assurance
+## 7. Trust & Audit Fabric
+
+ReleaseGate provides a cryptographic trust layer that makes system integrity provable rather than claimed.
+
+### Trust Score
+
+A 0–100 composite score aggregated from six weighted components:
+
+| Component | Weight | Criteria |
+| --- | --- | --- |
+| Ledger Integrity | 25 | All override hash chains are valid with no broken links |
+| Checkpoint Freshness | 20 | Latest signed checkpoint is within 36 hours |
+| Checkpoint Signed | 15 | Latest checkpoint carries an Ed25519 cryptographic signature |
+| Signal Freshness | 15 | Zero-trust mode active — stale signals are rejected |
+| Key Integrity | 15 | No signing keys have been flagged as compromised |
+| External Anchoring | 10 | At least one checkpoint anchored to an external system |
+
+### Evidence Graph
+
+Structured query interface over the decision history. Supports filtering by status, approval state, actor, workflow, and time window. Every result includes four integrity hashes (decision, input, policy, replay) enabling independent verification.
+
+### Tamper-Evidence Guarantees
+
+- **Append-only tables**: 10+ audit tables are protected by database triggers that raise exceptions on UPDATE or DELETE attempts. Works on both SQLite and PostgreSQL.
+- **Merkle trees**: Transparency log entries are organized into Merkle trees with inclusion proofs for any individual record.
+- **DSSE envelopes**: Decision attestations use Dead Simple Signing Envelopes with Ed25519 signatures.
+- **RFC 3161 anchoring**: Checkpoints can be anchored to external timestamp authorities for independent proof of existence.
+
+### Zero-Trust Signal Freshness
+
+Configurable enforcement that rejects stale input signals:
+
+- `max_age_seconds`: Maximum allowable age for signal data
+- `require_computed_at`: Signals must carry a computation timestamp
+- `require_signal_hash`: Signals must include a content hash for integrity
+- `fail_on_stale`: When enabled, stale signals cause a hard block rather than a warning
+
+## 8. Validation and Assurance
 
 Operational assurance is supported by:
 
 - Automated test suites for policy, onboarding, metrics, and quota paths
 - Dashboard contracts and typed API responses
 - Replay and evidence tooling for post-incident and audit workflows
+- Trust score monitoring through the audit dashboard
+- Tamper-evidence proof tests validating append-only trigger protection
 
 This whitepaper complements (does not replace) tenant-specific security assessments, threat modeling, and infrastructure controls required by each enterprise deployment.
