@@ -3,28 +3,95 @@
  *
  * Required credentials (Manage Jenkins → Credentials):
  *   releasegate-url    – Secret text: your ReleaseGate URL
- *   releasegate-token  – Secret text: API token with policy:read scope
+ *   releasegate-token  – Secret text: API token with policy:write scope
  *
  * Required parameters (configure on the Pipeline job):
- *   JIRA_ISSUE_KEY       – e.g. PROJ-42
- *   JIRA_PROJECT_KEY     – e.g. PROJ
- *   JIRA_TRANSITION_ID   – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
  *   RELEASEGATE_TENANT   – your tenant slug
  *   DEPLOY_ENV           – e.g. PRODUCTION (default below)
+ *   JIRA_ISSUE_KEY       – e.g. PROJ-42 (optional — leave blank to skip Jira gate)
+ *   JIRA_PROJECT_KEY     – e.g. PROJ
+ *   JIRA_TRANSITION_ID   – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
  */
 pipeline {
     agent any
 
     parameters {
-        string(name: 'JIRA_ISSUE_KEY',       defaultValue: '',           description: 'Jira issue key, e.g. PROJ-42')
-        string(name: 'JIRA_PROJECT_KEY',     defaultValue: '',           description: 'Jira project key, e.g. PROJ')
-        string(name: 'JIRA_TRANSITION_ID',   defaultValue: '31',         description: 'Jira workflow transition ID (see Jira → Workflow editor)')
         string(name: 'RELEASEGATE_TENANT',   defaultValue: 'default',    description: 'ReleaseGate tenant ID')
         string(name: 'DEPLOY_ENV',           defaultValue: 'PRODUCTION', description: 'Target deploy environment')
+        string(name: 'JIRA_ISSUE_KEY',       defaultValue: '',           description: 'Jira issue key, e.g. PROJ-42 (optional)')
+        string(name: 'JIRA_PROJECT_KEY',     defaultValue: '',           description: 'Jira project key, e.g. PROJ')
+        string(name: 'JIRA_TRANSITION_ID',   defaultValue: '31',         description: 'Jira workflow transition ID (see Jira → Workflow editor)')
+    }
+
+    // Decision ID is set in the Declare stage and used in Deploy
+    environment {
+        RG_DECISION_ID = ''
     }
 
     stages {
-        stage('ReleaseGate Governance Check') {
+
+        // ── Phase 7: declare a decision ID FIRST ─────────────────────────
+        // Every deploy must obtain a ReleaseGate decision ID before proceeding.
+        // The ID is stored in RG_DECISION_ID and passed to the deploy step.
+        stage('ReleaseGate Declare Decision') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'releasegate-url',   variable: 'RELEASEGATE_URL'),
+                    string(credentialsId: 'releasegate-token', variable: 'RELEASEGATE_TOKEN'),
+                ]) {
+                    script {
+                        def prNumber = env.CHANGE_ID ? env.CHANGE_ID : '0'
+                        def actor    = env.BUILD_USER_ID ?: 'jenkins'
+                        def sha      = env.GIT_COMMIT ?: ''
+
+                        def response = sh(
+                            script: """
+                                curl -sS -X POST "${RELEASEGATE_URL}/decisions/declare" \\
+                                    -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \\
+                                    -H "Content-Type: application/json" \\
+                                    -d '{
+                                        "tenant_id": "${params.RELEASEGATE_TENANT}",
+                                        "repo": "${env.GIT_URL}",
+                                        "environment": "${params.DEPLOY_ENV}",
+                                        "sha": "${sha}",
+                                        "pr_number": ${prNumber},
+                                        "actor_id": "${actor}"
+                                    }'
+                            """,
+                            returnStdout: true
+                        ).trim()
+
+                        echo "ReleaseGate declare response: ${response}"
+                        writeFile file: 'releasegate_declare.json', text: response
+
+                        def json    = readJSON text: response
+                        def rgId    = json.rg_decision_id ?: ''
+                        def allowed = json.allowed?.toString() ?: 'false'
+
+                        if (!rgId) {
+                            error('No decision ID returned — governance declaration failed')
+                        }
+                        if (allowed != 'true') {
+                            error("ReleaseGate blocked deploy (decision: ${rgId}). Review: ${RELEASEGATE_URL}/decisions/${rgId}")
+                        }
+
+                        echo "Declaration passed (decision: ${rgId})"
+                        env.RG_DECISION_ID = rgId
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'releasegate_declare.json', allowEmptyArchive: true
+                }
+            }
+        }
+
+        // ── Jira transition check (optional — only for Jira-driven workflows) ─
+        stage('ReleaseGate Jira Gate') {
+            when {
+                expression { params.JIRA_ISSUE_KEY?.trim() }
+            }
             steps {
                 withCredentials([
                     string(credentialsId: 'releasegate-url',   variable: 'RELEASEGATE_URL'),
@@ -50,57 +117,32 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        echo "ReleaseGate response: ${response}"
-                        writeFile file: 'releasegate_response.json', text: response
+                        echo "ReleaseGate Jira response: ${response}"
+                        writeFile file: 'releasegate_jira.json', text: response
 
-                        def json  = readJSON text: response
+                        def json   = readJSON text: response
                         def status = json.status ?: 'ERROR'
 
                         if (status == 'BLOCKED' || status == 'ERROR') {
-                            error("ReleaseGate denied deployment (status=${status}). Review the evidence in the ReleaseGate dashboard.")
+                            error("ReleaseGate denied Jira transition (status=${status}).")
                         }
-                        echo "Gate passed (status=${status})"
+                        echo "Jira gate passed (status=${status})"
                     }
                 }
             }
             post {
                 always {
-                    archiveArtifacts artifacts: 'releasegate_response.json', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'releasegate_jira.json', allowEmptyArchive: true
                 }
             }
         }
 
         stage('Deploy') {
-            // Only runs if governance check passes
+            // Only runs if both governance stages pass
             steps {
-                echo "Deploying to ${params.DEPLOY_ENV}…"
+                echo "Deploying to ${params.DEPLOY_ENV} with governance decision ${env.RG_DECISION_ID}…"
                 // Replace with your actual deploy steps
             }
         }
     }
 }
-
-/*
- * DEPLOY-GATE VARIANT — call the /deploy/gate endpoint instead of the
- * Jira transition check. Replace the governance stage above with:
- *
- *   stage('ReleaseGate Deploy Gate') {
- *       steps {
- *           withCredentials([...]) {
- *               script {
- *                   def status = sh(
- *                       script: """
- *                           curl -sS -X POST "${RELEASEGATE_URL}/deploy/gate" \\
- *                               -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \\
- *                               -H "Content-Type: application/json" \\
- *                               -d '{"tenant_id":"${params.RELEASEGATE_TENANT}","repo":"${env.GIT_URL}","sha":"${env.GIT_COMMIT}","environment":"production"}' \\
- *                               | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])"
- *                       """,
- *                       returnStdout: true
- *                   ).trim()
- *                   if (status != 'ALLOWED') error("Deploy blocked by ReleaseGate (${status})")
- *               }
- *           }
- *       }
- *   }
- */
