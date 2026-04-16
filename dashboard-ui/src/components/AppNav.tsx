@@ -20,7 +20,9 @@ const links = [
   { href: "/customer-success", label: "Executive Impact" },
   { href: "/integrity", label: "Control Health" },
   { href: "/overrides", label: "Exceptions" },
+  { href: "/policies", label: "Policies" },
   { href: "/policies/diff", label: "Policy Changes" },
+  { href: "/policies/simulate", label: "Simulate" },
 ];
 
 export function AppNav() {
