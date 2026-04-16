@@ -521,3 +521,180 @@ export interface JiraTransitionsDiscoveryResponse {
   source: string;
   items: JiraWorkflowTransition[];
 }
+
+// ---------------------------------------------------------------------------
+// Policy Control Plane
+// ---------------------------------------------------------------------------
+
+export type PolicyScopeType = "org" | "project" | "workflow" | "transition";
+export type PolicyStatus = "DRAFT" | "STAGED" | "ACTIVE" | "ARCHIVED" | "DEPRECATED";
+
+export interface RegistryPolicy {
+  tenant_id: string;
+  policy_id: string;
+  scope_type: PolicyScopeType;
+  scope_id: string;
+  version: number;
+  status: PolicyStatus;
+  policy_hash: string;
+  policy_json: Record<string, unknown>;
+  lint_errors: LintIssue[];
+  lint_warnings: LintIssue[];
+  rollout_percentage: number;
+  rollout_scope: string | null;
+  created_at: string;
+  created_by: string | null;
+  activated_at: string | null;
+  activated_by: string | null;
+  archived_at: string | null;
+  supersedes_policy_id: string | null;
+}
+
+export interface PolicyListResponse {
+  tenant_id: string;
+  policies: RegistryPolicy[];
+}
+
+export interface LintIssue {
+  severity: "ERROR" | "WARNING";
+  code: string;
+  message: string;
+  policy_id?: string | null;
+  source_file?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface LintResult {
+  ok: boolean;
+  error_count: number;
+  warning_count: number;
+  issues: LintIssue[];
+}
+
+export interface ConflictSummary {
+  contradiction_count: number;
+  shadowed_rule_count: number;
+  coverage_gap_count: number;
+  warning_count: number;
+}
+
+export interface ConflictAnalysis {
+  ok: boolean;
+  contradictions: LintIssue[];
+  shadowed_rules: LintIssue[];
+  coverage_gaps: LintIssue[];
+  warnings: LintIssue[];
+  summary: ConflictSummary;
+  lint: LintResult;
+}
+
+export interface PolicyConflictResponse {
+  tenant_id: string;
+  policy_id: string;
+  policy_hash: string;
+  analysis: ConflictAnalysis;
+}
+
+export interface PolicyRegistryEvent {
+  event_id?: string;
+  event_type: string;
+  policy_id: string;
+  actor_id?: string | null;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface PolicyEventsResponse {
+  tenant_id: string;
+  policy_id: string;
+  events: PolicyRegistryEvent[];
+}
+
+export interface PolicySimulationRequest {
+  tenant_id?: string;
+  actor?: string;
+  issue_key?: string;
+  transition_id: string;
+  project_id?: string;
+  workflow_id?: string;
+  environment?: string;
+  context?: Record<string, unknown>;
+  policy_id?: string;
+  policy_version?: number;
+  policy_json?: Record<string, unknown>;
+  status_filter?: string;
+}
+
+export interface PolicySimulationResult {
+  simulation_id: string;
+  trace_id: string;
+  enforced: boolean;
+  tenant_id: string;
+  allow: boolean;
+  status: "ALLOWED" | "BLOCKED" | "CONDITIONAL";
+  reason_codes: string[];
+  policy_hash: string;
+  effective_policy_hash: string;
+  component_policy_ids: string[];
+  component_lineage: Record<string, { policy_id: string; version: number; scope_id: string; policy_hash: string }>;
+  resolution_conflicts: Record<string, unknown>[];
+  effective_policy_json: Record<string, unknown>;
+  matched_rule?: Record<string, unknown> | null;
+  warnings: Record<string, unknown>[];
+  coverage_gaps: Record<string, unknown>[];
+  shadowed_rules: Record<string, unknown>[];
+  conflicts: Record<string, unknown>[];
+  conflict_summary: Record<string, unknown>;
+  actor?: string | null;
+  issue_key?: string | null;
+  transition_id: string;
+  project_id?: string | null;
+  workflow_id?: string | null;
+  environment?: string | null;
+}
+
+export interface HistoricalSimulationRequest {
+  tenant_id?: string;
+  policy_id?: string;
+  policy_version?: number;
+  policy_json?: Record<string, unknown>;
+  time_window_days?: number;
+  transition_id?: string;
+  project_key?: string;
+  workflow_id?: string;
+  environment?: string;
+  only_protected?: boolean;
+  max_events?: number;
+  top_n?: number;
+}
+
+export interface HistoricalSimulationResult {
+  simulation_id: string;
+  trace_id: string;
+  enforced: boolean;
+  tenant_id: string;
+  time_window_days: number;
+  window_start: string;
+  window_end: string;
+  policy_ref: {
+    policy_id: string;
+    policy_version: number | null;
+    policy_hash: string;
+    source: string;
+  };
+  scanned_events: number;
+  simulated_events: number;
+  skipped_events: number;
+  would_block_count: number;
+  would_allow_count: number;
+  unchanged_count: number;
+  override_delta: number;
+  delta_breakdown: {
+    allow_to_deny: number;
+    deny_to_allow: number;
+    unchanged: number;
+  };
+  impacted_workflows: Array<Record<string, unknown>>;
+  high_risk_clusters: Array<Record<string, unknown>>;
+  deny_reasons_histogram: Array<{ reason: string; count: number }>;
+}
