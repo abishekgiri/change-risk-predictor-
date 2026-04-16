@@ -8647,6 +8647,37 @@ def evidence_graph_search(
         has_approvals = bool(full_json.get("approvals") or full_json.get("approval_evidence"))
         approval_count = len(full_json.get("approvals") or full_json.get("approval_evidence") or [])
 
+        # Extract signal freshness state from stored decision
+        signal_freshness_state: Optional[Dict[str, Any]] = None
+        try:
+            risk_meta = full_json.get("risk_meta") or full_json.get("risk") or {}
+            if risk_meta and isinstance(risk_meta, dict):
+                from releasegate.governance.signal_freshness import (
+                    evaluate_risk_signal_freshness,
+                    resolve_signal_freshness_policy,
+                )
+                fp = resolve_signal_freshness_policy(policy_overrides=None, strict_enabled=False)
+                decision_time = None
+                try:
+                    decision_time = datetime.fromisoformat(str(r["created_at"]))
+                    if decision_time.tzinfo is None:
+                        decision_time = decision_time.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+                fr = evaluate_risk_signal_freshness(
+                    risk_meta=risk_meta,
+                    policy=fp,
+                    evaluation_time=decision_time,
+                )
+                signal_freshness_state = {
+                    "stale": fr.get("stale"),
+                    "reason_code": fr.get("reason_code"),
+                    "age_seconds": (fr.get("details") or {}).get("age_seconds"),
+                    "computed_at": (fr.get("details") or {}).get("computed_at"),
+                }
+        except Exception:
+            pass
+
         item = {
             "decision_id": r["decision_id"],
             "created_at": r["created_at"],
@@ -8659,6 +8690,7 @@ def evidence_graph_search(
             "transition_id": full_json.get("transition_id"),
             "has_approval": has_approvals,
             "approval_count": approval_count,
+            "signal_freshness": signal_freshness_state,
             "integrity": {
                 "decision_hash": r["decision_hash"],
                 "input_hash": r["input_hash"],

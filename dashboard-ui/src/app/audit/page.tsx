@@ -136,12 +136,20 @@ export default async function AuditTrustPage({
             Cryptographic proof of system integrity and decision history
           </p>
         </div>
-        <Link
-          href={scopedHref("/audit/evidence")}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-        >
-          Evidence Graph
-        </Link>
+        <div className="flex gap-2">
+          <Link
+            href={scopedHref("/audit/evidence")}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Evidence Graph
+          </Link>
+          <Link
+            href={scopedHref("/audit/export")}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            Export Pack
+          </Link>
+        </div>
       </div>
 
       {/* Trust Score */}

@@ -17,6 +17,12 @@ interface EvidenceItem {
   transition_id: string | null;
   has_approval: boolean;
   approval_count: number;
+  signal_freshness: {
+    stale: boolean | null;
+    reason_code: string | null;
+    age_seconds: number | null;
+    computed_at: string | null;
+  } | null;
   integrity: {
     decision_hash: string;
     input_hash: string;
@@ -206,6 +212,7 @@ export function EvidenceSearchClient() {
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Actor</th>
                     <th className="px-4 py-3">Approval</th>
+                    <th className="px-4 py-3">Signal</th>
                     <th className="px-4 py-3">Time</th>
                     <th className="px-4 py-3">Integrity</th>
                   </tr>
@@ -242,6 +249,27 @@ export function EvidenceSearchClient() {
                           </span>
                         ) : (
                           <span className="text-xs text-rose-500 font-semibold">None</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {item.signal_freshness === null ? (
+                          <span className="text-xs text-slate-400">—</span>
+                        ) : item.signal_freshness.stale ? (
+                          <span
+                            className="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold bg-amber-50 text-amber-700"
+                            title={item.signal_freshness.reason_code ?? "stale"}
+                          >
+                            Stale
+                          </span>
+                        ) : (
+                          <span className="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold bg-emerald-50 text-emerald-700">
+                            Fresh
+                          </span>
+                        )}
+                        {item.signal_freshness?.age_seconds != null && (
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            {item.signal_freshness.age_seconds}s old
+                          </p>
                         )}
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-500">

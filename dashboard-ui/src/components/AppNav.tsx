@@ -25,6 +25,7 @@ const links = [
   { href: "/policies/simulate", label: "Simulate" },
   { href: "/policies/ci-gate", label: "CI Gate" },
   { href: "/audit", label: "Trust & Audit" },
+  { href: "/audit/export", label: "Audit Export" },
 ];
 
 export function AppNav() {
