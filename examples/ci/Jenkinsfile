@@ -8,6 +8,7 @@
  * Required parameters (configure on the Pipeline job):
  *   JIRA_ISSUE_KEY       – e.g. PROJ-42
  *   JIRA_PROJECT_KEY     – e.g. PROJ
+ *   JIRA_TRANSITION_ID   – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
  *   RELEASEGATE_TENANT   – your tenant slug
  *   DEPLOY_ENV           – e.g. PRODUCTION (default below)
  */
@@ -15,10 +16,11 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'JIRA_ISSUE_KEY',     defaultValue: '',           description: 'Jira issue key, e.g. PROJ-42')
-        string(name: 'JIRA_PROJECT_KEY',   defaultValue: '',           description: 'Jira project key, e.g. PROJ')
-        string(name: 'RELEASEGATE_TENANT', defaultValue: 'default',    description: 'ReleaseGate tenant ID')
-        string(name: 'DEPLOY_ENV',         defaultValue: 'PRODUCTION', description: 'Target deploy environment')
+        string(name: 'JIRA_ISSUE_KEY',       defaultValue: '',           description: 'Jira issue key, e.g. PROJ-42')
+        string(name: 'JIRA_PROJECT_KEY',     defaultValue: '',           description: 'Jira project key, e.g. PROJ')
+        string(name: 'JIRA_TRANSITION_ID',   defaultValue: '31',         description: 'Jira workflow transition ID (see Jira → Workflow editor)')
+        string(name: 'RELEASEGATE_TENANT',   defaultValue: 'default',    description: 'ReleaseGate tenant ID')
+        string(name: 'DEPLOY_ENV',           defaultValue: 'PRODUCTION', description: 'Target deploy environment')
     }
 
     stages {
@@ -36,7 +38,7 @@ pipeline {
                                     -H "Content-Type: application/json" \\
                                     -d '{
                                         "issue_key": "${params.JIRA_ISSUE_KEY}",
-                                        "transition_id": "31",
+                                        "transition_id": "${params.JIRA_TRANSITION_ID ?: '31'}",
                                         "source_status": "Ready for Release",
                                         "target_status": "Done",
                                         "actor_account_id": "jenkins",

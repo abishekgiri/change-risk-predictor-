@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -31,6 +31,13 @@ logger = logging.getLogger(__name__)
 
 _COOLDOWN_LOCK = threading.Lock()
 _LAST_SENT: Dict[str, float] = {}
+# NOTE: _LAST_SENT is in-process only. In multi-worker deployments (e.g.
+# uvicorn --workers N > 1) different worker processes each maintain a
+# separate copy, so the cooldown is not enforced across processes.
+# For single-worker or Gunicorn single-process deployments this is fine.
+# For multi-worker production, set RELEASEGATE_OPS_ALERT_COOLDOWN high
+# enough to tolerate duplicate alerts, or run alerts via the scheduler
+# (POST /ops/alerts/check) on a single dedicated process.
 
 # Alert level → Slack color sidebar
 _SLACK_COLORS = {
@@ -293,11 +300,12 @@ def check_checkpoint_alert(*, tenant_id: str, storage: Any) -> Optional[Dict[str
 def check_blocked_deploy_alert(*, tenant_id: str, storage: Any) -> Optional[Dict[str, Any]]:
     """Alert if a production deployment was blocked in the last hour."""
     try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         row = storage.fetchone(
             """SELECT COUNT(*) as cnt FROM audit_decisions
                WHERE tenant_id = ? AND release_status = 'BLOCKED'
-               AND created_at >= datetime('now', '-1 hour')""",
-            (tenant_id,),
+               AND created_at >= ?""",
+            (tenant_id, cutoff),
         )
         blocked_count = int((row.get("cnt") or 0) if row else 0)
         if blocked_count == 0:

@@ -6,10 +6,11 @@
 #   RELEASEGATE_TOKEN  – API token with policy:read scope
 #
 # Required variables (Settings → Variables, or set in the calling workflow):
-#   JIRA_ISSUE_KEY     – e.g. PROJ-42
-#   JIRA_PROJECT_KEY   – e.g. PROJ
+#   JIRA_ISSUE_KEY       – e.g. PROJ-42
+#   JIRA_PROJECT_KEY     – e.g. PROJ
+#   JIRA_TRANSITION_ID   – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
 #   RELEASEGATE_TENANT_ID – your tenant slug
-#   DEPLOY_ENV         – e.g. PRODUCTION (defaults to PRODUCTION)
+#   DEPLOY_ENV           – e.g. PRODUCTION (defaults to PRODUCTION)
 ##############################################################################
 name: ReleaseGate Governance Check
 
@@ -28,16 +29,17 @@ jobs:
         env:
           RELEASEGATE_URL:   ${{ secrets.RELEASEGATE_URL }}
           RELEASEGATE_TOKEN: ${{ secrets.RELEASEGATE_TOKEN }}
-          JIRA_ISSUE_KEY:    ${{ vars.JIRA_ISSUE_KEY }}
-          JIRA_PROJECT_KEY:  ${{ vars.JIRA_PROJECT_KEY }}
-          DEPLOY_ENV:        ${{ vars.DEPLOY_ENV || 'PRODUCTION' }}
+          JIRA_ISSUE_KEY:      ${{ vars.JIRA_ISSUE_KEY }}
+          JIRA_PROJECT_KEY:    ${{ vars.JIRA_PROJECT_KEY }}
+          JIRA_TRANSITION_ID:  ${{ vars.JIRA_TRANSITION_ID || '31' }}
+          DEPLOY_ENV:          ${{ vars.DEPLOY_ENV || 'PRODUCTION' }}
         run: |
           RESPONSE=$(curl -sS -X POST "${RELEASEGATE_URL}/integrations/jira/transition/check" \
             -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{
               \"issue_key\": \"${JIRA_ISSUE_KEY}\",
-              \"transition_id\": \"31\",
+              \"transition_id\": \"${JIRA_TRANSITION_ID}\",
               \"source_status\": \"Ready for Release\",
               \"target_status\": \"Done\",
               \"actor_account_id\": \"github-actions\",

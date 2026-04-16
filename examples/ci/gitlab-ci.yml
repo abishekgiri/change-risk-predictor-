@@ -6,6 +6,7 @@
 #   RELEASEGATE_TOKEN     – API token with policy:read scope
 #   JIRA_ISSUE_KEY        – e.g. PROJ-42  (set per-project or per-pipeline)
 #   JIRA_PROJECT_KEY      – e.g. PROJ
+#   JIRA_TRANSITION_ID    – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
 #   RELEASEGATE_TENANT_ID – your tenant slug
 #   DEPLOY_ENV            – e.g. PRODUCTION (optional, default below)
 ##############################################################################
@@ -15,6 +16,7 @@ stages:
 
 variables:
   DEPLOY_ENV: "PRODUCTION"
+  JIRA_TRANSITION_ID: "31"   # Override in Settings → CI/CD → Variables for your Jira workflow
 
 releasegate_governance:
   stage: governance
@@ -26,7 +28,7 @@ releasegate_governance:
         -H "Content-Type: application/json" \
         -d "{
           \"issue_key\": \"${JIRA_ISSUE_KEY}\",
-          \"transition_id\": \"31\",
+          \"transition_id\": \"${JIRA_TRANSITION_ID:-31}\",
           \"source_status\": \"Ready for Release\",
           \"target_status\": \"Done\",
           \"actor_account_id\": \"gitlab-ci\",
