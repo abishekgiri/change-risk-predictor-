@@ -5,16 +5,19 @@
 ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g., `Ready for Release` → `Done`), blocks non-compliant releases, and produces cryptographically verifiable audit artifacts suitable for compliance programs (SOC2-style controls, change governance, separation of duties).
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.0.0--policy--control--plane-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.0.0-policy-control-plane)
-[![Tests](https://img.shields.io/badge/tests-98%20passing-success.svg)](#development)
+[![Version](https://img.shields.io/badge/version-v2.1.0-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.1.0)
+[![Tests](https://img.shields.io/badge/tests-563%20passing-success.svg)](#development)
 
-See also: [Contributing](CONTRIBUTING.md), [Security Policy](SECURITY.md), [Changelog](CHANGELOG.md).
+---
 
-Attestation and audit verification docs:
-- [Attestation Contract](docs/ATTESTATION.md)
+## Documentation
+
+- [Audit Pack Index](docs/AUDIT_PACK.md) — start here for procurement and compliance review
+- [Security Whitepaper](docs/security/security-whitepaper.md)
+- [Tamper-Evidence Architecture](docs/security/tamper-evidence.md)
 - [Verification Guide](docs/VERIFICATION.md)
 - [Auditor Quickstart](docs/AUDITOR_QUICKSTART.md)
-- [External Anchoring Wave Plan (55-step)](docs/external-anchoring-wave-plan-55.md)
+- [Attestation Contract](docs/ATTESTATION.md)
 
 ---
 
@@ -45,9 +48,11 @@ Decision output fields, `reason_code` meanings, and strict/permissive behavior a
 Other docs (including this README) are descriptive and defer to that spec.
 Forge runtime hardening and failure handling is documented in `docs/forge-hardening.md`.
 
+---
+
 ## Core Architecture
 
-ReleaseGate is built on two foundational enforcement pillars.
+ReleaseGate is built on four enforcement pillars.
 
 ### Pillar 1: Transition-Level Enforcement (Hard ALLOW / DENY)
 
@@ -82,16 +87,6 @@ Same input yields the same decision. ReleaseGate stores:
 
 This guarantees replayability, forensic traceability, and no nondeterministic drift.
 
-#### Audit search API
-
-Decisions are queryable through:
-
-```text
-GET /audit/search
-```
-
-Each decision includes `release_status`, `policy_bindings`, `engine_version`, `full_decision_json`, and timestamp fields.
-
 #### Risk-aware enforcement
 
 Signals include:
@@ -106,30 +101,13 @@ Signals include:
 
 Policies evaluate these signals declaratively.
 
-#### Pillar 1 outcome
-
-A workflow transition cannot move forward unless ReleaseGate explicitly authorizes it under a versioned, bound policy snapshot.
-
 #### Phase 1 operational controls
 
-- Override TTL boundary rule: override is active while `evaluation_time <= expires_at`; it is expired when `evaluation_time > expires_at`.
-- Separation of duties checks:
+- Override TTL boundary rule: override is active while `evaluation_time <= expires_at`.
+- Separation of duties:
   - Override requester cannot approve the same override.
   - PR author cannot approve override.
   - Actor identities are normalized (case-insensitive) and can be mapped through alias sets.
-- Identity alias mapping format (context/policy override):
-
-```yaml
-separation_of_duties:
-  enabled: true
-  deny_self_approval: true
-  identity_aliases:
-    actor-alice:
-      - ACC-1234
-      - alice@example.com
-      - alice-gh
-```
-
 - Strict fail-closed behavior:
   - Controlled by `RELEASEGATE_STRICT_FAIL_CLOSED` (global) and `policy_overrides.strict_fail_closed` (request-level).
   - In strict mode, missing policy/risk/signals or dependency timeout/error resolves to `BLOCKED`.
@@ -138,22 +116,24 @@ separation_of_duties:
   - Same key + same payload: returns the same stored response.
   - Same key + different payload: returns `409 Conflict`.
 
-### Pillar 2: Declarative Policy Engine and Immutable Rollout
+---
 
-Pillar 2 transforms ReleaseGate from a rule checker into a governance platform.
+### Pillar 2: Declarative Policy Engine and Immutable Rollout
 
 #### Declarative policy DSL
 
 Policies are defined in YAML:
 
 ```yaml
-policy_id: SEC-PR-001
-controls:
-  - signal: core_risk.severity_level
-    operator: in
-    value: ["HIGH", "CRITICAL"]
-enforcement:
-  result: BLOCK
+version: 1
+policies:
+  - id: high_risk_release
+    when:
+      risk: HIGH
+      environment: production
+    require:
+      approvals: 2
+      roles: [EngineeringManager, Security]
 ```
 
 Policies are versioned, schema validated, compiled, and hashed.
@@ -171,16 +151,10 @@ Every decision stores:
 
 Snapshots are immutable, hash-verifiable, and bound to each decision.
 
-Approval requirements can also enforce freshness windows:
+Approval freshness windows:
 
 - `approval_requirements.max_age_seconds`
 - `approvals.max_age_seconds`
-
-When set, previously granted approvals expire out of the decision path and are recorded as freshness-driven evidence in the stored decision snapshot.
-
-Decision-time SoD also applies to policy authority:
-
-- Active policy authors cannot also satisfy the governed release approval path.
 
 Verification endpoint:
 
@@ -188,13 +162,7 @@ Verification endpoint:
 GET /decisions/{decision_id}/policy-snapshot/verify
 ```
 
-Expected response includes:
-
-```json
-{ "verified": true }
-```
-
-#### Staged policy rollout (Dev -> Staging -> Prod)
+#### Staged policy rollout (Dev → Staging → Prod)
 
 Policies are deployed like software:
 
@@ -212,8 +180,6 @@ Endpoints:
 - `POST /policy/releases/rollback`
 - `GET /policy/releases/active`
 
-Each environment maintains an atomic active pointer.
-
 #### Advanced lint gate
 
 ReleaseGate includes a pre-rollout linter that detects:
@@ -223,69 +189,25 @@ ReleaseGate includes a pre-rollout linter that detects:
 - `COVERAGE_GAP`
 - `RULE_UNREACHABLE_SHADOWED` (warning)
 
-Lint runs before activation, and blocking issues prevent rollout.
+Lint runs before activation and blocking issues prevent rollout.
 
-#### Hash-linked integrity
+#### CI gate
 
-Every snapshot includes:
+Pre-merge policy validation:
 
-- `policy_hash`
-- `policy_bundle_hash`
-- `compiler_version`
-- `schema_version`
+```text
+POST /policies/ci/validate
+```
 
-This supports deterministic rebuilds, external verification, audit defense, and compliance reporting.
+Returns structured `PASS` / `FAIL` verdict with lint details, conflict analysis, and simulation summary. Suitable for blocking CI pipelines before policy changes land.
 
-#### Pillar 2 outcome
+---
 
-You can answer auditors with precision:
+### Pillar 3: Audit Evidence and Cross-System Integrity
 
-`This release was authorized under policy bundle hash X, compiled with version Y, activated in prod at timestamp Z.`
+#### Deterministic replay
 
-### Why this matters
-
-Most governance systems are procedural, manual, non-verifiable, and environment-inconsistent.
-
-ReleaseGate provides:
-
-- Deterministic enforcement
-- Immutable policy binding
-- Staged governance rollout
-- Cryptographic integrity
-
-It treats policy as versioned, deployable infrastructure.
-
-### Combined effect
-
-| Pillar | Capability |
-| --- | --- |
-| Pillar 1 | Hard real-time enforcement gate |
-| Pillar 2 | Immutable, versioned, staged policy governance |
-
-Together, ReleaseGate is a verifiable change authorization system.
-
-### Pillar 4: Audit and Evidence Integrity
-
-Pillar 4 guarantees that every governance decision is:
-
-- Deterministically reproducible
-- Formally reconstructable
-- Cross-system enforceable
-- Atomically recorded
-- Append-only and tamper-evident
-
-This layer transforms ReleaseGate from a validator into an auditable decision system.
-
-#### 1. Deterministic replay
-
-Every decision stores:
-
-- Canonicalized inputs
-- Canonicalized context
-- Compiled policy snapshot
-- `policy_hash`
-- `decision_hash`
-- `engine_version`
+Every decision stores canonicalized inputs, context, and compiled policy snapshot.
 
 Replay endpoint:
 
@@ -296,43 +218,17 @@ POST /decisions/{id}/replay
 Replay guarantees:
 
 - Uses stored policy snapshot (not current policy)
-- Returns structured response:
-  - `deterministic` block (stable across runs)
-  - `meta` block (run metadata)
+- Returns structured `deterministic` block and `meta` block
 - Emits structured diff on mismatch
 - Persists immutable replay event
 
-If stored state is invalid:
-
-- Returns `match=false`
-- Emits `STORED_DECISION_INVALID`
-- Persists replay event with status `INVALID_STORED_STATE`
-
-Deterministic blocks are byte-identical across repeated replay runs.
-
-#### 2. Formal evidence graph
+#### Formal evidence graph
 
 Every decision produces a structured evidence graph.
 
-Node types:
+Node types: `DECISION`, `POLICY`, `SIGNAL`, `ARTIFACT`, `OVERRIDE`, `DEPLOYMENT`, `INCIDENT`, `REPLAY`
 
-- `DECISION`
-- `POLICY` (snapshot-bound)
-- `SIGNAL`
-- `ARTIFACT` (proof-pack)
-- `OVERRIDE`
-- `DEPLOYMENT`
-- `INCIDENT`
-- `REPLAY`
-
-Edge types:
-
-- `USED_POLICY`
-- `USED_SIGNAL`
-- `PRODUCED_ARTIFACT`
-- `OVERRIDDEN_BY`
-- `AUTHORIZED_BY`
-- `RESOLVED_BY`
+Edge types: `USED_POLICY`, `USED_SIGNAL`, `PRODUCED_ARTIFACT`, `OVERRIDDEN_BY`, `AUTHORIZED_BY`, `RESOLVED_BY`
 
 Graph APIs:
 
@@ -341,13 +237,7 @@ GET /decisions/{id}/evidence-graph
 GET /decisions/{id}/explain
 ```
 
-`/explain` reconstructs decision reasoning in one call using graph traversal.
-
-Proof-pack artifacts and override nodes are auto-populated in the decision subgraph.
-
-#### 3. Cross-system correlation enforcement
-
-ReleaseGate enforces integrity across Jira, GitHub, CI, and deploy systems.
+#### Cross-system correlation enforcement
 
 Deploy gate:
 
@@ -355,16 +245,7 @@ Deploy gate:
 POST /gate/deploy/check
 ```
 
-Default hard-deny conditions:
-
-- `CORRELATION_ID_MISSING`
-- No approved decision
-- Repo mismatch
-- Commit mismatch
-- Artifact digest mismatch
-- Environment policy violation
-
-Correlation derivation is disabled by default and must be explicitly enabled in policy.
+Default hard-deny conditions: `CORRELATION_ID_MISSING`, no approved decision, repo mismatch, commit mismatch, artifact digest mismatch, environment policy violation.
 
 Incident close gate:
 
@@ -372,52 +253,110 @@ Incident close gate:
 POST /gate/incident/close-check
 ```
 
-Default hard-deny conditions:
-
-- `DEPLOY_NOT_FOUND_FOR_CORRELATION`
-- Missing approved release chain
-
 Incident closure requires valid deploy linkage.
 
-#### 4. Atomic and append-only persistence
+#### Atomic and append-only persistence
 
-Decision recording is fully atomic:
+Decision recording is fully atomic — decision, policy snapshot, evidence graph, artifacts, and references are written in a single database transaction. If any write fails, the entire operation rolls back.
 
-- Decision
-- Policy snapshot
-- Evidence graph
-- Artifacts
-- References
+Append-only enforcement via database triggers on `audit_decision_replays`, `evidence_nodes`, and `evidence_edges`.
 
-All are written in a single database transaction.
+---
 
-If any write fails, the entire operation rolls back.
+### Pillar 4: Trust & Audit Fabric
 
-Append-only enforcement:
+Pillar 4 makes system integrity **provable rather than claimed**. Every guarantee is independently verifiable by an auditor without access to the running system.
 
-- `audit_decision_replays`
-- `evidence_nodes`
-- `evidence_edges`
+#### Trust score
 
-`UPDATE` and `DELETE` are rejected via database triggers.
+A 0–100 composite score updated in real time from six weighted components:
 
-Postgres integration tests verify:
+| Component | Weight | Criteria |
+| --- | --- | --- |
+| Ledger Integrity | 25 | All override hash chains valid |
+| Checkpoint Freshness | 20 | Latest checkpoint within 36 hours |
+| Checkpoint Signed | 15 | Latest checkpoint has Ed25519 signature |
+| Signal Freshness | 15 | Zero-trust mode active — stale signals rejected |
+| Key Integrity | 15 | No signing keys compromised |
+| External Anchoring | 10 | At least one checkpoint anchored externally |
 
-- Append-only enforcement
-- Transaction rollback correctness
-- Idempotent retry behavior
+Accessible at: `GET /audit/trust-status`
 
-#### Pillar 4 acceptance status
+#### Signed daily checkpoints
 
-Verified via live proof script and full test suite.
+A checkpoint is published for each UTC day that has activity:
 
-- Deterministic replay validated
-- Corrupt stored-state mismatch handling validated
-- Evidence graph completeness validated
-- Strict correlation enforcement validated
-- Atomicity and immutability validated
+- `root_hash`: Merkle root of all transparency log entries for the period
+- `prev_checkpoint_hash`: links to prior checkpoint, forming a hash chain
+- `signature`: Ed25519 signature from the tenant or root signing key
 
-Full suite: `281 passed, 4 skipped`.
+Endpoints:
+
+```text
+POST /anchors/checkpoints/daily/{date_utc}/publish
+GET  /anchors/checkpoints/daily/{date_utc}/verify
+```
+
+#### External anchoring (RFC 3161)
+
+Checkpoint root hashes are submitted to an external timestamp authority (TSA). The returned RFC 3161 token proves the hash existed at a specific time — independently of ReleaseGate. Tampering with history requires forging a TSA token from a trusted CA.
+
+#### Zero-trust signal freshness
+
+Signals older than `max_age_seconds` are rejected at evaluation time. Each decision in the evidence graph carries a `signal_freshness` field with `stale`, `age_seconds`, `reason_code`, and `computed_at`.
+
+Config: `RELEASEGATE_SIGNAL_MAX_AGE_SECONDS`, `RELEASEGATE_FAIL_ON_STALE`
+
+#### Proof-of-history export (SOC2 v1)
+
+Export a portable, independently verifiable audit bundle:
+
+```text
+GET /audit/export?repo=<repo>&contract=soc2_v1
+```
+
+The bundle includes decision records, input/policy/replay hashes, override chain with verification status, and integrity aggregates — all verifiable offline.
+
+Per-decision proof packs (ZIP with DSSE attestation, inclusion proof, RFC 3161 token):
+
+```text
+GET /audit/proof-pack/{decision_id}
+```
+
+Offline verification:
+
+```bash
+python -m releasegate.cli verify-pack proofpack.zip \
+  --format json \
+  --key-file public-keys.json
+```
+
+#### Merkle tree inclusion proofs
+
+Every transparency log entry has an inclusion proof: a set of sibling hashes that, combined with the leaf hash, reproduce the published Merkle root. An auditor can verify any individual record without downloading the full log.
+
+See: [Transparency Merkle Rules](docs/transparency_merkle.md)
+
+#### Tamper evidence
+
+Ten database tables are append-only, protected by triggers that prevent UPDATE and DELETE on both SQLite and PostgreSQL. Any mutation raises an exception and is logged as a security event.
+
+See: [Tamper-Evidence Architecture](docs/security/tamper-evidence.md)
+
+---
+
+### Combined effect
+
+| Pillar | Capability |
+| --- | --- |
+| Pillar 1 | Hard real-time enforcement gate |
+| Pillar 2 | Immutable, versioned, staged policy governance |
+| Pillar 3 | Deterministic replay, evidence graph, cross-system integrity |
+| Pillar 4 | Cryptographic proof of system integrity — independently verifiable |
+
+Together, ReleaseGate is a verifiable change authorization system that can survive procurement and audit review.
+
+---
 
 ## Core Capabilities
 
@@ -439,148 +378,66 @@ RELEASEGATE_LEDGER_FAIL_ON_CORRUPTION=true
 
 ### 2. Declarative Policy Control Plane
 
-- YAML / JSON DSL
-- Explicit version field
+- YAML / JSON DSL with explicit version field
 - Strict schema validation (`extra="forbid"`)
 - Policy lint + CI enforcement
-- Policy scoping (org / repo context overlays)
+- Policy scoping (org / project / workflow / transition scope hierarchy)
+- Inheritance resolution with provenance tracking
+- Conflict and shadowing detection
 - Policy simulation ("what-if" mode)
+- Pre-merge CI gate
 
-**Example policy:**
-
-```yaml
-version: 1
-
-policies:
-  - id: high_risk_release
-    when:
-      risk: HIGH
-      environment: production
-    require:
-      approvals: 2
-      roles: [EngineeringManager, Security]
-```
-
-Each decision stores:
-
-- `policy_id`
-- `policy_version`
-- `policy_hash`
-- Full policy snapshot
-- Full input snapshot
-
-**Policies are treated as immutable artifacts.**
+Each decision stores `policy_id`, `policy_version`, `policy_hash`, full policy snapshot, and full input snapshot. **Policies are treated as immutable artifacts.**
 
 ### 3. Separation of Duties Enforcement
-
-ReleaseGate enforces governance constraints such as:
 
 - PR author cannot self-approve
 - Override requestor cannot self-approve
 - Role-based approval validation
 - Time-bound overrides with required justification
-- Automatic override expiry enforcement (`OVERRIDE_EXPIRED`) with re-lock behavior
-- Override freshness revalidation (`OVERRIDE_STALE`) when evaluation binding changes
-
-Overrides include:
-
-- `expires_at`
-- `justification`
-- `actor_id`
-- Idempotency key
-- Ledger reference
-- Evaluation binding fields (`evaluation_key`, `policy_hash`, `risk_hash`)
+- Automatic override expiry enforcement (`OVERRIDE_EXPIRED`)
+- Override freshness revalidation (`OVERRIDE_STALE`)
 
 ### 4. Immutable Audit Ledger
 
-- Append-only storage
-- No `UPDATE` / `DELETE`
+- Append-only storage with database trigger protection
 - Hash-chained entries
 - Ledger verification API
 - Startup integrity verification
-- Migration-safe schema constraints
-
-Each ledger entry references:
-
-- Decision ID
-- Policy hash
-- Input snapshot hash
-- Override linkage (if applicable)
 
 ### 5. Cryptographic Checkpointing
 
-ReleaseGate generates **signed root checkpoints** (daily / weekly):
-
-- Root hash of ledger state
-- Digital signature
+- Signed root checkpoints (daily)
+- Ed25519 signatures
+- RFC 3161 external timestamp anchoring
 - Stored separately from primary ledger
-- Verification API and CLI support
-
-**This makes tampering detectable even with database access.**
+- Verification API and CLI
 
 ### 6. Audit Proof Pack (Evidence Bundle)
 
-Export a portable proof bundle (ZIP / JSON) containing:
+Export a portable proof bundle containing:
 
-- `decision_snapshot`
-- `policy_snapshot`
-- `input_snapshot`
+- `decision_snapshot`, `policy_snapshot`, `input_snapshot`
 - `override_snapshot` (if applicable)
-- `chain_proof`
-- `checkpoint_proof`
-- `evidence_graph` (decision -> policy -> override -> checkpoint -> artifact)
-- `schema_version` metadata
-- Deterministic `graph_hash` in `integrity` and verifier-side graph hash validation
+- `chain_proof`, `checkpoint_proof`
+- `evidence_graph`
+- Integrity hashes and `schema_version`
 
-**This allows independent verification outside the system.**
+**Independent verification requires only the proof pack and public key — no ReleaseGate access needed.**
 
 ### 7. Deterministic Replay
 
-Replay any historical decision using:
-
-- Stored policy snapshot
-- Stored input snapshot
-- Original policy hash
-
-Replay verifies:
-
-- Outcome consistency
-- Policy binding integrity
-- Snapshot correctness
-
-**Reproducibility is built-in.**
+Replay any historical decision using stored policy and input snapshots. Verifies outcome consistency, policy binding integrity, and snapshot correctness.
 
 ### 8. Policy Simulation ("What-If" Mode)
 
-Simulate new policies against the last N decisions:
-
-Metrics include:
-
-- `would_newly_block`
-- `would_unblock`
-- `delta`
-- Impact breakdown
-
-**This enables safe policy rollout before enforcement.**
+Simulate new policies against historical decisions. Metrics include `would_newly_block`, `would_unblock`, `delta`, and impact breakdown.
 
 ### 9. Minimal Metadata-Only GitHub Integration
 
-ReleaseGate:
+ReleaseGate does **not** clone repositories, store diffs, store source code, or persist access tokens. It consumes PR metadata only (`changed_files`, `additions`, `deletions`). **Security posture is intentionally minimal.**
 
-- Does **NOT** clone repositories
-- Does **NOT** store diffs
-- Does **NOT** store source code
-- Does **NOT** persist access tokens
-
-It consumes **PR metadata only**:
-
-- `changed_files`
-- `additions`
-- `deletions`
-
-Risk metadata is attached to Jira issue properties.
-
-**Security posture is intentionally minimal.**
+---
 
 ## Trust Guarantees
 
@@ -588,44 +445,14 @@ Risk metadata is attached to Jira issue properties.
 - Public signing keys are published via root-signed manifests:
   - `/.well-known/releasegate-keys.json`
   - `/.well-known/releasegate-keys.sig`
-  - Alias: `/.well-known/releasegate/keys.json` and `/.well-known/releasegate/keys.sig`
 - Key status semantics are explicit (`ACTIVE`, `DEPRECATED`, `REVOKED`).
 - Transparency log records every attestation issuance in append-only storage.
-- Transparency APIs:
-  - `GET /transparency/latest` (default `50`, max clamp `500`, rejects `<= 0`)
-  - `GET /transparency/{attestation_id}`
-- Merkle anchoring rules (leaf format, ordering, parent hash, proof verification):
-  - `docs/transparency_merkle.md`
-- Signed daily external roots are published to:
-  - `roots/YYYY-MM-DD.json`
-  - Generated by GitHub Actions via `releasegate export-root --date <YYYY-MM-DD> --out roots/<YYYY-MM-DD>.json`
-  - Default scheduler exports **yesterday's** UTC root (stable/finalized day)
-- Roots are produced deterministically from ordered leaves using canonical JSON and signed with an Ed25519 root key.
-- Root signing secret format:
-  - `RELEASEGATE_ROOT_SIGNING_KEY` accepts Ed25519 private key as PEM, or 32-byte raw key (hex/base64)
-  - `RELEASEGATE_ROOT_KEY_ID` identifies the root key used to sign published roots
-- External root verification uses the pinned root public key (`RELEASEGATE_ROOT_KEY_ID`).
-- Transparency proofs relate to published roots as:
-  - `GET /transparency/proof/{attestation_id}` → inclusion proof
-  - `GET /transparency/root/{date_utc}` / `roots/YYYY-MM-DD.json` → anchored root hash for verification
-- Logs include `engine_build` metadata (`git_sha`, `version`) for traceability.
-- DSSE + in-toto export is available for supply-chain interoperability:
+- Merkle anchoring rules: [docs/transparency_merkle.md](docs/transparency_merkle.md)
+- Signed daily external roots are published to `roots/YYYY-MM-DD.json` via GitHub Actions.
+- DSSE + in-toto export for supply-chain interoperability:
   - CLI: `releasegate analyze-pr --repo ORG/REPO --pr 15 --tenant default --emit-dsse att.dsse.json`
-  - Optional Sigstore keyless DSSE signing: `--dsse-signing-mode sigstore` (writes `<dsse>.sigstore.bundle.json`)
-  - Verify CLI: `releasegate verify-dsse --dsse att.dsse.json --key-file attestation/keys/public.pem --require-keyid <keyid>`
-  - Verify Sigstore bundle: `releasegate verify-dsse --dsse att.dsse.json --sigstore-bundle <bundle.json> --sigstore-identity <...> --sigstore-issuer <...>`
   - API: `GET /attestations/{attestation_id}.dsse`
-  - Top-level DSSE fields:
-    - `payloadType: application/vnd.in-toto+json`
-    - `payload` (base64 canonical in-toto Statement; JCS/RFC8785 subset)
-    - `signatures[{keyid,sig}]`
-  - SDK verification:
-    - `verify_dsse(envelope, public_keys_by_key_id)`
-  - Optional internal index log:
-    - `releasegate log-dsse --dsse att.dsse.json --log attestations.log`
-    - `releasegate verify-log --dsse att.dsse.json --log attestations.log`
-  - Threat model:
-    - `docs/security/threat-model.md`
+  - Verify: `releasegate verify-dsse --dsse att.dsse.json --key-file public.pem --require-keyid <keyid>`
 
 ---
 
@@ -638,16 +465,37 @@ Jira Issue Property (releasegate_risk)
             ↓
 Forge Workflow Validator
             ↓
-Policy Control Plane
+Policy Control Plane (DSL → Lint → Snapshot → Evaluate)
             ↓
 ALLOW / BLOCK
             ↓
-Immutable Ledger
+Atomic Decision Record (4 integrity hashes)
             ↓
-Signed Checkpoints
+Append-Only Audit Ledger
             ↓
-Proof Pack Export
+Daily Signed Checkpoints → RFC 3161 External Anchoring
+            ↓
+Proof Pack Export / Evidence Graph / Trust Score Dashboard
 ```
+
+---
+
+## Dashboard
+
+A governance operations dashboard ships with ReleaseGate (`dashboard-ui/`):
+
+| Page | Purpose |
+| --- | --- |
+| `/overview` | Executive impact summary |
+| `/policies` | Policy registry with status, inheritance, lint |
+| `/policies/simulate` | What-if simulation against historical decisions |
+| `/policies/ci-gate` | Pre-merge CI gate validation UI |
+| `/audit` | Trust score (0–100), component breakdown, tamper-evidence status |
+| `/audit/evidence` | Evidence graph search with per-decision freshness state |
+| `/audit/export` | Proof-of-history export — SOC2 v1 bundle download |
+| `/integrity` | Control health and override patterns |
+| `/observability` | Enforcement metrics |
+| `/overrides` | Exception management |
 
 ---
 
@@ -656,87 +504,47 @@ Proof Pack Export
 ```
 change-risk-predictor/
 ├── releasegate/                    # Core enforcement engine
-│   ├── audit/                      # Audit ledger & checkpointing
-│   │   ├── checkpoints.py          # Signed checkpoint engine
-│   │   ├── overrides.py            # Override ledger with idempotency
-│   │   └── reader.py               # Ledger query interface
-│   ├── decision/                   # Decision model & types
-│   │   ├── types.py                # Policy snapshot binding
-│   │   └── factory.py              # Decision creation
-│   ├── engine_core/                # Isolated engine components
-│   │   ├── decision_model.py       # Core decision logic
-│   │   ├── policy_parser.py        # Policy DSL parser
-│   │   └── evaluator.py            # Policy evaluation engine
-│   ├── enforcement/                # Enforcement actions
-│   │   ├── planner.py              # Enforcement planning
-│   │   ├── runner.py               # Enforcement execution
-│   │   └── actions/                # GitHub/Jira actions
-│   ├── integrations/               # External integrations
-│   │   ├── jira/                   # Jira workflow gate
-│   │   │   ├── workflow_gate.py    # Transition enforcement
-│   │   │   ├── client.py           # Jira API client
-│   │   │   ├── routes.py           # Jira webhook routes
-│   │   │   └── types.py            # Jira-specific types
-│   │   └── github_risk.py          # GitHub metadata ingestion
-│   ├── policy/                     # Policy control plane
-│   │   ├── loader.py               # Policy registry loader
-│   │   ├── policy_types.py         # Policy schema definitions
-│   │   ├── lint.py                 # Policy validation & linting
-│   │   └── simulation.py           # What-if simulation engine
-│   ├── replay/                     # Deterministic replay
-│   │   └── decision_replay.py      # Replay engine & API
-│   ├── storage/                    # Database layer
-│   │   └── schema.py               # SQLAlchemy models
-│   ├── observability/              # Metrics & monitoring
-│   │   └── internal_metrics.py     # Enforcement metrics
+│   ├── audit/                      # Audit ledger, checkpoints, proof packs
+│   ├── anchoring/                  # RFC 3161 anchoring, anchor scheduler
+│   ├── correlation/                # Cross-system enforcement (deploy/incident gates)
+│   ├── crypto/                     # Ed25519 signing, key management
+│   ├── evidence/                   # Evidence graph construction
+│   ├── governance/                 # Signal freshness, dashboard metrics
+│   ├── integrations/               # Jira workflow gate, GitHub risk
+│   ├── policy/                     # Policy registry, lint, simulation
+│   ├── replay/                     # Deterministic replay engine
+│   ├── storage/                    # SQLite / PostgreSQL backend
 │   ├── cli.py                      # CLI commands
-│   ├── server.py                   # FastAPI server
-│   └── engine.py                   # Main engine orchestration
+│   └── server.py                   # FastAPI server (~9000 lines)
+│
+├── dashboard-ui/                   # Governance operations dashboard (Next.js)
+│   └── src/app/
+│       ├── audit/                  # Trust score, evidence graph, export
+│       ├── policies/               # Policy registry, simulate, CI gate
+│       ├── overview/               # Executive summary
+│       ├── integrity/              # Control health
+│       └── observability/          # Enforcement metrics
 │
 ├── forge/                          # Atlassian Forge app
-│   ├── release-gate/               # Forge validator
-│   │   ├── src/index.js            # Validator entry point
-│   │   ├── manifest.yml            # Forge manifest
-│   │   └── static/                 # Admin UI
-│   └── package.json
+│   └── release-gate/               # Jira workflow validator
 │
-├── tests/                          # Test suite (98 passing)
-│   ├── audit/                      # Audit ledger tests
-│   │   └── test_overrides_chain.py
-│   ├── decision/                   # Decision model tests
-│   ├── enforcement/                # Enforcement tests
-│   ├── integrations/               # Integration tests
-│   │   └── jira/
-│   ├── test_audit_checkpoints.py   # Checkpoint tests
-│   ├── test_audit_proof_pack.py    # Proof pack export tests
-│   ├── test_policy_simulation.py   # Simulation tests
-│   ├── test_decision_replay.py     # Replay tests
-│   └── test_policy_lint.py         # Policy lint tests
+├── tests/                          # Test suite (563 passing)
+│   ├── audit/                      # Proof pack, tamper evidence
+│   ├── integrations/               # Jira workflow gate, signal freshness
+│   └── test_*.py                   # Policy, checkpoint, replay, simulation
 │
-├── scripts/                        # Utility scripts
-│   ├── demo_block_override_export.py
-│   ├── seed_phase9_db.py
-│   └── verify_phase*.py
+├── docs/
+│   ├── AUDIT_PACK.md               # Procurement / audit starting point
+│   ├── security/                   # Whitepaper, threat model, tamper evidence
+│   ├── compliance/                 # SOC2, DPA, signal freshness model
+│   ├── contracts/                  # Proof pack v1, SOC2 v1 schema
+│   └── ops/                        # Anchoring runbook, deployment guides
 │
-├── docs/                           # Current source-of-truth docs
-│   ├── architecture.md
-│   ├── decision-model.md
-│   ├── policy-dsl.md
-│   ├── security.md
-│   ├── jira-config.md
-│   ├── forge-hardening.md
-│   ├── contracts/
-│   └── legacy/                     # Superseded/historical docs
-│
-├── .github/workflows/              # CI/CD
-│   └── compliance-check.yml        # Policy lint enforcement
-│
-├── Makefile                        # Build targets
-├── Dockerfile                      # Container image
-├── docker-compose.yml              # Local stack
-├── requirements.txt                # Python dependencies
-├── pyproject.toml                  # Package metadata
-└── README.md                       # This file
+├── .github/workflows/              # CI/CD (compliance check, daily root publish)
+├── Makefile
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
 ```
 
 ---
@@ -751,7 +559,7 @@ Internal enforcement metrics:
 - `skipped_count`
 - `transitions_error`
 
-**Available at:**
+Available at:
 
 ```
 GET /integrations/jira/metrics/internal
@@ -761,145 +569,62 @@ GET /integrations/jira/metrics/internal
 
 ## CLI Commands
 
-### One-command demo
-
-```bash
-make demo
-```
-
-### Quick Demo (Deterministic Proofpack v1)
-
-This is the fastest end-to-end “auditor moment” path:
-
-- Generate a decision trail
-- Emit a signed attestation
-- Export a deterministic proofpack v1 ZIP
-- Verify the pack offline
-- Verify Merkle inclusion
+### Quick Demo (Deterministic Proof Pack v1)
 
 ```bash
 set -euo pipefail
-
-# 0) temp demo DB + tenant
-export COMPLIANCE_DB_PATH=/tmp/rg_phase3_demo.db
+export COMPLIANCE_DB_PATH=/tmp/rg_demo.db
 export RELEASEGATE_STORAGE_BACKEND=sqlite
 export RELEASEGATE_TENANT_ID=demo
 
 python -m releasegate.cli db-migrate >/dev/null
 
-# 1) generate an Ed25519 signing keypair for attestations (local demo only)
-openssl genpkey -algorithm ED25519 -out /tmp/releasegate_attest_private.pem
-openssl pkey -in /tmp/releasegate_attest_private.pem -pubout -out /tmp/releasegate_attest_public.pem
-export RELEASEGATE_SIGNING_KEY="$(cat /tmp/releasegate_attest_private.pem)"
+# Generate Ed25519 keypair
+openssl genpkey -algorithm ED25519 -out /tmp/rg_private.pem
+openssl pkey -in /tmp/rg_private.pem -pubout -out /tmp/rg_public.pem
+export RELEASEGATE_SIGNING_KEY="$(cat /tmp/rg_private.pem)"
 
-# 2) create demo decisions and capture a decision_id to export
+# Create demo decisions
 DEMO_JSON="$(make demo-json)"
-DECISION_ID="$(printf '%s' "$DEMO_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)[\"blocked_decision_id\"])')"
-echo "DECISION_ID=$DECISION_ID"
+DECISION_ID="$(printf '%s' "$DEMO_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)["blocked_decision_id"])')"
 
-# 3) build deterministic proofpack v1 zip
+# Build proof pack zip
 OUT_JSON="$(python -m releasegate.cli proofpack --decision-id "$DECISION_ID" --tenant demo --out /tmp/proofpack.zip --format json)"
-ATT_ID="$(printf '%s' "$OUT_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)[\"attestation_id\"])')"
-echo "ATTESTATION_ID=$ATT_ID"
+ATT_ID="$(printf '%s' "$OUT_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)["attestation_id"])')"
 
-# 4) offline verification: no server/DB required (only the proofpack + public key)
-python -m releasegate.cli verify-pack /tmp/proofpack.zip --format json --key-file /tmp/releasegate_attest_public.pem
-
-# 5) inclusion verification (this demo reads the transparency log from the local DB)
+# Offline verification — no server/DB required
+python -m releasegate.cli verify-pack /tmp/proofpack.zip --format json --key-file /tmp/rg_public.pem
 python -m releasegate.cli verify-inclusion --attestation-id "$ATT_ID" --tenant demo --format json
 
-# Clean up
-rm -f /tmp/rg_phase3_demo.db /tmp/proofpack.zip /tmp/releasegate_attest_private.pem /tmp/releasegate_attest_public.pem
-unset RELEASEGATE_SIGNING_KEY
+rm -f /tmp/rg_demo.db /tmp/proofpack.zip /tmp/rg_private.pem /tmp/rg_public.pem
 ```
 
-What success looks like:
+Success: `verify-pack` returns `"ok": true`, `verify-inclusion` returns `"ok": true` with `"root_hash"`.
 
-- `proofpack` JSON includes `"ok": true` and `"attestation_id"`.
-- `verify-pack` JSON includes `"ok": true`.
-- `verify-inclusion` JSON includes `"ok": true` and `"root_hash"`.
-
-### Validate deploy-time policy bundle
+### Common commands
 
 ```bash
-python -m releasegate.cli validate-policy-bundle
-```
+# Policy lint
+python -m releasegate.cli lint-policies
 
-### Validate Jira transition/role mappings
+# Policy simulation
+python -m releasegate.cli simulate-policies --repo org/service --tenant demo --limit 100
 
-```bash
-python -m releasegate.cli validate-jira-config
-python -m releasegate.cli validate-jira-config --check-jira
-```
+# Export proof pack
+python -m releasegate.cli proofpack --decision-id <id> --tenant demo --out proofpack.zip
 
-### Create signed checkpoint
+# Verify proof pack offline
+python -m releasegate.cli verify-pack proofpack.zip --format json --key-file public.pem
 
-```bash
+# Verify Merkle inclusion
+python -m releasegate.cli verify-inclusion --attestation-id <id> --tenant demo --format json
+
+# Create signed checkpoint
 python -m releasegate.cli checkpoint-override --repo org/service --tenant demo
-```
 
-### Verify DB migration status
-
-```bash
+# Validate DB migration status
 python -m releasegate.cli db-migration-status
 ```
-
-### Export proof pack
-
-```bash
-python -m releasegate.cli proof-pack --decision-id <id> --tenant demo --format json
-```
-
-### Verify proof pack offline
-
-```bash
-python -m releasegate.cli verify-proof-pack /path/to/proof-pack.json
-```
-
-### Export deterministic proofpack v1 zip
-
-```bash
-python -m releasegate.cli proofpack --decision-id <id> --tenant demo --out proofpack.zip
-```
-
-### Verify deterministic proofpack v1 zip
-
-```bash
-python -m releasegate.cli verify-pack proofpack.zip --format json
-```
-
-### Verify Merkle inclusion for an attestation
-
-```bash
-python -m releasegate.cli verify-inclusion --attestation-id <attestation_id> --tenant demo --format json
-```
-
-### Run policy simulation
-
-```bash
-python -m releasegate.cli simulate-policies --repo org/service --tenant demo --limit 100
-```
-
-### Lint policy definitions
-
-```bash
-python -m releasegate.cli lint-policies
-```
-
----
-
-## Phase 1 Audit Packet
-
-Generate a 5-scenario Phase 1 smoke evidence packet (request/response pairs, manifest, zip):
-
-```bash
-python scripts/generate_phase1_audit_packet.py \
-  --config scripts/phase1_audit_packet.example.json \
-  --output-dir /tmp/phase1-audit-packet \
-  --zip-path /tmp/Pillar1-AuditPacket.zip
-```
-
-Before running, copy `scripts/phase1_audit_packet.example.json` and replace placeholders with real tenant/auth/decision/correlation values.
 
 ---
 
@@ -923,29 +648,19 @@ uvicorn releasegate.server:app --reload
 pytest
 ```
 
-### Golden Demo
+Current status: **563 tests passing**
 
-Prerequisites: Python 3.11+, `make` (Docker optional; not required for `make golden`).
+### Golden Demo
 
 ```bash
 make golden
 ```
 
-Artifacts are written to `out/golden/`.
-`✅ PASS` means risk attach, transition block, override, proof-pack export+verify, replay, and simulation all succeeded.
-Manual verify: `python -m releasegate.cli verify-proof-pack out/golden/proof_pack.json --format json --signing-key <key>`.
-
-**Current status:**
-
-- 98 tests passing
-- Policy lint integrated into CI
-- Deterministic enforcement verified
+Artifacts written to `out/golden/`. `✅ PASS` means risk attach, transition block, override, proof-pack export+verify, replay, and simulation all succeeded.
 
 ---
 
 ## Deployment
-
-ReleaseGate ships with deployment automation kits for fast enterprise adoption.
 
 ### Docker Compose (quickstart)
 
@@ -965,8 +680,7 @@ helm install releasegate ./deploy/helm/releasegate
 
 ```bash
 cd infra/terraform/releasegate
-terraform init
-terraform apply
+terraform init && terraform apply
 ```
 
 ### CI/CD Integration Examples
@@ -983,96 +697,59 @@ terraform apply
 
 ## Enterprise Documentation
 
-- Security whitepaper: `docs/security/security-whitepaper.md`
-- SOC2 readiness: `docs/compliance/soc2-readiness.md`
-- Compliance mapping: `docs/compliance/compliance-mapping.md`
-- Architecture overview diagram: `docs/architecture/architecture.md`
-- Governance ROI calculator: `docs/business/roi-calculator.md`
-- Demo kit: `demo/demo-scenarios.md`, `demo/demo-policies.json`, `demo/seed-demo-data.py`
+| Document | Purpose |
+| --- | --- |
+| [Audit Pack Index](docs/AUDIT_PACK.md) | Starting point for procurement and audit review |
+| [Security Whitepaper](docs/security/security-whitepaper.md) | System design, controls, trust fabric |
+| [Threat Model](docs/security/threat-model.md) | Attack mitigations, DSSE and trust fabric threats |
+| [Tamper-Evidence Architecture](docs/security/tamper-evidence.md) | Immutable tables, detection paths, verification |
+| [DPA Template](docs/compliance/dpa-template.md) | Data processing commitments |
+| [SOC2 Readiness](docs/compliance/soc2-readiness.md) | SOC2 Trust Service Criteria mapping |
+| [SLA Targets](docs/sla.md) | Availability, latency, anchoring durability |
+| [SLA Failure Modes](docs/sla_failure_modes.md) | Outage behavior, fail-closed semantics |
+| [Proof Bundle Verification](docs/compliance/proof_bundle_verification.md) | Offline verification from first principles |
 
 ---
 
 ## Versioning
 
-**Current milestone:**
+**Current release:** `v2.1.0`
 
-```
-v2.0.0-policy-control-plane
-```
+Includes:
+- Policy control plane (registry, inheritance, lint, simulation, CI gate)
+- Trust & audit fabric (trust score, signed checkpoints, RFC 3161 anchoring, evidence graph, proof-of-history export)
+- Governance operations dashboard
 
-This version establishes:
+**Previous milestones:**
 
-- Governance control plane
-- Signed checkpoint system
-- Audit proof pack export
-- Policy simulation engine
-- Separation-of-duties enforcement
-- Idempotent override handling
-
-**Previous milestone:**
-
-```
-v1.0.0-governance-core
-```
+- `v2.0.0-policy-control-plane` — Declarative policy engine, staged rollout, SoD enforcement
+- `v1.0.0-governance-core` — Transition enforcement, immutable ledger, proof packs
 
 ---
 
 ## Security Model
 
-- Metadata-only ingestion
-- No source code storage
-- No diff retention
-- No token persistence
-- Hash-chained ledger
-- Signed checkpoint verification
+- Metadata-only ingestion — no source code, no diffs, no tokens
+- Hash-chained ledger with trigger-enforced append-only tables
+- Ed25519 signed checkpoints and attestations
+- RFC 3161 external timestamp anchoring
+- Zero-trust signal freshness enforcement
 - Fail-closed configuration option
 
 **ReleaseGate is designed to minimize data risk while maximizing governance integrity.**
 
 ---
 
-## Positioning
-
-### ReleaseGate is:
-
-- Jira governance infrastructure
-- Workflow enforcement primitive
-- SDLC control layer
-- Audit-ready policy engine
-
-### ReleaseGate is not:
-
-- A dashboard
-- An analytics tool
-- A developer scoring system
-- A source code scanner
-
----
-
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License — see [LICENSE](LICENSE) file for details.
 
 Copyright (c) 2026 Abishek Kumar Giri
 
 ---
 
-## Contributing
-
-This project enforces:
-
-- Policy lint via CI
-- Full test coverage for new features
-- Deterministic behavior verification
-
-See [docs/architecture.md](docs/architecture.md) for design principles.
-
----
-
 ## Support
 
-For issues, questions, or feature requests, please open an issue on GitHub:
-
-https://github.com/abishekgiri/change-risk-predictor-/issues
+For issues, questions, or feature requests: https://github.com/abishekgiri/change-risk-predictor-/issues
 
 <!-- allow-path-validation-pr -->
