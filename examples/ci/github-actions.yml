@@ -1,3 +1,17 @@
+##############################################################################
+# ReleaseGate governance gate for GitHub Actions
+#
+# Required secrets (Settings → Secrets → Actions):
+#   RELEASEGATE_URL    – your ReleaseGate instance, e.g. https://app.releasegate.io
+#   RELEASEGATE_TOKEN  – API token with policy:read scope
+#
+# Required variables (Settings → Variables, or set in the calling workflow):
+#   JIRA_ISSUE_KEY       – e.g. PROJ-42
+#   JIRA_PROJECT_KEY     – e.g. PROJ
+#   JIRA_TRANSITION_ID   – Jira workflow transition ID (default 31; find yours in Jira → Workflow editor)
+#   RELEASEGATE_TENANT_ID – your tenant slug
+#   DEPLOY_ENV           – e.g. PRODUCTION (defaults to PRODUCTION)
+##############################################################################
 name: ReleaseGate Governance Check
 
 on:
@@ -10,29 +24,70 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Send transition check to ReleaseGate
+      - name: Evaluate deployment gate
+        id: gate
         env:
-          RELEASEGATE_URL: ${{ secrets.RELEASEGATE_URL }}
+          RELEASEGATE_URL:   ${{ secrets.RELEASEGATE_URL }}
           RELEASEGATE_TOKEN: ${{ secrets.RELEASEGATE_TOKEN }}
+          JIRA_ISSUE_KEY:      ${{ vars.JIRA_ISSUE_KEY }}
+          JIRA_PROJECT_KEY:    ${{ vars.JIRA_PROJECT_KEY }}
+          JIRA_TRANSITION_ID:  ${{ vars.JIRA_TRANSITION_ID || '31' }}
+          DEPLOY_ENV:          ${{ vars.DEPLOY_ENV || 'PRODUCTION' }}
         run: |
-          curl -sS -X POST "${RELEASEGATE_URL}/integrations/jira/transition/check" \
+          RESPONSE=$(curl -sS -X POST "${RELEASEGATE_URL}/integrations/jira/transition/check" \
             -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "issue_key": "PAYMENTS-123",
-              "transition_id": "31",
-              "source_status": "Ready for Release",
-              "target_status": "Done",
-              "actor_account_id": "github-actions",
-              "environment": "PRODUCTION",
-              "project_key": "PAYMENTS",
-              "issue_type": "Story"
-            }' | tee releasegate_response.json
+            -d "{
+              \"issue_key\": \"${JIRA_ISSUE_KEY}\",
+              \"transition_id\": \"${JIRA_TRANSITION_ID}\",
+              \"source_status\": \"Ready for Release\",
+              \"target_status\": \"Done\",
+              \"actor_account_id\": \"github-actions\",
+              \"environment\": \"${DEPLOY_ENV}\",
+              \"project_key\": \"${JIRA_PROJECT_KEY}\",
+              \"issue_type\": \"Story\"
+            }")
+          echo "${RESPONSE}" | tee releasegate_response.json
+          echo "status=$(echo "${RESPONSE}" | jq -r '.status // empty')" >> "$GITHUB_OUTPUT"
 
-      - name: Fail workflow on governance deny
+      - name: Enforce gate decision
         run: |
-          STATUS=$(jq -r '.status // empty' releasegate_response.json)
+          STATUS="${{ steps.gate.outputs.status }}"
           if [ "$STATUS" = "BLOCKED" ] || [ "$STATUS" = "ERROR" ]; then
-            echo "ReleaseGate denied transition"
+            echo "::error::ReleaseGate denied deployment (status=${STATUS}). Review the evidence at ${RELEASEGATE_URL}/audit/evidence"
             exit 1
           fi
+          echo "Gate passed (status=${STATUS})"
+
+---
+##############################################################################
+# DEPLOY-GATE VARIANT  (block the deploy step itself, not just the PR check)
+#
+# Add this job before your deploy job and set `needs: releasegate-deploy-gate`.
+##############################################################################
+# jobs:
+#   releasegate-deploy-gate:
+#     runs-on: ubuntu-latest
+#     outputs:
+#       gate_status: ${{ steps.gate.outputs.status }}
+#     steps:
+#       - name: ReleaseGate deploy gate
+#         id: gate
+#         env:
+#           RELEASEGATE_URL:      ${{ secrets.RELEASEGATE_URL }}
+#           RELEASEGATE_TOKEN:    ${{ secrets.RELEASEGATE_TOKEN }}
+#           RELEASEGATE_TENANT:   ${{ vars.RELEASEGATE_TENANT_ID }}
+#         run: |
+#           STATUS=$(curl -sS -X POST "${RELEASEGATE_URL}/deploy/gate" \
+#             -H "Authorization: Bearer ${RELEASEGATE_TOKEN}" \
+#             -H "Content-Type: application/json" \
+#             -d "{\"tenant_id\":\"${RELEASEGATE_TENANT}\",\"repo\":\"${{ github.repository }}\",\"sha\":\"${{ github.sha }}\",\"environment\":\"production\"}" \
+#             | jq -r '.status')
+#           echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+#           [ "$STATUS" = "ALLOWED" ] || exit 1
+#
+#   deploy:
+#     needs: releasegate-deploy-gate
+#     runs-on: ubuntu-latest
+#     steps:
+#       - run: echo "Deploying…"
