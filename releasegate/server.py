@@ -6440,6 +6440,42 @@ def publish_policy_bundle(
             raise HTTPException(status_code=404, detail="Policy bundle not found and no policy_snapshot provided")
         snapshot = existing.get("policy_snapshot", [])
 
+    # Gate: if activating, validate every policy in the bundle for lint errors
+    # and contradictions. Unsafe bundles cannot be activated.
+    gate_issues: list[dict] = []
+    if payload.activate and snapshot:
+        from releasegate.policy.lint import lint_registry_policy
+
+        for idx, policy_item in enumerate(snapshot):
+            p_json = policy_item if isinstance(policy_item, dict) else {}
+            lint_out = lint_registry_policy(
+                policy_json=p_json,
+                scope_type=p_json.get("scope_type", "org"),
+                scope_id=p_json.get("scope_id", "default"),
+                tenant_id=effective_tenant,
+            )
+            errors = [i for i in lint_out.get("issues", []) if i.get("severity") == "ERROR"]
+            if errors:
+                gate_issues.append({"index": idx, "errors": errors})
+
+        if gate_issues:
+            log_security_event(
+                tenant_id=effective_tenant,
+                principal_id=auth.principal_id,
+                auth_method=auth.auth_method,
+                action="policy_publish_blocked",
+                target_type="policy_bundle",
+                target_id=payload.policy_bundle_hash,
+                metadata={"reason": "lint_errors", "issue_count": len(gate_issues)},
+            )
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Cannot activate bundle: policies contain lint errors",
+                    "issues": gate_issues,
+                },
+            )
+
     if payload.activate:
         get_storage_backend().execute(
             "UPDATE policy_bundles SET is_active = ? WHERE tenant_id = ?",
@@ -7238,6 +7274,179 @@ def list_policy_rollouts_endpoint(
             state=state,
             limit=max(1, min(limit, 500)),
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Policy CI Gate — pre-merge validation for policy changes
+# ---------------------------------------------------------------------------
+
+
+class PolicyCIValidateRequest(BaseModel):
+    """Validate a policy change is safe for merge/deploy."""
+    tenant_id: Optional[str] = None
+    policy_id: Optional[str] = None
+    policy_json: Optional[Dict[str, Any]] = None
+    scope_type: str = "org"
+    scope_id: str = "default"
+    fail_on_warnings: bool = False
+    run_historical_simulation: bool = True
+    simulation_window_days: int = 30
+
+
+@app.post("/policies/ci/validate")
+def policy_ci_gate_validate(
+    payload: PolicyCIValidateRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["policy:write", "policy:read"],
+        rate_profile="default",
+    ),
+):
+    """CI gate endpoint: validates a policy change is safe before merge.
+
+    Runs lint, conflict detection, shadowing analysis, and optional
+    historical simulation.  Returns a structured verdict that CI can
+    use to pass/fail a pipeline.
+    """
+    from releasegate.policy.lint import lint_registry_policy
+    from releasegate.policy.conflict_engine import analyze_policy_conflicts
+    from releasegate.policy.registry import get_registry_policy
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+
+    # Resolve policy JSON — either from registry or from payload
+    policy_json: Optional[Dict[str, Any]] = payload.policy_json
+    policy_ref: Dict[str, Any] = {"source": "inline"}
+    if payload.policy_id and not policy_json:
+        policy = get_registry_policy(
+            tenant_id=effective_tenant,
+            policy_id=payload.policy_id,
+        )
+        if not policy:
+            raise HTTPException(status_code=404, detail="Policy not found")
+        policy_json = policy.get("policy_json")
+        policy_ref = {
+            "source": "registry",
+            "policy_id": payload.policy_id,
+            "version": policy.get("version"),
+            "policy_hash": policy.get("policy_hash"),
+        }
+
+    if not policy_json:
+        raise HTTPException(
+            status_code=400,
+            detail="Either policy_id or policy_json must be provided",
+        )
+
+    # 1. Lint
+    lint_result = lint_registry_policy(
+        policy_json=policy_json,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        tenant_id=effective_tenant,
+    )
+    lint_errors = [i for i in lint_result.get("issues", []) if i.get("severity") == "ERROR"]
+    lint_warnings = [i for i in lint_result.get("issues", []) if i.get("severity") == "WARNING"]
+
+    # 2. Conflict & shadowing analysis
+    conflict_result = analyze_policy_conflicts(
+        policy_json=policy_json,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        tenant_id=effective_tenant,
+    )
+    contradictions = conflict_result.get("contradictions", [])
+    shadowed_rules = conflict_result.get("shadowed_rules", [])
+    coverage_gaps = conflict_result.get("coverage_gaps", [])
+
+    # 3. Historical simulation (optional)
+    simulation_summary: Optional[Dict[str, Any]] = None
+    if payload.run_historical_simulation:
+        try:
+            from releasegate.policy.historical_simulation import simulate_historical_policy_impact
+
+            sim_result = simulate_historical_policy_impact(
+                tenant_id=effective_tenant,
+                policy_json=policy_json,
+                time_window_days=payload.simulation_window_days,
+            )
+            simulation_summary = {
+                "scanned_events": sim_result.get("scanned_events", 0),
+                "simulated_events": sim_result.get("simulated_events", 0),
+                "would_block_count": sim_result.get("would_block_count", 0),
+                "would_allow_count": sim_result.get("would_allow_count", 0),
+                "delta_breakdown": sim_result.get("delta_breakdown", {}),
+            }
+        except Exception as exc:
+            logging.exception(
+                "Historical simulation failed for tenant_id=%s, policy_ref=%s",
+                effective_tenant,
+                policy_ref,
+            )
+            simulation_summary = {"error": "Historical simulation failed."}
+
+    # 4. Compute verdict
+    gate_failed = False
+    failure_reasons: list[str] = []
+
+    if lint_errors:
+        gate_failed = True
+        failure_reasons.append(f"{len(lint_errors)} lint error(s)")
+    if payload.fail_on_warnings and lint_warnings:
+        gate_failed = True
+        failure_reasons.append(f"{len(lint_warnings)} lint warning(s) (fail_on_warnings=true)")
+    if contradictions:
+        gate_failed = True
+        failure_reasons.append(f"{len(contradictions)} contradiction(s)")
+    if shadowed_rules:
+        # Shadowed rules are warnings by default — fail only in strict mode
+        if payload.fail_on_warnings:
+            gate_failed = True
+            failure_reasons.append(f"{len(shadowed_rules)} shadowed rule(s)")
+
+    verdict = "PASS" if not gate_failed else "FAIL"
+
+    log_security_event(
+        tenant_id=effective_tenant,
+        principal_id=auth.principal_id,
+        auth_method=auth.auth_method,
+        action="policy_ci_validate",
+        target_type="policy",
+        target_id=payload.policy_id or "inline",
+        metadata={
+            "verdict": verdict,
+            "lint_errors": len(lint_errors),
+            "lint_warnings": len(lint_warnings),
+            "contradictions": len(contradictions),
+            "shadowed_rules": len(shadowed_rules),
+            "coverage_gaps": len(coverage_gaps),
+            "fail_on_warnings": payload.fail_on_warnings,
+        },
+    )
+
+    return {
+        "verdict": verdict,
+        "tenant_id": effective_tenant,
+        "policy_ref": policy_ref,
+        "failure_reasons": failure_reasons,
+        "lint": {
+            "ok": lint_result.get("ok", False),
+            "error_count": len(lint_errors),
+            "warning_count": len(lint_warnings),
+            "errors": lint_errors,
+            "warnings": lint_warnings,
+        },
+        "conflicts": {
+            "ok": conflict_result.get("ok", True),
+            "contradiction_count": len(contradictions),
+            "shadowed_rule_count": len(shadowed_rules),
+            "coverage_gap_count": len(coverage_gaps),
+            "contradictions": contradictions,
+            "shadowed_rules": shadowed_rules,
+            "coverage_gaps": coverage_gaps,
+        },
+        "simulation": simulation_summary,
     }
 
 

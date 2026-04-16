@@ -23,6 +23,7 @@ const links = [
   { href: "/policies", label: "Policies" },
   { href: "/policies/diff", label: "Policy Changes" },
   { href: "/policies/simulate", label: "Simulate" },
+  { href: "/policies/ci-gate", label: "CI Gate" },
 ];
 
 export function AppNav() {
