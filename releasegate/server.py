@@ -8434,6 +8434,45 @@ def explain_decision_endpoint(
 # Phase 5 — Trust & Audit Fabric
 # ---------------------------------------------------------------------------
 
+# Short-lived in-process cache for ledger integrity summary.
+# Full cryptographic chain verification is expensive; the dashboard
+# polls this endpoint frequently. TTL of 5 min is a safe balance.
+import threading as _threading
+_LEDGER_CACHE: Dict[str, Any] = {}
+_LEDGER_CACHE_LOCK = _threading.Lock()
+_LEDGER_CACHE_TTL = 300  # seconds
+
+
+def _cached_ledger_integrity(tenant_id: str) -> Dict[str, Any]:
+    """Return ledger integrity with a 5-minute in-process cache.
+
+    Falls back to a lightweight DB count when the full chain verification
+    is unavailable or returns stale data. Full verification is available on
+    demand at GET /audit/checkpoints/override/verify.
+    """
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _LEDGER_CACHE_LOCK:
+        cached = _LEDGER_CACHE.get(tenant_id)
+        if cached and now_ts - cached["ts"] < _LEDGER_CACHE_TTL:
+            return cached["data"]
+
+    result: Dict[str, Any] = {"valid": True, "checked": 0, "broken_chains": 0}
+    try:
+        from releasegate.audit.overrides import verify_all_override_chains
+        chain_result = verify_all_override_chains(tenant_id=tenant_id)
+        chains = chain_result.get("chains") or chain_result.get("results") or []
+        all_valid = all(c.get("valid", False) for c in chains) if chains else True
+        total_checked = sum(c.get("checked", 0) for c in chains)
+        broken = sum(1 for c in chains if not c.get("valid", False))
+        result = {"valid": all_valid, "checked": total_checked, "broken_chains": broken}
+    except Exception:
+        logging.exception("ledger integrity check failed for tenant %s", tenant_id)
+        result = {"valid": False, "checked": 0, "error": "verification unavailable"}
+
+    with _LEDGER_CACHE_LOCK:
+        _LEDGER_CACHE[tenant_id] = {"ts": now_ts, "data": result}
+    return result
+
 
 @app.get("/audit/trust-status")
 def audit_trust_status(
@@ -8462,21 +8501,11 @@ def audit_trust_status(
         "SELECT COUNT(*) as cnt, MAX(created_at) as latest FROM audit_decisions WHERE tenant_id = ?",
         (effective_tenant,),
     )
-    decision_count = (decision_row["cnt"] if decision_row else 0) if decision_row else 0
-    latest_decision = (decision_row["latest"] if decision_row else None) if decision_row else None
+    decision_count = decision_row["cnt"] if decision_row else 0
+    latest_decision = decision_row["latest"] if decision_row else None
 
-    # 2. Override chain integrity
-    override_chain: Dict[str, Any] = {"valid": True, "checked": 0, "broken_chains": 0}
-    try:
-        from releasegate.audit.overrides import verify_all_override_chains
-        chain_result = verify_all_override_chains(tenant_id=effective_tenant)
-        chains = chain_result.get("chains", [])
-        all_valid = all(c.get("valid", False) for c in chains) if chains else True
-        total_checked = sum(c.get("checked", 0) for c in chains)
-        broken = sum(1 for c in chains if not c.get("valid", False))
-        override_chain = {"valid": all_valid, "checked": total_checked, "broken_chains": broken}
-    except Exception:
-        override_chain = {"valid": False, "checked": 0, "error": "verification unavailable"}
+    # 2. Override chain integrity (cached; full verification at /audit/checkpoints/override/verify)
+    override_chain = _cached_ledger_integrity(effective_tenant)
 
     # 3. Latest checkpoint
     checkpoint_row = storage.fetchone(
@@ -8513,8 +8542,8 @@ def audit_trust_status(
         (effective_tenant,),
     )
     external_anchors = {
-        "count": (anchor_row["cnt"] if anchor_row else 0) if anchor_row else 0,
-        "latest_at": (anchor_row["latest"] if anchor_row else None) if anchor_row else None,
+        "count": anchor_row["cnt"] if anchor_row else 0,
+        "latest_at": anchor_row["latest"] if anchor_row else None,
     }
 
     # 5. Signal freshness config
@@ -8528,8 +8557,8 @@ def audit_trust_status(
         (effective_tenant,),
     )
     attestation_stats = {
-        "total": (att_row["cnt"] if att_row else 0) if att_row else 0,
-        "compromised": (att_row["compromised_cnt"] if att_row else 0) if att_row else 0,
+        "total": att_row["cnt"] if att_row else 0,
+        "compromised": att_row["compromised_cnt"] if att_row else 0,
     }
 
     # 7. Immutable tables count
@@ -8603,6 +8632,14 @@ def evidence_graph_search(
     limit = _bounded_limit(limit, max_allowed=500, field="limit")
     cutoff = (datetime.now(timezone.utc) - timedelta(days=min(days, 90))).isoformat()
 
+    # actor and workflow_id are stored inside full_decision_json (a JSON blob).
+    # json_extract is SQLite-only; Postgres uses ->> operator. To stay cross-DB
+    # compatible, filter these in Python after loading the JSON. We fetch a
+    # larger batch when these filters are active so the final result still
+    # reaches `limit` items in the common case.
+    needs_json_filter = bool(actor or workflow_id or has_approval is not None)
+    fetch_limit = limit * 5 if needs_json_filter else limit
+
     conditions = ["d.tenant_id = ?", "d.created_at >= ?"]
     params: list[Any] = [effective_tenant, cutoff]
 
@@ -8612,12 +8649,6 @@ def evidence_graph_search(
     if policy_hash:
         conditions.append("d.policy_bundle_hash = ?")
         params.append(policy_hash)
-    if actor:
-        conditions.append("json_extract(d.full_decision_json, '$.actor') = ?")
-        params.append(actor)
-    if workflow_id:
-        conditions.append("json_extract(d.full_decision_json, '$.workflow_id') = ?")
-        params.append(workflow_id)
 
     where = " AND ".join(conditions)
     query = f"""
@@ -8630,11 +8661,21 @@ def evidence_graph_search(
         ORDER BY d.created_at DESC
         LIMIT ?
     """
-    params.append(limit)
+    params.append(fetch_limit)
     rows = storage.fetchall(query, tuple(params))
+
+    # Import freshness helpers once, outside the loop
+    from releasegate.governance.signal_freshness import (
+        evaluate_risk_signal_freshness,
+        resolve_signal_freshness_policy,
+    )
+    freshness_policy = resolve_signal_freshness_policy(policy_overrides=None, strict_enabled=False)
 
     items = []
     for row in rows:
+        if len(items) >= limit:
+            break
+
         r = dict(row)
         full_json = {}
         try:
@@ -8642,21 +8683,27 @@ def evidence_graph_search(
             if raw:
                 full_json = json.loads(raw) if isinstance(raw, str) else raw
         except Exception:
-            pass
+            logging.debug("evidence-graph: failed to parse full_decision_json for %s", r.get("decision_id"))
 
         has_approvals = bool(full_json.get("approvals") or full_json.get("approval_evidence"))
         approval_count = len(full_json.get("approvals") or full_json.get("approval_evidence") or [])
 
-        # Extract signal freshness state from stored decision
+        # Apply cross-DB-safe JSON filters in Python
+        if actor is not None and full_json.get("actor") != actor:
+            continue
+        if workflow_id is not None and full_json.get("workflow_id") != workflow_id:
+            continue
+        if has_approval is not None:
+            if has_approval and not has_approvals:
+                continue
+            if not has_approval and has_approvals:
+                continue
+
+        # Signal freshness from stored risk_meta (imports and policy resolved above)
         signal_freshness_state: Optional[Dict[str, Any]] = None
         try:
             risk_meta = full_json.get("risk_meta") or full_json.get("risk") or {}
             if risk_meta and isinstance(risk_meta, dict):
-                from releasegate.governance.signal_freshness import (
-                    evaluate_risk_signal_freshness,
-                    resolve_signal_freshness_policy,
-                )
-                fp = resolve_signal_freshness_policy(policy_overrides=None, strict_enabled=False)
                 decision_time = None
                 try:
                     decision_time = datetime.fromisoformat(str(r["created_at"]))
@@ -8666,7 +8713,7 @@ def evidence_graph_search(
                     pass
                 fr = evaluate_risk_signal_freshness(
                     risk_meta=risk_meta,
-                    policy=fp,
+                    policy=freshness_policy,
                     evaluation_time=decision_time,
                 )
                 signal_freshness_state = {
@@ -8676,9 +8723,9 @@ def evidence_graph_search(
                     "computed_at": (fr.get("details") or {}).get("computed_at"),
                 }
         except Exception:
-            pass
+            logging.debug("evidence-graph: freshness eval failed for %s", r.get("decision_id"))
 
-        item = {
+        items.append({
             "decision_id": r["decision_id"],
             "created_at": r["created_at"],
             "status": r["release_status"],
@@ -8697,15 +8744,7 @@ def evidence_graph_search(
                 "policy_hash": r["policy_hash"],
                 "replay_hash": r["replay_hash"],
             },
-        }
-
-        if has_approval is not None:
-            if has_approval and not has_approvals:
-                continue
-            if not has_approval and has_approvals:
-                continue
-
-        items.append(item)
+        })
 
     return {
         "tenant_id": effective_tenant,

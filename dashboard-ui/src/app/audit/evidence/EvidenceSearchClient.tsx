@@ -51,16 +51,24 @@ export function EvidenceSearchClient() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const search = async () => {
+  const search = async (overrides?: {
+    status?: string;
+    approval?: string;
+    days?: number;
+  }) => {
+    const resolvedStatus = overrides?.status ?? statusFilter;
+    const resolvedApproval = overrides?.approval ?? approvalFilter;
+    const resolvedDays = overrides?.days ?? days;
+
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       params.set("tenant_id", tenantId);
-      params.set("days", String(days));
+      params.set("days", String(resolvedDays));
       params.set("limit", "200");
-      if (statusFilter) params.set("status", statusFilter);
-      if (approvalFilter) params.set("has_approval", approvalFilter);
+      if (resolvedStatus) params.set("status", resolvedStatus);
+      if (resolvedApproval) params.set("has_approval", resolvedApproval);
       if (actorFilter) params.set("actor", actorFilter);
       if (workflowFilter) params.set("workflow_id", workflowFilter);
 
@@ -155,7 +163,7 @@ export function EvidenceSearchClient() {
           </label>
         </div>
         <button
-          onClick={search}
+          onClick={() => search()}
           disabled={loading}
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
         >
@@ -167,19 +175,34 @@ export function EvidenceSearchClient() {
       <div className="flex flex-wrap gap-2">
         <span className="text-xs font-medium text-slate-500 self-center mr-1">Quick queries:</span>
         <button
-          onClick={() => { setApprovalFilter("false"); setStatusFilter("ALLOWED"); setDays(30); setTimeout(search, 0); }}
+          onClick={() => {
+            setApprovalFilter("false");
+            setStatusFilter("ALLOWED");
+            setDays(30);
+            search({ status: "ALLOWED", approval: "false", days: 30 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           Releases without approval (30d)
         </button>
         <button
-          onClick={() => { setStatusFilter("BLOCKED"); setApprovalFilter(""); setDays(30); setTimeout(search, 0); }}
+          onClick={() => {
+            setStatusFilter("BLOCKED");
+            setApprovalFilter("");
+            setDays(30);
+            search({ status: "BLOCKED", approval: "", days: 30 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           All blocked decisions (30d)
         </button>
         <button
-          onClick={() => { setStatusFilter(""); setApprovalFilter(""); setDays(7); setTimeout(search, 0); }}
+          onClick={() => {
+            setStatusFilter("");
+            setApprovalFilter("");
+            setDays(7);
+            search({ status: "", approval: "", days: 7 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           All decisions (7d)

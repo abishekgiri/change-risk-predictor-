@@ -2,7 +2,7 @@
 
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function AuditExportClient() {
   const searchParams = useSearchParams();
@@ -18,6 +18,16 @@ export function AuditExportClient() {
   const [error, setError] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<Record<string, unknown> | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const prevBlobUrl = useRef<string | null>(null);
+
+  // Revoke the previous blob URL whenever a new one is set to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (prevBlobUrl.current) {
+        URL.revokeObjectURL(prevBlobUrl.current);
+      }
+    };
+  }, []);
 
   const buildParams = () => {
     const params = new URLSearchParams();
@@ -47,16 +57,23 @@ export function AuditExportClient() {
         const body = await res.text();
         throw new Error(body || `Export failed (${res.status})`);
       }
+      if (prevBlobUrl.current) {
+        URL.revokeObjectURL(prevBlobUrl.current);
+        prevBlobUrl.current = null;
+      }
+
       if (format === "csv") {
         const text = await res.text();
         const blob = new Blob([text], { type: "text/csv" });
         const url = URL.createObjectURL(blob);
+        prevBlobUrl.current = url;
         setDownloadUrl(url);
       } else {
         const data = await res.json();
         setExportResult(data);
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
+        prevBlobUrl.current = url;
         setDownloadUrl(url);
       }
     } catch (err) {
