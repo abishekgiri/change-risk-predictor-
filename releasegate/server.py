@@ -7379,7 +7379,12 @@ def policy_ci_gate_validate(
                 "delta_breakdown": sim_result.get("delta_breakdown", {}),
             }
         except Exception as exc:
-            simulation_summary = {"error": str(exc)}
+            logging.exception(
+                "Historical simulation failed for tenant_id=%s, policy_ref=%s",
+                effective_tenant,
+                policy_ref,
+            )
+            simulation_summary = {"error": "Historical simulation failed."}
 
     # 4. Compute verdict
     gate_failed = False
