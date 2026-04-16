@@ -224,7 +224,7 @@ export function DecisionTraceClient() {
           {checkpoint ? (
             <div className="space-y-1.5 text-xs">
               <p><span className="font-medium text-slate-500">Cadence:</span> {checkpoint.cadence}</p>
-              <p><span className="font-medium text-slate-500">Period:</span> {checkpoint.period_id}</p>
+              <p><span className="font-medium text-slate-500">Period:</span> {checkpoint.period_end}</p>
               <p><span className="font-medium text-slate-500">Events:</span> {checkpoint.event_count}</p>
               <p><span className="font-medium text-slate-500">Algorithm:</span> {checkpoint.signature_algorithm}</p>
               <div className="mt-2 pt-2 border-t border-slate-100 space-y-0.5">
