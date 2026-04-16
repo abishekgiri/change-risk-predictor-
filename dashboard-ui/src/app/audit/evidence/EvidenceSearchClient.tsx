@@ -17,6 +17,12 @@ interface EvidenceItem {
   transition_id: string | null;
   has_approval: boolean;
   approval_count: number;
+  signal_freshness: {
+    stale: boolean | null;
+    reason_code: string | null;
+    age_seconds: number | null;
+    computed_at: string | null;
+  } | null;
   integrity: {
     decision_hash: string;
     input_hash: string;
@@ -45,16 +51,24 @@ export function EvidenceSearchClient() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const search = async () => {
+  const search = async (overrides?: {
+    status?: string;
+    approval?: string;
+    days?: number;
+  }) => {
+    const resolvedStatus = overrides?.status ?? statusFilter;
+    const resolvedApproval = overrides?.approval ?? approvalFilter;
+    const resolvedDays = overrides?.days ?? days;
+
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       params.set("tenant_id", tenantId);
-      params.set("days", String(days));
+      params.set("days", String(resolvedDays));
       params.set("limit", "200");
-      if (statusFilter) params.set("status", statusFilter);
-      if (approvalFilter) params.set("has_approval", approvalFilter);
+      if (resolvedStatus) params.set("status", resolvedStatus);
+      if (resolvedApproval) params.set("has_approval", resolvedApproval);
       if (actorFilter) params.set("actor", actorFilter);
       if (workflowFilter) params.set("workflow_id", workflowFilter);
 
@@ -149,7 +163,7 @@ export function EvidenceSearchClient() {
           </label>
         </div>
         <button
-          onClick={search}
+          onClick={() => search()}
           disabled={loading}
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
         >
@@ -161,19 +175,34 @@ export function EvidenceSearchClient() {
       <div className="flex flex-wrap gap-2">
         <span className="text-xs font-medium text-slate-500 self-center mr-1">Quick queries:</span>
         <button
-          onClick={() => { setApprovalFilter("false"); setStatusFilter("ALLOWED"); setDays(30); setTimeout(search, 0); }}
+          onClick={() => {
+            setApprovalFilter("false");
+            setStatusFilter("ALLOWED");
+            setDays(30);
+            search({ status: "ALLOWED", approval: "false", days: 30 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           Releases without approval (30d)
         </button>
         <button
-          onClick={() => { setStatusFilter("BLOCKED"); setApprovalFilter(""); setDays(30); setTimeout(search, 0); }}
+          onClick={() => {
+            setStatusFilter("BLOCKED");
+            setApprovalFilter("");
+            setDays(30);
+            search({ status: "BLOCKED", approval: "", days: 30 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           All blocked decisions (30d)
         </button>
         <button
-          onClick={() => { setStatusFilter(""); setApprovalFilter(""); setDays(7); setTimeout(search, 0); }}
+          onClick={() => {
+            setStatusFilter("");
+            setApprovalFilter("");
+            setDays(7);
+            search({ status: "", approval: "", days: 7 });
+          }}
           className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-50"
         >
           All decisions (7d)
@@ -206,6 +235,7 @@ export function EvidenceSearchClient() {
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Actor</th>
                     <th className="px-4 py-3">Approval</th>
+                    <th className="px-4 py-3">Signal</th>
                     <th className="px-4 py-3">Time</th>
                     <th className="px-4 py-3">Integrity</th>
                   </tr>
@@ -242,6 +272,27 @@ export function EvidenceSearchClient() {
                           </span>
                         ) : (
                           <span className="text-xs text-rose-500 font-semibold">None</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {item.signal_freshness === null ? (
+                          <span className="text-xs text-slate-400">—</span>
+                        ) : item.signal_freshness.stale ? (
+                          <span
+                            className="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold bg-amber-50 text-amber-700"
+                            title={item.signal_freshness.reason_code ?? "stale"}
+                          >
+                            Stale
+                          </span>
+                        ) : (
+                          <span className="inline-flex rounded-full px-2 py-0.5 text-xs font-semibold bg-emerald-50 text-emerald-700">
+                            Fresh
+                          </span>
+                        )}
+                        {item.signal_freshness?.age_seconds != null && (
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            {item.signal_freshness.age_seconds}s old
+                          </p>
                         )}
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-500">
