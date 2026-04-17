@@ -31,6 +31,9 @@ const links = [
   { href: "/ops", label: "Ops Health" },
   { href: "/ops/tenant", label: "Tenant Safety" },
   { href: "/fabric", label: "Fabric" },
+  { href: "/roi", label: "ROI Calculator" },
+  { href: "/proof", label: "Proof of Value" },
+  { href: "/pilots", label: "Pilots" },
 ];
 
 export function AppNav() {
