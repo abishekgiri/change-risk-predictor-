@@ -146,7 +146,7 @@ export function DecisionRegistryClient() {
                   {result.items.map((item) => (
                     <tr key={item.decision_id} className="border-b border-slate-50 hover:bg-slate-50">
                       <td className="px-4 py-3">
-                        <Link href={`/decisions/${encodeURIComponent(item.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
+                        <Link href={`/audit/trace/${encodeURIComponent(item.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
                           className="font-mono text-xs text-indigo-600 hover:text-indigo-800 font-semibold">
                           {item.rg_decision_id}
                         </Link>
@@ -179,7 +179,7 @@ export function DecisionRegistryClient() {
                         </details>
                       </td>
                       <td className="px-4 py-3">
-                        <Link href={`/decisions/${encodeURIComponent(item.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
+                        <Link href={`/audit/trace/${encodeURIComponent(item.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
                           className="text-xs text-indigo-600 hover:text-indigo-800">
                           Trace →
                         </Link>

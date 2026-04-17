@@ -149,7 +149,7 @@ export function AuthorityReportClient() {
               <div className="divide-y divide-slate-50">
                 {report.verification_sample.results.map((r) => (
                   <div key={r.rg_decision_id} className="flex items-center justify-between px-4 py-2.5">
-                    <Link href={`/decisions/${encodeURIComponent(r.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
+                    <Link href={`/audit/trace/${encodeURIComponent(r.rg_decision_id)}?tenant_id=${encodeURIComponent(tenantId)}`}
                       className="font-mono text-xs text-indigo-600 hover:text-indigo-800">
                       {r.rg_decision_id}
                     </Link>

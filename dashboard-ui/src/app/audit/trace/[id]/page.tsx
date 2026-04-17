@@ -1,14 +1,14 @@
 import { Suspense } from "react";
 import { DecisionTraceClient } from "./DecisionTraceClient";
 
-export const metadata = { title: "Decision Trace — ReleaseGate" };
+export const dynamic = "force-dynamic";
 
-export default function DecisionTracePage() {
+export default function AuditTracePage() {
   return (
-    <div className="mx-auto max-w-7xl px-6 py-8">
+    <main className="mx-auto max-w-7xl px-6 py-8">
       <Suspense fallback={<div className="text-sm text-slate-500">Loading trace…</div>}>
         <DecisionTraceClient />
       </Suspense>
-    </div>
+    </main>
   );
 }
