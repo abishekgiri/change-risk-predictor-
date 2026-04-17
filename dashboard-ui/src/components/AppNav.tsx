@@ -30,6 +30,7 @@ const links = [
   { href: "/decisions", label: "Decisions" },
   { href: "/ops", label: "Ops Health" },
   { href: "/ops/tenant", label: "Tenant Safety" },
+  { href: "/fabric", label: "Fabric" },
 ];
 
 export function AppNav() {
