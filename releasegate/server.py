@@ -10097,3 +10097,244 @@ def ops_alerts_check(
         "alerts_fired": len(results),
         "results": results,
     })
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — System of Record Authority
+# ---------------------------------------------------------------------------
+
+class DeclareDeploy(BaseModel):
+    tenant_id: Optional[str] = None
+    repo: str
+    environment: str
+    actor_id: Optional[str] = "ci"
+    sha: Optional[str] = None
+    pr_number: Optional[int] = None
+    jira_issue_key: Optional[str] = None
+    policy_overrides: Optional[Dict[str, Any]] = None
+
+
+@app.post("/decisions/declare")
+def decisions_declare(
+    payload: DeclareDeploy,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Declare a governance decision for a deploy.
+
+    The mandatory first step for any governed deployment.  Returns a
+    ``rg_decision_id`` (human-readable: ``rg_dec_YYYYMMDD_uuid8``) that must
+    be stored by CI/CD and passed to ``POST /deploy/gate`` before the actual
+    deployment proceeds.
+
+    Evaluation order:
+      1. Signal freshness — BLOCKED if risk signal is older than policy max_age
+      2. Fail-closed      — BLOCKED if no risk signal exists
+      3. ALLOWED otherwise
+    """
+    from releasegate.decisions.registry import declare_deploy_decision
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    result = declare_deploy_decision(
+        tenant_id=effective_tenant,
+        repo=payload.repo,
+        environment=payload.environment,
+        actor_id=payload.actor_id or "ci",
+        sha=payload.sha,
+        pr_number=payload.pr_number,
+        jira_issue_key=payload.jira_issue_key,
+        policy_overrides=payload.policy_overrides,
+    )
+    status_code = 200 if result.get("allowed") else 200  # always 200; use result.allowed to branch
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@app.get("/decisions/{rg_decision_id}")
+def decisions_get(
+    rg_decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Fetch a single decision by rg_dec_… ID or plain UUID."""
+    from releasegate.decisions.registry import resolve_decision_row, format_rg_decision_id, _parse_full_json
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    row = resolve_decision_row(rg_decision_id, effective_tenant, storage)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Decision '{rg_decision_id}' not found")
+
+    full_json = _parse_full_json(row)
+    created_at = str(row.get("created_at") or "")
+    decision_id = str(row.get("decision_id") or "")
+
+    return JSONResponse(content={
+        "rg_decision_id": format_rg_decision_id(decision_id, created_at),
+        "decision_id": decision_id,
+        "tenant_id": effective_tenant,
+        "repo": row.get("repo"),
+        "pr_number": row.get("pr_number"),
+        "status": row.get("release_status"),
+        "reason_code": full_json.get("reason_code"),
+        "message": full_json.get("message"),
+        "actor": full_json.get("actor_id"),
+        "created_at": created_at,
+        "hashes": {
+            "input_hash": row.get("input_hash"),
+            "policy_hash": row.get("policy_hash"),
+            "decision_hash": row.get("decision_hash"),
+            "replay_hash": row.get("replay_hash"),
+        },
+        "inputs_present": full_json.get("inputs_present", {}),
+        "policy_bundle_hash": row.get("policy_bundle_hash"),
+        "engine_version": row.get("engine_version"),
+    })
+
+
+@app.get("/audit/trace/{rg_decision_id}")
+def audit_trace(
+    rg_decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Full audit graph trace: decision → checkpoint → external anchor.
+
+    Answers: "Why was this deploy allowed/blocked, and is this record
+    immutably sealed in an external anchor?"
+    """
+    from releasegate.decisions.registry import trace_decision
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    result = trace_decision(rg_decision_id, effective_tenant, storage)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Not found"))
+    return JSONResponse(content=result)
+
+
+@app.get("/decisions/{rg_decision_id}/verify")
+def decisions_verify(
+    rg_decision_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Verify a decision's integrity by reconstructing its replay_hash.
+
+    Proves the stored record has not been tampered with.
+    """
+    from releasegate.decisions.registry import verify_decision
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    return JSONResponse(content=verify_decision(rg_decision_id, effective_tenant, storage))
+
+
+@app.get("/audit/authority-report")
+def audit_authority_report(
+    tenant_id: Optional[str] = None,
+    days: int = Query(30, ge=1, le=365),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """Authority report: can ReleaseGate serve as the sole audit source?
+
+    Tests checkpoint coverage, external anchor coverage, and verifies a
+    sample of recent decisions. Returns a pass/fail authority verdict.
+    """
+    from releasegate.decisions.registry import authority_report
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    return JSONResponse(content=authority_report(effective_tenant, storage, days=days))
+
+
+@app.get("/decisions")
+def decisions_list(
+    tenant_id: Optional[str] = None,
+    repo: Optional[str] = None,
+    status: Optional[str] = Query(None),
+    days: int = Query(30, ge=1, le=365),
+    limit: int = Query(100, ge=1, le=500),
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "auditor", "read_only"],
+        scopes=["policy:read"],
+        rate_profile="default",
+    ),
+):
+    """List decisions with human-readable rg_decision_id for each."""
+    from releasegate.decisions.registry import format_rg_decision_id
+    from datetime import timedelta as _timedelta
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    storage = get_storage_backend()
+    now = datetime.now(timezone.utc)
+    cutoff = (now - _timedelta(days=days)).isoformat()
+
+    conditions = ["tenant_id = ?", "created_at >= ?"]
+    params: list = [effective_tenant, cutoff]
+    if repo:
+        conditions.append("repo = ?")
+        params.append(repo)
+    if status:
+        conditions.append("release_status = ?")
+        params.append(status.upper())
+
+    params.append(limit)
+    rows = storage.fetchall(
+        f"""SELECT decision_id, tenant_id, repo, pr_number, release_status,
+                   input_hash, policy_hash, decision_hash, replay_hash,
+                   policy_bundle_hash, engine_version, created_at, full_decision_json
+            FROM audit_decisions
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC
+            LIMIT ?""",
+        params,
+    ) or []
+
+    items = []
+    for r in rows:
+        created_at = str(r.get("created_at") or "")
+        decision_id = str(r.get("decision_id") or "")
+        try:
+            fj = json.loads(r.get("full_decision_json") or "{}")
+        except Exception:
+            fj = {}
+        items.append({
+            "rg_decision_id": format_rg_decision_id(decision_id, created_at),
+            "decision_id": decision_id,
+            "repo": r.get("repo"),
+            "pr_number": r.get("pr_number"),
+            "status": r.get("release_status"),
+            "reason_code": fj.get("reason_code"),
+            "actor": fj.get("actor_id"),
+            "created_at": created_at,
+            "hashes": {
+                "input_hash": (r.get("input_hash") or "")[:16],
+                "replay_hash": (r.get("replay_hash") or "")[:16],
+            },
+        })
+
+    return JSONResponse(content={
+        "tenant_id": effective_tenant,
+        "count": len(items),
+        "window_days": days,
+        "items": items,
+    })

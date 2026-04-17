@@ -26,6 +26,8 @@ const links = [
   { href: "/policies/ci-gate", label: "CI Gate" },
   { href: "/audit", label: "Trust & Audit" },
   { href: "/audit/export", label: "Audit Export" },
+  { href: "/audit/authority", label: "Authority Report" },
+  { href: "/decisions", label: "Decisions" },
   { href: "/ops", label: "Ops Health" },
   { href: "/ops/tenant", label: "Tenant Safety" },
 ];
