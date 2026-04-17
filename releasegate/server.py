@@ -10119,7 +10119,7 @@ def decisions_declare(
     payload: DeclareDeploy,
     auth: AuthContext = require_access(
         roles=["admin", "operator"],
-        scopes=["policy:write"],
+        scopes=["enforcement:write"],
         rate_profile="default",
     ),
 ):

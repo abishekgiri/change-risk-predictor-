@@ -40,17 +40,24 @@ def format_rg_decision_id(decision_id: str, created_at: str) -> str:
     return f"rg_dec_{date_part}_{uuid_part}"
 
 
-def parse_rg_decision_id(rg_id: str) -> Optional[str]:
-    """Extract the 8-char UUID prefix from an rg_dec_… ID.
+def parse_rg_decision_id(rg_id: str) -> Optional[tuple[str, str]]:
+    """Extract (date_str, uuid_prefix) from an rg_dec_… ID.
 
-    Returns None if the string is not a valid rg_dec_… ID (could be a plain UUID).
+    Returns None if the string is not a valid rg_dec_… ID or if the UUID
+    prefix is not exactly 8 hex characters (prevents empty-prefix LIKE '%%' queries).
     """
     if not rg_id.startswith("rg_dec_"):
         return None
     parts = rg_id.split("_")
     if len(parts) < 4:
         return None
-    return parts[3]  # 8 hex chars
+    date_raw = parts[2]   # "20260416"
+    uuid_prefix = parts[3]
+    if len(uuid_prefix) != 8:
+        return None
+    # Convert "20260416" → "2026-04-16" for SQL date prefix matching
+    date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
+    return date_str, uuid_prefix
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +67,17 @@ def parse_rg_decision_id(rg_id: str) -> Optional[str]:
 def resolve_decision_row(rg_id: str, tenant_id: str, storage: Any) -> Optional[Dict[str, Any]]:
     """Look up an audit_decisions row by rg_dec_… ID or plain UUID."""
     if rg_id.startswith("rg_dec_"):
-        uuid_prefix = parse_rg_decision_id(rg_id)
-        if not uuid_prefix:
+        parsed = parse_rg_decision_id(rg_id)
+        if not parsed:
             return None
-        # UUID format: xxxxxxxx-xxxx-… — first segment matches uuid_prefix directly
+        date_str, uuid_prefix = parsed
+        # Narrow by date prefix first to prevent full-table scans and eliminate
+        # any risk of an empty LIKE pattern matching the wrong row.
         row = storage.fetchone(
-            "SELECT * FROM audit_decisions WHERE tenant_id = ? AND decision_id LIKE ? LIMIT 1",
-            (tenant_id, f"{uuid_prefix}%"),
+            """SELECT * FROM audit_decisions
+               WHERE tenant_id = ? AND created_at LIKE ? AND decision_id LIKE ?
+               ORDER BY created_at DESC LIMIT 1""",
+            (tenant_id, f"{date_str}%", f"{uuid_prefix}%"),
         )
     else:
         row = storage.fetchone(
@@ -107,10 +118,10 @@ def declare_deploy_decision(
     immediately covered by the next checkpoint cycle.
 
     Evaluation logic (in priority order):
-    1. Signal freshness — if the latest risk signal for this tenant+repo is
-       older than the configured max_age_seconds, the deploy is BLOCKED.
-    2. Fail-closed — if no risk signal exists at all, BLOCKED.
-    3. Otherwise ALLOWED.
+    1. Signal freshness — BLOCKED if risk signal is older than policy max_age or absent.
+    2. Active policy release — if a policy release is active for this tenant+environment,
+       run the full policy engine against available signals; any BLOCK enforcement blocks.
+    3. ALLOWED if all checks pass.
 
     Returns a dict with:
       rg_decision_id, decision_id, status, reason_code, message, rg_id_url
@@ -157,7 +168,7 @@ def declare_deploy_decision(
     reason_code = fr.get("reason_code") or "SIGNAL_STALE"
     max_age_s = int(freshness_policy.get("max_age_seconds") or 3600)
 
-    # 3. Determine verdict
+    # 3. Determine initial verdict from signal freshness
     if signal_stale:
         status = DecisionType.BLOCKED
         if not sig_row or not sig_row.get("latest"):
@@ -180,9 +191,54 @@ def declare_deploy_decision(
             f"Deploy ALLOWED: risk signal for {repo} is fresh ({age_h}h old)."
         )
 
+    # 4. Run active policy release (full policy engine) if one is configured.
+    # This enforces mandatory approvals, security scan thresholds, and any
+    # custom rules the tenant has activated — not just signal freshness.
+    if status == DecisionType.ALLOWED:
+        try:
+            from releasegate.policy.releases import get_active_policy_release
+            from releasegate.engine_core.evaluator import evaluate_policy
+            from releasegate.engine_core.evaluate import check_condition
+
+            policy_release = get_active_policy_release(
+                tenant_id=tenant_id,
+                policy_id="deploy-gate",
+                target_env=environment,
+            )
+            if policy_release:
+                snapshot = policy_release.get("snapshot") or {}
+                policies = snapshot.get("policies") or []
+                signals: Dict[str, Any] = {
+                    "signal_fresh": not signal_stale,
+                    "signal_age_hours": round((signal_age_seconds or 0) / 3600, 2),
+                    "repo": repo,
+                    "environment": environment,
+                    "actor": actor_id,
+                }
+                signals.update(overrides.get("signals", {}))
+                for pol in policies:
+                    try:
+                        result = evaluate_policy(pol, signals, check_condition=check_condition)
+                        if result.triggered and str(result.status).upper() in ("BLOCK", "BLOCKED"):
+                            status = DecisionType.BLOCKED
+                            reason_code = f"POLICY_BLOCK:{result.policy_id}"
+                            message = (
+                                f"Deploy BLOCKED by policy '{result.policy_id}': "
+                                + "; ".join(result.violations or ["policy triggered"])
+                            )
+                            break
+                    except Exception as pol_err:
+                        logger.warning("Policy evaluation error for %s: %s", pol, pol_err)
+        except Exception as policy_err:
+            # Fail-closed: if the policy engine itself errors, block the deploy
+            logger.error("Policy engine unavailable during declare: %s", policy_err)
+            status = DecisionType.BLOCKED
+            reason_code = "POLICY_ENGINE_ERROR"
+            message = "Deploy BLOCKED: policy engine unavailable (fail-closed)."
+
     # 4. Build Decision object
     context_id = str(uuid.uuid4())
-    eval_key_raw = f"{repo}:{sha or 'HEAD'}:{environment}:{now.date()}:{tenant_id}"
+    eval_key_raw = f"{repo}:{sha or 'HEAD'}:{environment}:{now.isoformat()}:{tenant_id}"
     evaluation_key = hashlib.sha256(eval_key_raw.encode()).hexdigest()
 
     decision = Decision(
@@ -490,10 +546,12 @@ def authority_report(
     )
     total_decisions = int((total_row.get("cnt") or 0) if total_row else 0)
 
-    # 2. Decisions covered by a checkpoint (created_at <= latest checkpoint created_at)
+    # 2. Decisions covered by a checkpoint.
+    # Use period_end (the authoritative close-of-cycle boundary) rather than
+    # created_at so decisions near the checkpoint boundary are counted correctly.
     try:
         latest_cp_row = storage.fetchone(
-            "SELECT MAX(created_at) as latest FROM audit_checkpoints WHERE tenant_id = ?",
+            "SELECT MAX(period_end) as latest FROM audit_checkpoints WHERE tenant_id = ?",
             (tenant_id,),
         )
         latest_cp = latest_cp_row.get("latest") if latest_cp_row else None
