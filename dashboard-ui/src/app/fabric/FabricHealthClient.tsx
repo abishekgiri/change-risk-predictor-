@@ -5,6 +5,24 @@ import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { callDashboardApi } from "@/lib/api";
 
+interface CompletenessHealth {
+  pct: number;
+  fully_linked: number;
+  verdict: "HEALTHY" | "DEGRADED" | "CRITICAL";
+}
+
+interface IntegrityHealth {
+  orphan_deploys: number;
+  broken_chains: number;
+  verdict: "OK" | "WARNING" | "CRITICAL";
+}
+
+interface FrictionHealth {
+  block_rate_pct: number;
+  override_count: number;
+  verdict: "LOW" | "MEDIUM" | "HIGH";
+}
+
 interface FabricHealth {
   ok: boolean;
   tenant_id: string;
@@ -14,9 +32,14 @@ interface FabricHealth {
   deployed_count: number;
   blocked_count: number;
   incident_count: number;
-  orphan_deploys: number;
-  coverage_pct: number;
-  block_rate_pct: number;
+  // 3-dimensional health (new)
+  completeness?: CompletenessHealth;
+  integrity?: IntegrityHealth;
+  friction?: FrictionHealth;
+  // legacy flat fields (kept for backward compat)
+  orphan_deploys?: number;
+  coverage_pct?: number;
+  block_rate_pct?: number;
   health_verdict: "HEALTHY" | "DEGRADED" | "CRITICAL";
 }
 
@@ -140,13 +163,61 @@ export function FabricHealthClient() {
             </div>
           </div>
 
-          {/* Metrics */}
+          {/* 3-Dimensional Health Cards */}
+          {(health.completeness || health.integrity || health.friction) && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              {health.completeness && (() => {
+                const v = health.completeness.verdict;
+                const style = v === "HEALTHY" ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : v === "DEGRADED" ? "border-amber-200 bg-amber-50 text-amber-800"
+                  : "border-rose-200 bg-rose-50 text-rose-800";
+                return (
+                  <div className={`rounded-xl border p-5 shadow-sm ${style}`}>
+                    <p className="text-xs font-semibold uppercase tracking-wide opacity-70">Completeness</p>
+                    <p className="mt-1 text-3xl font-bold">{health.completeness.pct}%</p>
+                    <p className="mt-0.5 text-sm font-medium">{v}</p>
+                    <p className="mt-1 text-xs opacity-70">{health.completeness.fully_linked} fully-linked changes</p>
+                  </div>
+                );
+              })()}
+              {health.integrity && (() => {
+                const v = health.integrity.verdict;
+                const style = v === "OK" ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : v === "WARNING" ? "border-amber-200 bg-amber-50 text-amber-800"
+                  : "border-rose-200 bg-rose-50 text-rose-800";
+                return (
+                  <div className={`rounded-xl border p-5 shadow-sm ${style}`}>
+                    <p className="text-xs font-semibold uppercase tracking-wide opacity-70">Integrity</p>
+                    <p className="mt-1 text-3xl font-bold">{health.integrity.orphan_deploys}</p>
+                    <p className="mt-0.5 text-sm font-medium">{v} — orphan deploys</p>
+                    <p className="mt-1 text-xs opacity-70">{health.integrity.broken_chains} broken chain{health.integrity.broken_chains !== 1 ? "s" : ""}</p>
+                  </div>
+                );
+              })()}
+              {health.friction && (() => {
+                const v = health.friction.verdict;
+                const style = v === "LOW" ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : v === "MEDIUM" ? "border-amber-200 bg-amber-50 text-amber-800"
+                  : "border-rose-200 bg-rose-50 text-rose-800";
+                return (
+                  <div className={`rounded-xl border p-5 shadow-sm ${style}`}>
+                    <p className="text-xs font-semibold uppercase tracking-wide opacity-70">Friction</p>
+                    <p className="mt-1 text-3xl font-bold">{health.friction.block_rate_pct}%</p>
+                    <p className="mt-0.5 text-sm font-medium">{v} — block rate</p>
+                    <p className="mt-1 text-xs opacity-70">{health.friction.override_count} override{health.friction.override_count !== 1 ? "s" : ""}</p>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Summary counts */}
           <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
             {[
-              { label: "Total changes",  value: health.total_changes,  sub: `${health.window_days}-day window` },
-              { label: "Deployed",        value: health.deployed_count, sub: `${health.coverage_pct}% coverage` },
-              { label: "Blocked",         value: health.blocked_count,  sub: `${health.block_rate_pct}% block rate`, alert: health.blocked_count > 0 },
-              { label: "Incidents",       value: health.incident_count, sub: "linked to deploys", alert: health.incident_count > 0 },
+              { label: "Total changes", value: health.total_changes,  sub: `${health.window_days}-day window` },
+              { label: "Deployed",      value: health.deployed_count, sub: "deploy_id recorded" },
+              { label: "Blocked",       value: health.blocked_count,  sub: "enforcement violations", alert: health.blocked_count > 0 },
+              { label: "Incidents",     value: health.incident_count, sub: "linked to deploys",      alert: health.incident_count > 0 },
             ].map(({ label, value, sub, alert }) => (
               <div key={label} className={`rounded-xl border p-5 shadow-sm ${alert ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`}>
                 <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">{label}</p>

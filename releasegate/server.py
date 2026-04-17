@@ -10589,3 +10589,144 @@ def fabric_health_endpoint(
 
     effective_tenant = _effective_tenant(auth, tenant_id)
     return JSONResponse(content=fabric_health(tenant_id=effective_tenant, days=days))
+
+
+# ---------------------------------------------------------------------------
+# GET /fabric/changes/query  — named governance queries
+# ---------------------------------------------------------------------------
+
+@app.get("/fabric/changes/query")
+def fabric_query_changes(
+    filter_type: str,
+    tenant_id: Optional[str] = None,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["policy:read"],
+        rate_profile="read_heavy",
+    ),
+):
+    """Run a named governance query against ChangeRecords.
+
+    filter_type options:
+      - orphan_deploys    — deployed but missing PR or Jira
+      - missing_jira      — has PR or deploy but no Jira ticket
+      - missing_decision  — deployed with no ReleaseGate decision
+      - blocked           — currently BLOCKED lifecycle state
+      - incidents         — has an open incident
+      - open              — not CLOSED or BLOCKED
+    """
+    from releasegate.fabric.change_record import query_changes
+
+    valid_filters = {
+        "orphan_deploys", "missing_jira", "missing_decision",
+        "blocked", "incidents", "open",
+    }
+    if filter_type not in valid_filters:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown filter_type '{filter_type}'. Valid: {sorted(valid_filters)}",
+        )
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    items = query_changes(
+        tenant_id=effective_tenant,
+        filter_type=filter_type,
+        limit=min(limit, 500),
+    )
+    return JSONResponse(content={
+        "tenant_id": effective_tenant,
+        "filter_type": filter_type,
+        "count": len(items),
+        "items": items,
+    })
+
+
+# ---------------------------------------------------------------------------
+# POST /fabric/github/pr-check  — GitHub PR commit status enforcement
+# ---------------------------------------------------------------------------
+
+class FabricPRCheckRequest(BaseModel):
+    repo: str                          # owner/repo
+    sha: str                           # full commit SHA
+    pr_number: int
+    tenant_id: Optional[str] = None
+    enforcement_mode: str = "STRICT"   # STRICT | AUDIT
+    # Link fields evaluated against missing-link rules
+    jira_issue_key: Optional[str] = None
+    pr_repo: Optional[str] = None
+    deploy_id: Optional[str] = None
+    rg_decision_ids: Optional[list] = None
+    hotfix_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    # Optional: if a ChangeRecord already exists, its id for the comment
+    change_id: Optional[str] = None
+    # Optional: URL shown in the GitHub commit status detail link
+    target_url: Optional[str] = None
+    # Whether to post a comment on the PR (default True)
+    post_pr_comment: bool = True
+    policy_overrides: Optional[dict] = None
+
+
+@app.post("/fabric/github/pr-check")
+def fabric_github_pr_check(
+    body: FabricPRCheckRequest,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Evaluate a PR against fabric missing-link rules and post a commit status.
+
+    Called from CI when a PR is opened or updated.  Posts a GitHub commit
+    status (success / failure / error) so the PR cannot merge without a
+    governance-clean signal.
+
+    Returns the verdict (PASS | WARN | BLOCK | ERROR) and the list of
+    violations found.
+    """
+    from releasegate.fabric.github_check import evaluate_and_enforce_pr_check
+
+    effective_tenant = _effective_tenant(auth, body.tenant_id)
+
+    # Build a flat record dict from the request fields
+    record = {
+        "jira_issue_key": body.jira_issue_key,
+        "pr_repo": body.pr_repo or body.repo,
+        "deploy_id": body.deploy_id,
+        "rg_decision_ids": body.rg_decision_ids,
+        "hotfix_id": body.hotfix_id,
+        "incident_id": body.incident_id,
+    }
+
+    result = evaluate_and_enforce_pr_check(
+        repo=body.repo,
+        sha=body.sha,
+        pr_number=body.pr_number,
+        tenant_id=effective_tenant,
+        record=record,
+        enforcement_mode=body.enforcement_mode,
+        policy_overrides=body.policy_overrides,
+        change_id=body.change_id,
+        target_url=body.target_url,
+        post_pr_comment=body.post_pr_comment,
+    )
+
+    verdict = result.get("verdict", "ERROR")
+    status_code = 422 if verdict == "BLOCK" else 200
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": verdict in ("PASS", "WARN"),
+            "verdict": verdict,
+            "tenant_id": effective_tenant,
+            "repo": body.repo,
+            "sha": body.sha[:12] if body.sha else "",
+            "pr_number": body.pr_number,
+            "violations": result.get("violations", []),
+            "github_status_ok": result.get("github_status_ok", False),
+            "comment_ok": result.get("comment_ok", False),
+        },
+    )
