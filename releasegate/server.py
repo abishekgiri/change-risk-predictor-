@@ -10338,3 +10338,254 @@ def decisions_list(
         "window_days": days,
         "items": items,
     })
+
+
+##############################################################################
+# Phase 8 — Cross-System Governance Fabric
+##############################################################################
+
+class CreateChange(BaseModel):
+    environment: str
+    actor: Optional[str] = None
+    jira_issue_key: Optional[str] = None
+    pr_repo: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_sha: Optional[str] = None
+    enforcement_mode: Optional[str] = "STRICT"
+    policy_overrides: Optional[Dict[str, Any]] = None
+    tenant_id: Optional[str] = None
+
+
+class LinkSystem(BaseModel):
+    jira_issue_key: Optional[str] = None
+    pr_repo: Optional[str] = None
+    pr_number: Optional[int] = None
+    pr_sha: Optional[str] = None
+    deploy_id: Optional[str] = None
+    rg_decision_id: Optional[str] = None
+    incident_id: Optional[str] = None
+    hotfix_id: Optional[str] = None
+    actor: Optional[str] = None
+    policy_overrides: Optional[Dict[str, Any]] = None
+    tenant_id: Optional[str] = None
+
+
+class FabricGateCheck(BaseModel):
+    target_state: Optional[str] = None
+    policy_overrides: Optional[Dict[str, Any]] = None
+    tenant_id: Optional[str] = None
+
+
+@app.post("/fabric/changes")
+def fabric_create_change(
+    payload: CreateChange,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Create a new ChangeRecord — the lifecycle object that ties together
+    every system a change touches (Jira → PR → Deploy → Incident → Hotfix).
+
+    Returns a change_id (chg_YYYYMMDD_uuid8) and the initial lifecycle state.
+    The change starts in CREATED or LINKED state depending on what links are
+    provided at creation time.
+    """
+    from releasegate.fabric.change_record import create_change
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    record = create_change(
+        tenant_id=effective_tenant,
+        environment=payload.environment,
+        actor=payload.actor,
+        jira_issue_key=payload.jira_issue_key,
+        pr_repo=payload.pr_repo,
+        pr_number=payload.pr_number,
+        pr_sha=payload.pr_sha,
+        enforcement_mode=payload.enforcement_mode or "STRICT",
+        policy_overrides=payload.policy_overrides,
+    )
+    return JSONResponse(content=record)
+
+
+@app.post("/fabric/changes/{change_id}/link")
+def fabric_link_system(
+    change_id: str,
+    payload: LinkSystem,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Add a system link to an existing ChangeRecord.
+
+    Call this from CI/CD when a new system event occurs:
+    - PR opened:         pr_repo + pr_sha + jira_issue_key
+    - Decision obtained: rg_decision_id
+    - Deploy started:    deploy_id
+    - Incident opened:   incident_id
+    - Hotfix started:    hotfix_id
+
+    Each call re-evaluates all missing-link rules and advances the
+    lifecycle state machine. Returns the updated record.
+    """
+    from releasegate.fabric.change_record import link_system
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    record = link_system(
+        tenant_id=effective_tenant,
+        change_id=change_id,
+        jira_issue_key=payload.jira_issue_key,
+        pr_repo=payload.pr_repo,
+        pr_number=payload.pr_number,
+        pr_sha=payload.pr_sha,
+        deploy_id=payload.deploy_id,
+        rg_decision_id=payload.rg_decision_id,
+        incident_id=payload.incident_id,
+        hotfix_id=payload.hotfix_id,
+        actor=payload.actor,
+        policy_overrides=payload.policy_overrides,
+    )
+    return JSONResponse(content=record)
+
+
+@app.post("/fabric/changes/{change_id}/gate")
+def fabric_gate_check(
+    change_id: str,
+    payload: FabricGateCheck,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Gate check: is this change allowed to proceed to target_state?
+
+    Returns allowed (bool), current_state, violations, and missing links.
+    Use this in CI before deploying to verify the full lifecycle chain is intact.
+    CI should fail if allowed=false.
+    """
+    from releasegate.fabric.change_record import gate_check
+
+    effective_tenant = _effective_tenant(auth, payload.tenant_id)
+    result = gate_check(
+        tenant_id=effective_tenant,
+        change_id=change_id,
+        target_state=payload.target_state,
+        policy_overrides=payload.policy_overrides,
+    )
+    status_code = 200 if result.get("allowed") else 422
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@app.get("/fabric/changes/{change_id}")
+def fabric_get_change(
+    change_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["policy:read"],
+        rate_profile="read_heavy",
+    ),
+):
+    """Fetch a single ChangeRecord."""
+    from releasegate.fabric.change_record import get_change
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    record = get_change(tenant_id=effective_tenant, change_id=change_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"ChangeRecord {change_id} not found.")
+    return JSONResponse(content=record)
+
+
+@app.get("/fabric/changes/{change_id}/trace")
+def fabric_trace_change(
+    change_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["policy:read"],
+        rate_profile="read_heavy",
+    ),
+):
+    """End-to-end trace for a ChangeRecord.
+
+    Returns the full chain: ChangeRecord → Decisions → Deployment → Correlation.
+    Auditors can use this to answer "show me everything about this change."
+    """
+    from releasegate.fabric.change_record import trace_change
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    result = trace_change(tenant_id=effective_tenant, change_id=change_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error", "Not found."))
+    return JSONResponse(content=result)
+
+
+@app.get("/fabric/changes")
+def fabric_list_changes(
+    tenant_id: Optional[str] = None,
+    lifecycle_state: Optional[str] = None,
+    environment: Optional[str] = None,
+    limit: int = 100,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["policy:read"],
+        rate_profile="read_heavy",
+    ),
+):
+    """List ChangeRecords for a tenant, optionally filtered by state or environment."""
+    from releasegate.fabric.change_record import list_changes
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    items = list_changes(
+        tenant_id=effective_tenant,
+        lifecycle_state=lifecycle_state,
+        environment=environment,
+        limit=min(limit, 500),
+    )
+    return JSONResponse(content={"tenant_id": effective_tenant, "count": len(items), "items": items})
+
+
+@app.post("/fabric/changes/{change_id}/close")
+def fabric_close_change(
+    change_id: str,
+    tenant_id: Optional[str] = None,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator"],
+        scopes=["enforcement:write"],
+        rate_profile="default",
+    ),
+):
+    """Transition a VERIFIED ChangeRecord to CLOSED."""
+    from releasegate.fabric.change_record import close_change
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    try:
+        record = close_change(tenant_id=effective_tenant, change_id=change_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return JSONResponse(content=record)
+
+
+@app.get("/fabric/health")
+def fabric_health_endpoint(
+    tenant_id: Optional[str] = None,
+    days: int = 30,
+    auth: AuthContext = require_access(
+        roles=["admin", "operator", "viewer"],
+        scopes=["policy:read"],
+        rate_profile="read_heavy",
+    ),
+):
+    """Cross-system correlation health summary.
+
+    Returns total changes, state breakdown, orphan deploy count, block rate,
+    and a HEALTHY / DEGRADED / CRITICAL verdict for the dashboard.
+    """
+    from releasegate.fabric.change_record import fabric_health
+
+    effective_tenant = _effective_tenant(auth, tenant_id)
+    return JSONResponse(content=fabric_health(tenant_id=effective_tenant, days=days))
