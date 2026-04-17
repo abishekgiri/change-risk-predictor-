@@ -28,6 +28,7 @@ interface ROIResult {
     governance_hours_saved_per_month: number;
     risky_deploys_blocked_per_month: number;
   };
+  assumptions: Record<string, string>;
 }
 
 const fmt = (n: number) =>
@@ -217,6 +218,20 @@ export function ROICalculatorClient() {
                   <strong>{pct(result.roi_pct)} ROI</strong>.
                 </p>
               </div>
+
+              {/* Assumptions — visible so buyers can audit the model */}
+              <details className="rounded-xl border border-slate-200 bg-white shadow-sm">
+                <summary className="cursor-pointer px-5 py-3 text-xs font-semibold text-slate-600 hover:text-slate-900">
+                  Model assumptions (conservative) ↓
+                </summary>
+                <ul className="divide-y divide-slate-50 px-5 pb-4">
+                  {Object.entries(result.assumptions).map(([key, label]) => (
+                    <li key={key} className="py-2 text-xs text-slate-500">
+                      <span className="font-mono text-slate-400 mr-2">{key}</span>{label}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             </>
           ) : (
             <div className="flex h-64 items-center justify-center rounded-xl border border-dashed border-slate-200 text-sm text-slate-400">
