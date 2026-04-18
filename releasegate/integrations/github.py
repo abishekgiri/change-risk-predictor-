@@ -1,5 +1,6 @@
+import logging
 import os
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     from github import Github, Auth
@@ -11,28 +12,95 @@ try:
 except ImportError:
     _requests = None  # type: ignore[assignment]
 
+log = logging.getLogger(__name__)
+
 
 def _github_token() -> Optional[str]:
     return os.getenv("GITHUB_TOKEN")
 
 
-def post_comment(repo_name: str, pr_number: int, body: str):
-    """Post a comment to a GitHub PR."""
+# Post outcomes — callers can distinguish "skipped because no token" from
+# "tried and failed" from "succeeded".
+COMMENT_POSTED   = "posted"
+COMMENT_UPDATED  = "updated"
+COMMENT_SKIPPED  = "skipped"   # no token / PyGithub missing / body empty
+COMMENT_FAILED   = "failed"    # API error
+
+
+def post_comment(repo_name: str, pr_number: int, body: str) -> str:
+    """Post a comment to a GitHub PR. Returns one of COMMENT_* constants."""
+    if not body:
+        return COMMENT_SKIPPED
     token = _github_token()
     if not token:
-        print("Warning: GITHUB_TOKEN not set, skipping comment.")
-        return
+        log.warning("GITHUB_TOKEN not set, skipping PR comment (repo=%s pr=%s)", repo_name, pr_number)
+        return COMMENT_SKIPPED
 
     if not Github:
-        print("Warning: PyGithub not installed, skipping comment.")
-        return
+        log.warning("PyGithub not installed, skipping PR comment (repo=%s pr=%s)", repo_name, pr_number)
+        return COMMENT_SKIPPED
 
-    auth = Auth.Token(token)
-    g = Github(auth=auth)
-    repo = g.get_repo(repo_name)
-    pr = repo.get_pull(pr_number)
-    pr.create_issue_comment(body)
-    print(f"Posted comment to PR #{pr_number}")
+    try:
+        auth = Auth.Token(token)
+        g = Github(auth=auth)
+        repo = g.get_repo(repo_name)
+        pr = repo.get_pull(pr_number)
+        pr.create_issue_comment(body)
+        log.info("Posted comment to PR #%s in %s", pr_number, repo_name)
+        return COMMENT_POSTED
+    except Exception as exc:
+        log.warning("Failed to post PR comment (repo=%s pr=%s): %s", repo_name, pr_number, exc)
+        return COMMENT_FAILED
+
+
+def upsert_pr_comment(
+    repo_name: str,
+    pr_number: int,
+    body: str,
+    *,
+    marker: str,
+) -> str:
+    """Post or update the PR comment containing `marker`.
+
+    `marker` must be a unique hidden token (e.g. HTML comment) present in
+    `body`. If a prior issue comment on the same PR contains `marker`, it is
+    edited in place rather than appended. This gives CI retries idempotent
+    behaviour — no comment spam.
+
+    Returns one of COMMENT_* constants.
+    """
+    if not body or marker not in body:
+        return COMMENT_SKIPPED
+    token = _github_token()
+    if not token:
+        log.warning("GITHUB_TOKEN not set, skipping PR upsert-comment (repo=%s pr=%s)", repo_name, pr_number)
+        return COMMENT_SKIPPED
+    if not Github:
+        log.warning("PyGithub not installed, skipping PR upsert-comment (repo=%s pr=%s)", repo_name, pr_number)
+        return COMMENT_SKIPPED
+
+    try:
+        auth = Auth.Token(token)
+        g = Github(auth=auth)
+        repo = g.get_repo(repo_name)
+        pr = repo.get_pull(pr_number)
+        # Find an existing comment containing the marker. Limit scan to a
+        # reasonable number of comments to avoid unbounded API cost.
+        existing = None
+        for c in pr.get_issue_comments():
+            if c.body and marker in c.body:
+                existing = c
+                break
+        if existing is not None:
+            existing.edit(body)
+            log.info("Updated fabric comment on PR #%s in %s", pr_number, repo_name)
+            return COMMENT_UPDATED
+        pr.create_issue_comment(body)
+        log.info("Posted fabric comment on PR #%s in %s", pr_number, repo_name)
+        return COMMENT_POSTED
+    except Exception as exc:
+        log.warning("Failed to upsert PR comment (repo=%s pr=%s): %s", repo_name, pr_number, exc)
+        return COMMENT_FAILED
 
 
 def set_commit_status(

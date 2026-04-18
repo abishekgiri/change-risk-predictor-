@@ -187,19 +187,57 @@ export function ProofMetricsClient() {
             </div>
           </div>
 
-          {/* Shareable testimonial seed */}
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-            <p className="text-xs font-semibold text-slate-700 mb-2">Testimonial seed (auto-generated)</p>
-            <blockquote className="text-sm text-slate-700 italic border-l-2 border-slate-300 pl-4">
-              "We went from {data.traceability_coverage_pct < 60 ? "~55%" : "incomplete"} traceability to{" "}
-              <strong>{data.traceability_coverage_pct}% coverage</strong> in {days} days.
-              ReleaseGate caught <strong>{data.blocked_risky_deploys} risky deploys</strong> and our
-              audit prep is now fully automated."
-            </blockquote>
-            <p className="mt-2 text-xs text-slate-400">
-              Edit this with your customer&apos;s words and use it in outreach.
-            </p>
-          </div>
+          {/* Shareable testimonial seed — only generated when the data supports a positive story */}
+          {(() => {
+            const coverage = data.traceability_coverage_pct;
+            const blocked = data.blocked_risky_deploys;
+            const auditPct = data.audit_coverage_pct;
+            // Pick the strongest factual claim. If coverage is above 60%
+            // we lead with that ("went from ~55% baseline to X%"); otherwise
+            // we lead with blocked deploys or audit coverage — whichever is
+            // actually non-zero. If nothing is yet a story, suppress the
+            // testimonial rather than produce a negative narrative.
+            const strongCoverage = coverage >= 60;
+            const haveBlocked = blocked > 0;
+            const haveAudit = auditPct >= 50;
+            const hasStory = strongCoverage || haveBlocked || haveAudit;
+
+            if (!hasStory) {
+              return (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-5">
+                  <p className="text-xs font-semibold text-slate-700 mb-1">Testimonial seed — not ready</p>
+                  <p className="text-xs text-slate-500">
+                    Not enough governance activity in the last {days} days to generate a
+                    defensible case-study quote. Extend the window or keep using ReleaseGate
+                    for another cycle — proof numbers land once real traffic flows through.
+                  </p>
+                </div>
+              );
+            }
+
+            let lead: string;
+            if (strongCoverage) {
+              lead = `We went from ~55% baseline traceability to ${coverage}% coverage in ${days} days.`;
+            } else if (haveBlocked) {
+              lead = `ReleaseGate caught ${blocked} risky deploy${blocked === 1 ? "" : "s"} in the last ${days} days that would have shipped otherwise.`;
+            } else {
+              lead = `${auditPct}% of our deploys now carry a recorded governance decision — audit prep used to be a manual scramble.`;
+            }
+
+            return (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-xs font-semibold text-slate-700 mb-2">Testimonial seed (auto-generated)</p>
+                <blockquote className="text-sm text-slate-700 italic border-l-2 border-slate-300 pl-4">
+                  &ldquo;{lead}
+                  {haveBlocked && !strongCoverage ? "" : haveBlocked ? ` ReleaseGate caught ${blocked} risky deploy${blocked === 1 ? "" : "s"}.` : ""}
+                  {" "}Audit prep that used to take weeks is now automated.&rdquo;
+                </blockquote>
+                <p className="mt-2 text-xs text-slate-400">
+                  Edit this with your customer&apos;s words and use it in outreach.
+                </p>
+              </div>
+            );
+          })()}
         </>
       )}
     </div>
