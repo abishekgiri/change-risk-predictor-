@@ -9,6 +9,7 @@ interface CaseStudyRow {
   before: string;
   after: string;
   improvement: string;
+  source?: string;
 }
 
 interface ProofData {
@@ -26,6 +27,7 @@ interface ProofData {
   audit_coverage_pct: number;
   mean_time_to_decision_hours: number;
   case_study_table: CaseStudyRow[];
+  baseline_note?: string;
 }
 
 const IMPROVEMENT_STYLE = (val: string) => {
@@ -132,16 +134,17 @@ export function ProofMetricsClient() {
             <div className="border-b border-slate-100 px-5 py-3">
               <h2 className="text-sm font-semibold text-slate-800">Before vs. After</h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Industry baseline compared to your actual ReleaseGate data — last {days} days.
+                &ldquo;Before&rdquo; = industry baseline (labelled per row). &ldquo;After&rdquo; = your actual ReleaseGate data — last {days} days.
               </p>
             </div>
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 text-left text-xs uppercase tracking-wide text-slate-500">
-                  <th className="px-5 py-3 w-1/3">Metric</th>
-                  <th className="px-5 py-3">Before ReleaseGate</th>
-                  <th className="px-5 py-3">After ReleaseGate</th>
+                  <th className="px-5 py-3 w-1/4">Metric</th>
+                  <th className="px-5 py-3">Before</th>
+                  <th className="px-5 py-3">After</th>
                   <th className="px-5 py-3">Improvement</th>
+                  <th className="px-5 py-3">Source</th>
                 </tr>
               </thead>
               <tbody>
@@ -151,10 +154,16 @@ export function ProofMetricsClient() {
                     <td className="px-5 py-3 text-slate-500">{row.before}</td>
                     <td className="px-5 py-3 font-semibold text-slate-900">{row.after}</td>
                     <td className={`px-5 py-3 ${IMPROVEMENT_STYLE(row.improvement)}`}>{row.improvement}</td>
+                    <td className="px-5 py-3 text-xs text-slate-400 italic">{row.source ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {data.baseline_note && (
+              <div className="border-t border-slate-100 bg-slate-50 px-5 py-3">
+                <p className="text-xs text-slate-500">{data.baseline_note}</p>
+              </div>
+            )}
           </div>
 
           {/* Additional context */}

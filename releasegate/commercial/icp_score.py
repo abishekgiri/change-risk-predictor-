@@ -3,26 +3,29 @@
 Scores a ReleaseGate tenant against the Ideal Customer Profile:
 
   "Engineering teams (10–100 devs) using Jira + GitHub, with compliance or
-   audit pressure, deploying multiple times per week."
+   audit pressure, deploying multiple times per week across multiple envs."
 
 Score: 0–100 (weighted sum of signals). Band:
   STRONG   ≥ 70   → prioritise, offer white-glove onboarding
   MEDIUM   40–69  → nurture, show ROI calculator
   WEAK     < 40   → low priority, self-serve only
 
+Signal design: quality over quantity.
+Each signal has a clear business reason. If a signal can't be explained in
+one sentence to a prospect, it doesn't belong here.
+
 Signal weights
 --------------
-  has_jira_integration         20
-  has_github_integration       15
-  deploy_frequency_high        15
-  team_size_in_icp_range       15
-  enforcement_mode_strict      10
-  has_audit_decisions           5
-  has_overrides                 5
-  traceability_coverage_high   10
-  incident_linkage              5
-                               ---
-  max                         100
+  jira_intensity             20   (unique Jira keys, not just "has Jira")
+  github_integration         10
+  deploy_frequency           15   (≥5/wk = high-complexity team)
+  multi_environment          15   (prod + staging = real release process)
+  team_size_in_range         10   (10–100 devs = feels the pain, can buy)
+  compliance_pressure        15   (STRICT mode + audit decisions declared)
+  incident_frequency         10   (incidents = deployment risk is real)
+  override_usage              5   (overrides = governance friction = need)
+                             ---
+  max                        100
 """
 from __future__ import annotations
 
@@ -44,19 +47,10 @@ def score_tenant(
     team_size: int | None = None,
     deploys_per_week: float | None = None,
 ) -> Dict[str, Any]:
-    """Return a full ICP score breakdown for a tenant.
-
-    team_size and deploys_per_week can be passed explicitly if not stored
-    in the database; otherwise the scorer infers them from activity.
-    """
+    """Return a full ICP score breakdown for a tenant."""
     conn = get_db_connection()
     try:
-        return _compute(
-            conn,
-            tenant_id=tenant_id,
-            team_size_hint=team_size,
-            deploys_hint=deploys_per_week,
-        )
+        return _compute(conn, tenant_id=tenant_id, team_size_hint=team_size, deploys_hint=deploys_per_week)
     finally:
         conn.close()
 
@@ -64,132 +58,127 @@ def score_tenant(
 def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str, Any]:
     signals: Dict[str, Dict[str, Any]] = {}
 
-    # ── 1. Jira integration (any cross_system_correlations row has jira_issue_key)
-    jira_count = _q_scalar(conn, """
-        SELECT COUNT(*) FROM cross_system_correlations
-        WHERE tenant_id = %s AND jira_issue_key IS NOT NULL AND jira_issue_key <> ''
-        LIMIT 1
-    """, (tenant_id,)) or 0
-    signals["has_jira_integration"] = {
-        "score": 20 if jira_count > 0 else 0, "max": 20,
-        "value": jira_count > 0,
-        "label": "Jira integration",
+    # ── 1. Jira intensity — unique Jira keys (not just "has Jira") ────────────
+    # A team with 1 Jira key is experimenting. 10+ means it's embedded in workflow.
+    jira_keys = int(_q_scalar(conn, """
+        SELECT COUNT(DISTINCT jira_issue_key)
+        FROM cross_system_correlations
+        WHERE tenant_id = %s
+          AND jira_issue_key IS NOT NULL AND jira_issue_key <> ''
+          AND created_at >= NOW() - INTERVAL '30 days'
+    """, (tenant_id,)) or 0)
+    signals["jira_intensity"] = {
+        "score": 20 if jira_keys >= 10 else (12 if jira_keys >= 3 else (5 if jira_keys >= 1 else 0)),
+        "max": 20,
+        "value": jira_keys,
+        "label": f"Unique Jira keys linked (30d): {jira_keys} — needs 10+ for full score",
     }
 
-    # ── 2. GitHub integration (pr_repo populated)
-    github_count = _q_scalar(conn, """
-        SELECT COUNT(*) FROM cross_system_correlations
+    # ── 2. GitHub integration — PRs linked ───────────────────────────────────
+    pr_count = int(_q_scalar(conn, """
+        SELECT COUNT(DISTINCT pr_repo)
+        FROM cross_system_correlations
         WHERE tenant_id = %s AND pr_repo IS NOT NULL AND pr_repo <> ''
-        LIMIT 1
-    """, (tenant_id,)) or 0
-    signals["has_github_integration"] = {
-        "score": 15 if github_count > 0 else 0, "max": 15,
-        "value": github_count > 0,
-        "label": "GitHub integration",
+    """, (tenant_id,)) or 0)
+    signals["github_integration"] = {
+        "score": 10 if pr_count > 0 else 0,
+        "max": 10,
+        "value": pr_count,
+        "label": f"{pr_count} GitHub repo(s) connected",
     }
 
-    # ── 3. Deploy frequency (infer from change_records last 30 days)
-    deploy_count_30d = _q_scalar(conn, """
+    # ── 3. Deploy frequency — inferred from change records ───────────────────
+    deploy_count_30d = int(_q_scalar(conn, """
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s
           AND created_at >= NOW() - INTERVAL '30 days'
           AND lifecycle_state IN ('DEPLOYED','VERIFIED','CLOSED')
-    """, (tenant_id,)) or 0
-
-    inferred_deploys_per_week = (deploy_count_30d / 30.0) * 7
-    effective_dpw = deploys_hint if deploys_hint is not None else inferred_deploys_per_week
-    deploy_high = effective_dpw >= 5  # ≥5 deploys/week = high frequency
-    signals["deploy_frequency_high"] = {
-        "score": 15 if deploy_high else (8 if effective_dpw >= 2 else 0),
+    """, (tenant_id,)) or 0)
+    inferred_dpw = (deploy_count_30d / 30.0) * 7
+    effective_dpw = deploys_hint if deploys_hint is not None else inferred_dpw
+    signals["deploy_frequency"] = {
+        "score": 15 if effective_dpw >= 5 else (9 if effective_dpw >= 2 else (3 if effective_dpw >= 1 else 0)),
         "max": 15,
         "value": round(effective_dpw, 1),
-        "label": "Deploy frequency (per week)",
+        "label": f"~{round(effective_dpw, 1)} deploys/week — ≥5/wk = high-complexity team (full score)",
     }
 
-    # ── 4. Team size in ICP range (10–100)
-    # Infer from distinct actors in change_state_transitions
-    distinct_actors = _q_scalar(conn, """
+    # ── 4. Multi-environment deploys — strongest "real release process" signal
+    # Count distinct environment values across change records
+    env_count = int(_q_scalar(conn, """
+        SELECT COUNT(DISTINCT environment)
+        FROM change_records
+        WHERE tenant_id = %s
+          AND environment IS NOT NULL AND environment <> ''
+          AND created_at >= NOW() - INTERVAL '30 days'
+    """, (tenant_id,)) or 0)
+    signals["multi_environment"] = {
+        "score": 15 if env_count >= 3 else (10 if env_count == 2 else (4 if env_count == 1 else 0)),
+        "max": 15,
+        "value": env_count,
+        "label": f"{env_count} deployment environment(s) — 3+ (prod/staging/dev) = mature release process",
+    }
+
+    # ── 5. Team size in ICP range (10–100) ────────────────────────────────────
+    distinct_actors = int(_q_scalar(conn, """
         SELECT COUNT(DISTINCT actor) FROM change_state_transitions
         WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '60 days'
-    """, (tenant_id,)) or 0
+    """, (tenant_id,)) or 0)
     effective_size = team_size_hint if team_size_hint is not None else distinct_actors
-    in_range = 10 <= effective_size <= 100
-    signals["team_size_in_icp_range"] = {
-        "score": 15 if in_range else (8 if effective_size > 5 else 0),
-        "max": 15,
+    signals["team_size_in_range"] = {
+        "score": 10 if 10 <= effective_size <= 100 else (5 if effective_size > 5 else 0),
+        "max": 10,
         "value": effective_size,
-        "label": "Estimated team size",
+        "label": f"Estimated team size: {effective_size} — target range is 10–100",
     }
 
-    # ── 5. Enforcement mode STRICT (highest governance signal)
-    strict_count = _q_scalar(conn, """
+    # ── 6. Compliance pressure — STRICT mode + audit decisions ───────────────
+    # Both signals must be present: they chose STRICT enforcement AND are
+    # actually declaring decisions. That's a team that has compliance pain.
+    strict_count = int(_q_scalar(conn, """
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s AND enforcement_mode = 'STRICT'
-        LIMIT 1
-    """, (tenant_id,)) or 0
-    signals["enforcement_mode_strict"] = {
-        "score": 10 if strict_count > 0 else 0, "max": 10,
-        "value": strict_count > 0,
-        "label": "STRICT enforcement mode",
-    }
-
-    # ── 6. Has ReleaseGate audit decisions (compliance pressure signal)
-    decision_count = _q_scalar(conn, """
+    """, (tenant_id,)) or 0)
+    decision_count = int(_q_scalar(conn, """
         SELECT COUNT(*) FROM audit_decisions
         WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
-    """, (tenant_id,)) or 0
-    signals["has_audit_decisions"] = {
-        "score": 5 if decision_count > 0 else 0, "max": 5,
-        "value": int(decision_count),
-        "label": "Governance decisions declared (30d)",
+    """, (tenant_id,)) or 0)
+    has_strict   = strict_count > 0
+    has_decisions = decision_count >= 5  # ≥5 decisions = real usage, not a test
+    signals["compliance_pressure"] = {
+        "score": 15 if (has_strict and has_decisions) else (8 if (has_strict or decision_count > 0) else 0),
+        "max": 15,
+        "value": {"strict_mode": has_strict, "decisions_30d": decision_count},
+        "label": (
+            f"STRICT enforcement: {'yes' if has_strict else 'no'}, "
+            f"{decision_count} governance decisions (30d) — both required for full score"
+        ),
     }
 
-    # ── 7. Override/exception usage (friction = real governance pressure)
-    override_count = _q_scalar(conn, """
-        SELECT COUNT(*) FROM policy_overrides
-        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
-    """, (tenant_id,)) or 0
-    signals["has_overrides"] = {
-        "score": 5 if override_count > 0 else 0, "max": 5,
-        "value": int(override_count),
-        "label": "Policy overrides (30d)",
-    }
-
-    # ── 8. Traceability coverage (≥80% = high-compliance org)
-    total = _q_scalar(conn, """
-        SELECT COUNT(*) FROM change_records
-        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
-    """, (tenant_id,)) or 0
-    linked = _q_scalar(conn, """
-        SELECT COUNT(DISTINCT cr.change_id)
-        FROM change_records cr
-        JOIN cross_system_correlations csc
-          ON csc.correlation_id = cr.correlation_id AND csc.tenant_id = cr.tenant_id
-        WHERE cr.tenant_id = %s
-          AND cr.created_at >= NOW() - INTERVAL '30 days'
-          AND csc.jira_issue_key IS NOT NULL AND csc.jira_issue_key <> ''
-          AND csc.pr_repo        IS NOT NULL AND csc.pr_repo        <> ''
-          AND csc.deploy_id      IS NOT NULL AND csc.deploy_id      <> ''
-    """, (tenant_id,)) or 0
-    coverage = (linked / total * 100) if total > 0 else 0
-    signals["traceability_coverage_high"] = {
-        "score": 10 if coverage >= 80 else (6 if coverage >= 50 else 0),
-        "max": 10,
-        "value": round(coverage, 1),
-        "label": "Traceability coverage %",
-    }
-
-    # ── 9. Incident linkage (incident → deploy → hotfix chain exists)
-    incident_count = _q_scalar(conn, """
+    # ── 7. Incident frequency — incidents are real deployment risk ────────────
+    incident_count = int(_q_scalar(conn, """
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s
           AND lifecycle_state IN ('INCIDENT_ACTIVE','HOTFIX_IN_PROGRESS','VERIFIED','CLOSED')
           AND created_at >= NOW() - INTERVAL '30 days'
-    """, (tenant_id,)) or 0
-    signals["incident_linkage"] = {
-        "score": 5 if incident_count > 0 else 0, "max": 5,
-        "value": int(incident_count),
-        "label": "Incident-linked changes (30d)",
+    """, (tenant_id,)) or 0)
+    signals["incident_frequency"] = {
+        "score": 10 if incident_count >= 3 else (6 if incident_count >= 1 else 0),
+        "max": 10,
+        "value": incident_count,
+        "label": f"{incident_count} incident-linked changes (30d) — incidents = deploy risk is real",
+    }
+
+    # ── 8. Override / exception usage ─────────────────────────────────────────
+    override_count = int(_q_scalar(conn, """
+        SELECT COUNT(*) FROM policy_overrides
+        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
+    """, (tenant_id,)) or 0)
+    signals["override_usage"] = {
+        "score": 5 if override_count > 0 else 0,
+        "max": 5,
+        "value": override_count,
+        "label": f"{override_count} policy overrides (30d) — overrides signal governance friction",
     }
 
     # ── Total ─────────────────────────────────────────────────────────────────
@@ -198,23 +187,34 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
 
     recommendation = {
         "STRONG": (
-            "High-priority prospect. Offer white-glove onboarding, "
-            "a 2-week pilot with dedicated support, and a clear audit-compliance ROI story."
+            "High-priority prospect. Offer white-glove onboarding and a 2-week "
+            "paid pilot. Lead with the compliance + incident risk story."
         ),
         "MEDIUM": (
-            "Good fit but not fully activated. Share the ROI calculator, "
-            "run a demo focused on their deploy chain, and propose a 30-day pilot."
+            "Good fit, not fully activated. Open /proof in a call and show their "
+            "live traceability number. Propose a 30-day pilot."
         ),
         "WEAK": (
-            "Early-stage fit. Not enough compliance/governance signals yet. "
-            "Self-serve onboarding or wait until team scales."
+            "Early-stage fit. Not enough compliance or deploy-complexity signals. "
+            "Self-serve or wait until team scales past 10 engineers."
         ),
     }[band]
+
+    # Surface the two highest-value gaps so sales knows exactly what to ask about
+    gaps = sorted(
+        [
+            {"signal": k, "gap": s["max"] - s["score"], "label": s["label"]}
+            for k, s in signals.items()
+            if s["score"] < s["max"]
+        ],
+        key=lambda x: -x["gap"],
+    )[:2]
 
     return {
         "tenant_id": tenant_id,
         "score": total_score,
         "band": band,
         "recommendation": recommendation,
+        "top_gaps": gaps,
         "signals": signals,
     }
