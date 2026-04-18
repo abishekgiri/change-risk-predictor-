@@ -101,10 +101,17 @@ def calculate_roi(
     avg_incident_cost      : fully-loaded cost per incident (default $4 000)
     monthly_license_usd    : override license cost; defaults to seat-based estimate
     """
-    team_size            = max(1, int(team_size))
-    deploys_per_week     = max(0.0, float(deploys_per_week))
-    incidents_per_month  = max(0.0, float(incidents_per_month))
-    audit_hours_per_year = max(0.0, float(audit_hours_per_year))
+    team_size                = max(1, int(team_size))
+    deploys_per_week         = max(0.0, float(deploys_per_week))
+    incidents_per_month      = max(0.0, float(incidents_per_month))
+    audit_hours_per_year     = max(0.0, float(audit_hours_per_year))
+    # Dollar inputs: clamp to >= 0 so a malformed / hostile payload can't flip
+    # the sign of savings. Upper bound on hourly rate to prevent obviously
+    # bogus inputs from dominating the output.
+    avg_engineer_hourly_rate = max(0.0, min(float(avg_engineer_hourly_rate), 10_000.0))
+    avg_incident_cost        = max(0.0, float(avg_incident_cost))
+    if monthly_license_usd is not None:
+        monthly_license_usd  = max(0.0, float(monthly_license_usd))
 
     # ── Lever 1: Incident reduction ──────────────────────────────────────────
     incidents_avoided        = incidents_per_month * _INCIDENT_REDUCTION_RATE

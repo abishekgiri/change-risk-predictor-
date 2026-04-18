@@ -1,51 +1,47 @@
 """Pilot Tracker — Phase 9 Commercial Proof.
 
 Tracks design partners and paid pilots from first contact through conversion.
-Captures before/after metric snapshots so the ROI story is data-driven, not
-anecdotal.
 
-Pilot statuses
---------------
-PROSPECT       → identified, not yet onboarded
-ONBOARDING     → setup in progress
-ACTIVE         → using ReleaseGate in real workflow
-CONVERTED      → paying customer
-CHURNED        → ended without converting
-PAUSED         → temporarily on hold
-
-Schema (created on first use)
------------------------------
+Schema (created on first use; portable across SQLite dev / Postgres prod)
+------------------------------------------------------------------------
 pilots
-  id              TEXT PK  (plt_YYYYMMDD_uuid8)
-  tenant_id       TEXT     ReleaseGate tenant they map to (may be NULL at prospect stage)
-  company_name    TEXT NOT NULL
-  contact_name    TEXT
-  contact_email   TEXT
-  icp_band        TEXT     (STRONG / MEDIUM / WEAK)
-  status          TEXT NOT NULL DEFAULT 'PROSPECT'
-  pilot_start_date DATE
-  pilot_end_date   DATE
-  monthly_value_usd NUMERIC(10,2)
-  notes           TEXT
-  before_metrics  JSONB / TEXT  (snapshot at start)
-  after_metrics   JSONB / TEXT  (snapshot at close / conversion)
-  created_at      TIMESTAMPTZ
-  updated_at      TIMESTAMPTZ
+  id                TEXT PK  (plt_YYYYMMDD_uuid8)
+  tenant_id         TEXT     ReleaseGate tenant they map to (NULL at prospect stage)
+  owner_tenant_id   TEXT     tenant that owns the pilot record (who sees it)
+  company_name      TEXT NOT NULL
+  contact_name      TEXT
+  contact_email     TEXT
+  icp_band          TEXT
+  status            TEXT NOT NULL DEFAULT 'PROSPECT'
+  pilot_start_date  TEXT
+  pilot_end_date    TEXT
+  monthly_value_usd REAL / NUMERIC
+  notes             TEXT
+  before_metrics    TEXT
+  after_metrics     TEXT
+  created_at        TEXT (ISO-8601)
+  updated_at        TEXT (ISO-8601)
 """
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from releasegate.storage.db import get_db_connection
 
+log = logging.getLogger(__name__)
+
 VALID_STATUSES = {
     "PROSPECT", "ONBOARDING", "ACTIVE", "CONVERTED", "CHURNED", "PAUSED",
 }
 
 ICP_BANDS = {"STRONG", "MEDIUM", "WEAK"}
+
+# Used when no owner tenant is supplied. Back-compat for older records.
+_DEFAULT_OWNER_TENANT = "default"
 
 
 def _now_iso() -> str:
@@ -58,28 +54,65 @@ def _pilot_id() -> str:
     return f"plt_{today}_{suffix}"
 
 
+def _money_type(dialect: str) -> str:
+    return "NUMERIC(10,2)" if dialect == "postgres" else "REAL"
+
+
 def _ensure_schema(conn) -> None:
+    """Create pilots table if missing and backfill owner_tenant_id column.
+
+    Schema-on-use is intentional here — pilot tracking is a commercial
+    module layered on top of core governance, and this lets it run on a
+    fresh dev DB without a separate migration step. If a migration
+    framework is adopted later, lift this into the migrations folder.
+    """
+    dialect = getattr(conn, "dialect", "sqlite")
+    money = _money_type(dialect)
     cur = conn.cursor()
-    cur.execute("""
+    cur.execute(f"""
         CREATE TABLE IF NOT EXISTS pilots (
             id                TEXT        NOT NULL,
             tenant_id         TEXT,
+            owner_tenant_id   TEXT        NOT NULL DEFAULT '{_DEFAULT_OWNER_TENANT}',
             company_name      TEXT        NOT NULL,
             contact_name      TEXT,
             contact_email     TEXT,
             icp_band          TEXT        DEFAULT 'MEDIUM',
             status            TEXT        NOT NULL DEFAULT 'PROSPECT',
-            pilot_start_date  DATE,
-            pilot_end_date    DATE,
-            monthly_value_usd NUMERIC(10,2),
+            pilot_start_date  TEXT,
+            pilot_end_date    TEXT,
+            monthly_value_usd {money},
             notes             TEXT,
             before_metrics    TEXT,
             after_metrics     TEXT,
-            created_at        TIMESTAMPTZ NOT NULL,
-            updated_at        TIMESTAMPTZ NOT NULL,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL,
             PRIMARY KEY (id)
         )
     """)
+    # Back-compat: older deployments created this table without owner_tenant_id.
+    # Add it if missing. (ALTER TABLE ... ADD COLUMN IF NOT EXISTS is Postgres-9.6+;
+    # SQLite has no IF NOT EXISTS on ADD COLUMN, so we probe first.)
+    try:
+        if dialect == "postgres":
+            cur.execute(
+                "ALTER TABLE pilots ADD COLUMN IF NOT EXISTS owner_tenant_id "
+                f"TEXT NOT NULL DEFAULT '{_DEFAULT_OWNER_TENANT}'"
+            )
+        else:
+            cur.execute("PRAGMA table_info(pilots)")
+            cols = {row[1] for row in cur.fetchall()}
+            if "owner_tenant_id" not in cols:
+                cur.execute(
+                    "ALTER TABLE pilots ADD COLUMN owner_tenant_id TEXT "
+                    f"NOT NULL DEFAULT '{_DEFAULT_OWNER_TENANT}'"
+                )
+    except Exception:
+        # If the ALTER fails (e.g. permissions) we'll surface later on INSERT.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     conn.commit()
 
 
@@ -92,12 +125,21 @@ def _row_to_dict(row, cursor) -> Dict[str, Any]:
             try:
                 d[key] = json.loads(val)
             except Exception:
-                pass
+                # Corrupt JSON: drop it and log, rather than silently returning
+                # a raw string that downstream consumers will mishandle.
+                log.warning(
+                    "pilot_tracker: dropping corrupt JSON in column %s (pilot id=%s)",
+                    key, d.get("id"),
+                )
+                d[key] = None
     for key in ("pilot_start_date", "pilot_end_date", "created_at", "updated_at"):
         if d.get(key) is not None:
             d[key] = str(d[key])
     if d.get("monthly_value_usd") is not None:
-        d["monthly_value_usd"] = float(d["monthly_value_usd"])
+        try:
+            d["monthly_value_usd"] = float(d["monthly_value_usd"])
+        except (TypeError, ValueError):
+            d["monthly_value_usd"] = None
     return d
 
 
@@ -109,6 +151,7 @@ def create_pilot(
     contact_name: Optional[str] = None,
     contact_email: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    owner_tenant_id: str = _DEFAULT_OWNER_TENANT,
     icp_band: str = "MEDIUM",
     status: str = "PROSPECT",
     pilot_start_date: Optional[str] = None,
@@ -131,13 +174,13 @@ def create_pilot(
         cur = conn.cursor()
         cur.execute("""
             INSERT INTO pilots
-              (id, tenant_id, company_name, contact_name, contact_email,
+              (id, tenant_id, owner_tenant_id, company_name, contact_name, contact_email,
                icp_band, status, pilot_start_date, pilot_end_date,
                monthly_value_usd, notes, before_metrics, after_metrics,
                created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            pilot_id, tenant_id, company_name, contact_name, contact_email,
+            pilot_id, tenant_id, owner_tenant_id, company_name, contact_name, contact_email,
             icp_band, status, pilot_start_date, pilot_end_date,
             monthly_value_usd, notes,
             json.dumps(before_metrics) if before_metrics else None,
@@ -155,6 +198,7 @@ def create_pilot(
 def update_pilot(
     pilot_id: str,
     *,
+    owner_tenant_id: str = _DEFAULT_OWNER_TENANT,
     status: Optional[str] = None,
     notes: Optional[str] = None,
     tenant_id: Optional[str] = None,
@@ -184,29 +228,42 @@ def update_pilot(
     if after_metrics     is not None: updates["after_metrics"]      = json.dumps(after_metrics)
 
     set_clause = ", ".join(f"{k} = %s" for k in updates)
-    values = list(updates.values()) + [pilot_id]
+    values = list(updates.values()) + [pilot_id, owner_tenant_id]
 
     conn = get_db_connection()
     try:
         _ensure_schema(conn)
         cur = conn.cursor()
-        cur.execute(f"UPDATE pilots SET {set_clause} WHERE id = %s", values)
+        cur.execute(
+            f"UPDATE pilots SET {set_clause} WHERE id = %s AND owner_tenant_id = %s",
+            values,
+        )
         if cur.rowcount == 0:
             raise ValueError(f"Pilot '{pilot_id}' not found")
         conn.commit()
-        cur.execute("SELECT * FROM pilots WHERE id = %s", (pilot_id,))
+        cur.execute(
+            "SELECT * FROM pilots WHERE id = %s AND owner_tenant_id = %s",
+            (pilot_id, owner_tenant_id),
+        )
         row = cur.fetchone()
         return _row_to_dict(row, cur)
     finally:
         conn.close()
 
 
-def get_pilot(pilot_id: str) -> Optional[Dict[str, Any]]:
+def get_pilot(
+    pilot_id: str,
+    *,
+    owner_tenant_id: str = _DEFAULT_OWNER_TENANT,
+) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     try:
         _ensure_schema(conn)
         cur = conn.cursor()
-        cur.execute("SELECT * FROM pilots WHERE id = %s", (pilot_id,))
+        cur.execute(
+            "SELECT * FROM pilots WHERE id = %s AND owner_tenant_id = %s",
+            (pilot_id, owner_tenant_id),
+        )
         row = cur.fetchone()
         return _row_to_dict(row, cur) if row else None
     finally:
@@ -215,22 +272,25 @@ def get_pilot(pilot_id: str) -> Optional[Dict[str, Any]]:
 
 def list_pilots(
     *,
+    owner_tenant_id: str = _DEFAULT_OWNER_TENANT,
     status: Optional[str] = None,
     icp_band: Optional[str] = None,
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
+    limit = max(1, min(int(limit), 1000))
     conn = get_db_connection()
     try:
         _ensure_schema(conn)
         cur = conn.cursor()
-        clauses, params = [], []
+        clauses: List[str] = ["owner_tenant_id = %s"]
+        params: List[Any] = [owner_tenant_id]
         if status:
             clauses.append("status = %s")
             params.append(status)
         if icp_band:
             clauses.append("icp_band = %s")
             params.append(icp_band)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        where = "WHERE " + " AND ".join(clauses)
         cur.execute(
             f"SELECT * FROM pilots {where} ORDER BY created_at DESC LIMIT %s",
             params + [limit],
@@ -241,23 +301,30 @@ def list_pilots(
         conn.close()
 
 
-def pipeline_summary() -> Dict[str, Any]:
+def pipeline_summary(
+    *,
+    owner_tenant_id: str = _DEFAULT_OWNER_TENANT,
+) -> Dict[str, Any]:
     """Return funnel counts and total ARR for the sales dashboard."""
     conn = get_db_connection()
     try:
         _ensure_schema(conn)
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT
                 status,
                 COUNT(*)                              AS count,
                 COALESCE(SUM(monthly_value_usd), 0)  AS mrr
             FROM pilots
+            WHERE owner_tenant_id = %s
             GROUP BY status
-        """)
+            """,
+            (owner_tenant_id,),
+        )
         by_status: Dict[str, Dict] = {}
         for row in cur.fetchall():
-            by_status[row[0]] = {"count": int(row[1]), "mrr": float(row[2])}
+            by_status[row[0]] = {"count": int(row[1]), "mrr": float(row[2] or 0)}
 
         total_mrr = sum(
             v["mrr"] for k, v in by_status.items()
