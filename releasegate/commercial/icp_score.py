@@ -6,24 +6,20 @@ Scores a ReleaseGate tenant against the Ideal Customer Profile:
    audit pressure, deploying multiple times per week across multiple envs."
 
 Score: 0–100 (weighted sum of signals). Band:
-  STRONG   ≥ 70   → prioritise, offer white-glove onboarding
-  MEDIUM   40–69  → nurture, show ROI calculator
-  WEAK     < 40   → low priority, self-serve only
-
-Signal design: quality over quantity.
-Each signal has a clear business reason. If a signal can't be explained in
-one sentence to a prospect, it doesn't belong here.
+  STRONG   ≥ 70
+  MEDIUM   40–69
+  WEAK     < 40
 
 Signal weights
 --------------
-  jira_intensity             20   (unique Jira keys, not just "has Jira")
+  jira_intensity             20
   github_integration         10
-  deploy_frequency           15   (≥5/wk = high-complexity team)
-  multi_environment          15   (prod + staging = real release process)
-  team_size_in_range         10   (10–100 devs = feels the pain, can buy)
-  compliance_pressure        15   (STRICT mode + audit decisions declared)
-  incident_frequency         10   (incidents = deployment risk is real)
-  override_usage              5   (overrides = governance friction = need)
+  deploy_frequency           15
+  multi_environment          15
+  team_size_in_range         10
+  compliance_pressure        15
+  incident_frequency         10
+  override_usage              5
                              ---
   max                        100
 """
@@ -31,14 +27,25 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from releasegate.storage.db import get_db_connection
+from releasegate.storage.db import get_db_connection, window_predicate
 
 
 def _q_scalar(conn, sql: str, params: tuple = ()):
-    cur = conn.cursor()
-    cur.execute(sql, params)
-    row = cur.fetchone()
-    return row[0] if row else None
+    """Run a scalar query. On missing-table errors (fresh dev DB), return None
+    so the overall ICP score still computes from whatever tables are live."""
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        # Best-effort: rollback any aborted tx on Postgres so subsequent
+        # queries on the same connection don't cascade-fail.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return None
 
 
 def score_tenant(
@@ -56,16 +63,18 @@ def score_tenant(
 
 
 def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str, Any]:
+    dialect = getattr(conn, "dialect", "sqlite")
+    w30  = window_predicate(dialect, "created_at", 30)
+    w60  = window_predicate(dialect, "created_at", 60)
     signals: Dict[str, Dict[str, Any]] = {}
 
-    # ── 1. Jira intensity — unique Jira keys (not just "has Jira") ────────────
-    # A team with 1 Jira key is experimenting. 10+ means it's embedded in workflow.
-    jira_keys = int(_q_scalar(conn, """
+    # ── 1. Jira intensity ────────────────────────────────────────────────────
+    jira_keys = int(_q_scalar(conn, f"""
         SELECT COUNT(DISTINCT jira_issue_key)
         FROM cross_system_correlations
         WHERE tenant_id = %s
           AND jira_issue_key IS NOT NULL AND jira_issue_key <> ''
-          AND created_at >= NOW() - INTERVAL '30 days'
+          AND {w30}
     """, (tenant_id,)) or 0)
     signals["jira_intensity"] = {
         "score": 20 if jira_keys >= 10 else (12 if jira_keys >= 3 else (5 if jira_keys >= 1 else 0)),
@@ -74,7 +83,7 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"Unique Jira keys linked (30d): {jira_keys} — needs 10+ for full score",
     }
 
-    # ── 2. GitHub integration — PRs linked ───────────────────────────────────
+    # ── 2. GitHub integration ────────────────────────────────────────────────
     pr_count = int(_q_scalar(conn, """
         SELECT COUNT(DISTINCT pr_repo)
         FROM cross_system_correlations
@@ -87,11 +96,11 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"{pr_count} GitHub repo(s) connected",
     }
 
-    # ── 3. Deploy frequency — inferred from change records ───────────────────
-    deploy_count_30d = int(_q_scalar(conn, """
+    # ── 3. Deploy frequency ──────────────────────────────────────────────────
+    deploy_count_30d = int(_q_scalar(conn, f"""
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s
-          AND created_at >= NOW() - INTERVAL '30 days'
+          AND {w30}
           AND lifecycle_state IN ('DEPLOYED','VERIFIED','CLOSED')
     """, (tenant_id,)) or 0)
     inferred_dpw = (deploy_count_30d / 30.0) * 7
@@ -103,14 +112,13 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"~{round(effective_dpw, 1)} deploys/week — ≥5/wk = high-complexity team (full score)",
     }
 
-    # ── 4. Multi-environment deploys — strongest "real release process" signal
-    # Count distinct environment values across change records
-    env_count = int(_q_scalar(conn, """
+    # ── 4. Multi-environment ──────────────────────────────────────────────────
+    env_count = int(_q_scalar(conn, f"""
         SELECT COUNT(DISTINCT environment)
         FROM change_records
         WHERE tenant_id = %s
           AND environment IS NOT NULL AND environment <> ''
-          AND created_at >= NOW() - INTERVAL '30 days'
+          AND {w30}
     """, (tenant_id,)) or 0)
     signals["multi_environment"] = {
         "score": 15 if env_count >= 3 else (10 if env_count == 2 else (4 if env_count == 1 else 0)),
@@ -119,10 +127,10 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"{env_count} deployment environment(s) — 3+ (prod/staging/dev) = mature release process",
     }
 
-    # ── 5. Team size in ICP range (10–100) ────────────────────────────────────
-    distinct_actors = int(_q_scalar(conn, """
+    # ── 5. Team size in ICP range ────────────────────────────────────────────
+    distinct_actors = int(_q_scalar(conn, f"""
         SELECT COUNT(DISTINCT actor) FROM change_state_transitions
-        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '60 days'
+        WHERE tenant_id = %s AND {w60}
     """, (tenant_id,)) or 0)
     effective_size = team_size_hint if team_size_hint is not None else distinct_actors
     signals["team_size_in_range"] = {
@@ -132,19 +140,17 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"Estimated team size: {effective_size} — target range is 10–100",
     }
 
-    # ── 6. Compliance pressure — STRICT mode + audit decisions ───────────────
-    # Both signals must be present: they chose STRICT enforcement AND are
-    # actually declaring decisions. That's a team that has compliance pain.
+    # ── 6. Compliance pressure ───────────────────────────────────────────────
     strict_count = int(_q_scalar(conn, """
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s AND enforcement_mode = 'STRICT'
     """, (tenant_id,)) or 0)
-    decision_count = int(_q_scalar(conn, """
+    decision_count = int(_q_scalar(conn, f"""
         SELECT COUNT(*) FROM audit_decisions
-        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
+        WHERE tenant_id = %s AND {w30}
     """, (tenant_id,)) or 0)
-    has_strict   = strict_count > 0
-    has_decisions = decision_count >= 5  # ≥5 decisions = real usage, not a test
+    has_strict    = strict_count > 0
+    has_decisions = decision_count >= 5
     signals["compliance_pressure"] = {
         "score": 15 if (has_strict and has_decisions) else (8 if (has_strict or decision_count > 0) else 0),
         "max": 15,
@@ -155,12 +161,12 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         ),
     }
 
-    # ── 7. Incident frequency — incidents are real deployment risk ────────────
-    incident_count = int(_q_scalar(conn, """
+    # ── 7. Incident frequency ────────────────────────────────────────────────
+    incident_count = int(_q_scalar(conn, f"""
         SELECT COUNT(*) FROM change_records
         WHERE tenant_id = %s
           AND lifecycle_state IN ('INCIDENT_ACTIVE','HOTFIX_IN_PROGRESS','VERIFIED','CLOSED')
-          AND created_at >= NOW() - INTERVAL '30 days'
+          AND {w30}
     """, (tenant_id,)) or 0)
     signals["incident_frequency"] = {
         "score": 10 if incident_count >= 3 else (6 if incident_count >= 1 else 0),
@@ -169,10 +175,10 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         "label": f"{incident_count} incident-linked changes (30d) — incidents = deploy risk is real",
     }
 
-    # ── 8. Override / exception usage ─────────────────────────────────────────
-    override_count = int(_q_scalar(conn, """
+    # ── 8. Override / exception usage ────────────────────────────────────────
+    override_count = int(_q_scalar(conn, f"""
         SELECT COUNT(*) FROM policy_overrides
-        WHERE tenant_id = %s AND created_at >= NOW() - INTERVAL '30 days'
+        WHERE tenant_id = %s AND {w30}
     """, (tenant_id,)) or 0)
     signals["override_usage"] = {
         "score": 5 if override_count > 0 else 0,
@@ -200,7 +206,6 @@ def _compute(conn, *, tenant_id: str, team_size_hint, deploys_hint) -> Dict[str,
         ),
     }[band]
 
-    # Surface the two highest-value gaps so sales knows exactly what to ask about
     gaps = sorted(
         [
             {"signal": k, "gap": s["max"] - s["score"], "label": s["label"]}
