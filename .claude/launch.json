@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ReleaseGate API",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["releasegate.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"],
+      "port": 8000
+    },
+    {
+      "name": "Streamlit Dashboard",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "releasegate/dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"],
+      "port": 8501
+    },
+    {
+      "name": "Dashboard UI (Next.js)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "dashboard-ui"],
+      "port": 3000
+    }
+  ]
+}
