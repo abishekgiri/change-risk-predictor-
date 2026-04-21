@@ -10833,7 +10833,7 @@ class CreatePilotRequest(BaseModel):
 def commercial_create_pilot(
     body: CreatePilotRequest,
     auth: AuthContext = require_access(
-        roles=["admin"],
+        roles=["admin", "operator"],
         scopes=["enforcement:write"],
         rate_profile="default",
         allow_internal_service=True,
@@ -10922,7 +10922,7 @@ def commercial_update_pilot(
     pilot_id: str,
     body: UpdatePilotRequest,
     auth: AuthContext = require_access(
-        roles=["admin"],
+        roles=["admin", "operator"],
         scopes=["enforcement:write"],
         rate_profile="default",
         allow_internal_service=True,
