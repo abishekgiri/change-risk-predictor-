@@ -10757,6 +10757,7 @@ def commercial_roi_estimate(
         roles=["admin", "operator", "viewer"],
         scopes=["policy:read"],
         rate_profile="read_heavy",
+        allow_internal_service=True,
     ),
 ):
     """Calculate ROI for a prospect or tenant.
@@ -10794,6 +10795,7 @@ def commercial_proof_metrics(
         roles=["admin", "operator", "viewer"],
         scopes=["policy:read"],
         rate_profile="read_heavy",
+        allow_internal_service=True,
     ),
 ):
     """Return auto-generated case study metrics for a tenant.
@@ -10834,6 +10836,7 @@ def commercial_create_pilot(
         roles=["admin"],
         scopes=["enforcement:write"],
         rate_profile="default",
+        allow_internal_service=True,
     ),
 ):
     """Register a new design partner or paid pilot."""
@@ -10867,6 +10870,7 @@ def commercial_list_pilots(
         roles=["admin", "operator"],
         scopes=["policy:read"],
         rate_profile="read_heavy",
+        allow_internal_service=True,
     ),
 ):
     """List all pilots with optional status/icp_band filter."""
@@ -10902,6 +10906,7 @@ def commercial_get_pilot(
         roles=["admin", "operator"],
         scopes=["policy:read"],
         rate_profile="read_heavy",
+        allow_internal_service=True,
     ),
 ):
     from releasegate.commercial.pilot_tracker import get_pilot
@@ -10920,6 +10925,7 @@ def commercial_update_pilot(
         roles=["admin"],
         scopes=["enforcement:write"],
         rate_profile="default",
+        allow_internal_service=True,
     ),
 ):
     """Update pilot status, metrics snapshots, or any mutable field."""
@@ -10958,6 +10964,7 @@ def commercial_icp_score(
         roles=["admin", "operator"],
         scopes=["policy:read"],
         rate_profile="read_heavy",
+        allow_internal_service=True,
     ),
 ):
     """Score a tenant against the Ideal Customer Profile.
