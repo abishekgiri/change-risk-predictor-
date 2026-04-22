@@ -38,7 +38,7 @@ interface CIValidateResult {
 
 export function CIGateClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
   const preselectedPolicyId = searchParams.get("policy_id") || "";
 
   const [policyId, setPolicyId] = useState(preselectedPolicyId);

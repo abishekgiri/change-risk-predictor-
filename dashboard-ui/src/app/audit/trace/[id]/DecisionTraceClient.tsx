@@ -113,7 +113,7 @@ function HashRow({ label, value }: { label: string; value: string | null | undef
 export function DecisionTraceClient() {
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
   const decisionId = params.id;
 
   const [trace, setTrace] = useState<TraceResult | null>(null);

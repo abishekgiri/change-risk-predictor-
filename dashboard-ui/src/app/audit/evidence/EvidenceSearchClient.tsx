@@ -40,7 +40,7 @@ interface SearchResult {
 
 export function EvidenceSearchClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
 
   const [statusFilter, setStatusFilter] = useState("");
   const [approvalFilter, setApprovalFilter] = useState<"" | "true" | "false">("");

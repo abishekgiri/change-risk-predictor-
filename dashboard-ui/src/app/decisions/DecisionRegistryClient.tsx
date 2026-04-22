@@ -33,7 +33,7 @@ const STATUS_STYLES: Record<string, string> = {
 
 export function DecisionRegistryClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
 
   const [repo, setRepo] = useState("");
   const [status, setStatus] = useState("");
