@@ -11,7 +11,7 @@ type SimMode = "live" | "historical";
 
 export function PolicySimulateClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
   const preselectedPolicyId = searchParams.get("policy_id") || "";
 
   const [mode, setMode] = useState<SimMode>(preselectedPolicyId ? "historical" : "live");

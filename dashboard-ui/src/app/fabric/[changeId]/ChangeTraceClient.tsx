@@ -118,7 +118,7 @@ function NodeCard({ title, icon, complete, children }: {
 export function ChangeTraceClient() {
   const params = useParams<{ changeId: string }>();
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
   const changeId = params.changeId;
 
   const [trace, setTrace] = useState<TraceResult | null>(null);

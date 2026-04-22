@@ -40,7 +40,7 @@ const IMPROVEMENT_STYLE = (val: string) => {
 
 export function ProofMetricsClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id"); // null → use authed tenant
   const [days, setDays] = useState(30);
   const [data, setData] = useState<ProofData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,8 +50,11 @@ export function ProofMetricsClient() {
     setLoading(true);
     setError(null);
     try {
+      const qs = new URLSearchParams();
+      if (tenantId) qs.set("tenant_id", tenantId);
+      qs.set("days", String(days));
       const d = await callDashboardApi<ProofData>(
-        `/api/dashboard/commercial/proof?tenant_id=${encodeURIComponent(tenantId)}&days=${days}`
+        `/api/dashboard/commercial/proof?${qs.toString()}`
       );
       setData(d);
     } catch (err) {

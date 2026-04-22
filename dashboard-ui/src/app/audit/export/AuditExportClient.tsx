@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 
 export function AuditExportClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
 
   const [repo, setRepo] = useState("");
   const [format, setFormat] = useState<"json" | "csv">("json");

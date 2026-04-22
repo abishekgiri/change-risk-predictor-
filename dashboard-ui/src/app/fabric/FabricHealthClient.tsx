@@ -86,7 +86,7 @@ const VERDICT_ICONS = { HEALTHY: "✓", DEGRADED: "⚠", CRITICAL: "✗" };
 
 export function FabricHealthClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
 
   const [days, setDays] = useState(30);
   const [stateFilter, setStateFilter] = useState("");

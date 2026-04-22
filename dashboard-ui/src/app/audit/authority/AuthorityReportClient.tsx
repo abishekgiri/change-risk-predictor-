@@ -39,7 +39,7 @@ interface AuthorityReport {
 
 export function AuthorityReportClient() {
   const searchParams = useSearchParams();
-  const tenantId = searchParams.get("tenant_id") || "default";
+  const tenantId = searchParams.get("tenant_id") || "";
 
   const [days, setDays] = useState(30);
   const [report, setReport] = useState<AuthorityReport | null>(null);
