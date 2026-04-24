@@ -1198,11 +1198,6 @@ def main() -> int:
                         from releasegate.storage import get_storage_backend as _get_storage
                         from datetime import datetime as _dt, timezone as _tz
                         _storage = _get_storage()
-                        print(
-                            f"[audit_decisions] reached block; backend={type(_storage).__name__} "
-                            f"decision_id={bundle.decision_id} tenant={tenant_id}",
-                            flush=True,
-                        )
                         _now_iso = _dt.now(_tz.utc).isoformat()
                         _release_status = str(control_result).upper()
                         _decision_summary = {
@@ -1255,34 +1250,7 @@ def main() -> int:
                                 _evaluation_key,
                             ),
                         )
-                        print(
-                            f"[audit_decisions] INSERT completed without exception "
-                            f"decision_id={bundle.decision_id} tenant={tenant_id} "
-                            f"eval_key={_evaluation_key}",
-                            flush=True,
-                        )
-                        # Sanity-check the row actually landed and is visible.
-                        try:
-                            _row = _storage.fetchone(
-                                "SELECT decision_id FROM audit_decisions WHERE tenant_id = ? AND decision_id = ?",
-                                (tenant_id, bundle.decision_id),
-                            )
-                            print(
-                                f"[audit_decisions] post-insert SELECT -> {_row}",
-                                flush=True,
-                            )
-                        except Exception as _verify_exc:
-                            print(
-                                f"[audit_decisions] post-insert SELECT raised: {_verify_exc!r}",
-                                flush=True,
-                            )
                     except Exception as _persist_exc:
-                        # Log the FULL exception (type + message) so we can
-                        # see what actually happened in CI logs.
-                        print(
-                            f"[audit_decisions] INSERT raised: {type(_persist_exc).__name__}: {_persist_exc}",
-                            flush=True,
-                        )
                         # Collisions on evaluation_key are expected on retries.
                         _msg = str(_persist_exc).lower()
                         if "unique" in _msg or "duplicate" in _msg:

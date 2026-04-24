@@ -61,10 +61,14 @@ jobs:
           echo "Running ReleaseGate analysis for PR #${{ github.event.pull_request.number }}"
           
           # Use analyze-pr (not evaluate) so we generate + persist signed attestations.
+          # Use the "local" tenant so CI runs land in the same tenant the
+          # hosted dashboard (app.releasegate.io) authenticates as.  Using
+          # ${{ github.repository_owner }} would silo rows under "abishekgiri"
+          # and hide them from the default /decisions + /proof views.
           releasegate analyze-pr \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
-            --tenant "${{ github.repository_owner }}" \
+            --tenant "local" \
             --emit-attestation attestation.json \
             --emit-dsse releasegate.dsse.json \
             --output compliance_report.json \
