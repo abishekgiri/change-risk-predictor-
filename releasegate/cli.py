@@ -836,6 +836,8 @@ def main() -> int:
         return 0
 
     if args.cmd == "analyze-pr":
+        # End-to-end persistence smoke: this PR's compliance-check run should
+        # produce a row in audit_decisions for tenant=local (see PR #112).
         # Set token if provided
         if args.token:
             os.environ["GITHUB_TOKEN"] = args.token
