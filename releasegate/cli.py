@@ -1187,6 +1187,75 @@ def main() -> int:
                         attestation=attestation,
                     )
 
+                    # Persist a row into audit_decisions so the hosted
+                    # dashboard (/decisions, /proof audit_coverage_pct,
+                    # /audit/authority) reflects real CI runs — not just
+                    # seeded demo data.  Failure is logged but non-fatal
+                    # so the attestation-generation path stays intact.
+                    try:
+                        from releasegate.storage import get_storage_backend as _get_storage
+                        from datetime import datetime as _dt, timezone as _tz
+                        _storage = _get_storage()
+                        _now_iso = _dt.now(_tz.utc).isoformat()
+                        _release_status = str(control_result).upper()
+                        _decision_summary = {
+                            "decision_id": bundle.decision_id,
+                            "tenant_id": tenant_id,
+                            "repo": args.repo,
+                            "pr_number": pr_number,
+                            "commit_sha": commit_sha,
+                            "release_status": _release_status,
+                            "risk_score": float(risk_score or 0.0),
+                            "reason_codes": list(reason_codes or reasons or []),
+                            "policy_bundle_hash": policy_hash,
+                            "attestation_id": attestation_id,
+                            "signed_payload_hash": signed_payload_hash,
+                            "metrics": metrics_payload,
+                            "created_at": _now_iso,
+                            "source": "analyze-pr",
+                        }
+                        _full_json = json.dumps(
+                            _decision_summary, sort_keys=True, default=str
+                        )
+                        _evaluation_key = (
+                            f"{tenant_id}:{args.repo}:{pr_number}:"
+                            f"{commit_sha or 'no-sha'}"
+                        )
+                        _storage.execute(
+                            """
+                            INSERT INTO audit_decisions (
+                                decision_id, tenant_id, context_id, repo, pr_number,
+                                release_status, policy_bundle_hash, engine_version,
+                                decision_hash, input_hash, policy_hash, replay_hash,
+                                full_decision_json, created_at, evaluation_key
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                bundle.decision_id,
+                                tenant_id,
+                                bundle.decision_id,
+                                args.repo,
+                                pr_number,
+                                _release_status,
+                                policy_hash or "unhashed",
+                                os.getenv("RELEASEGATE_ENGINE_VERSION", "2.0.0"),
+                                attestation_id or "",
+                                signed_payload_hash or "",
+                                policy_hash or "",
+                                attestation_id or "",
+                                _full_json,
+                                _now_iso,
+                                _evaluation_key,
+                            ),
+                        )
+                    except Exception as _persist_exc:
+                        # Collisions on evaluation_key are expected on retries.
+                        _msg = str(_persist_exc).lower()
+                        if "unique" in _msg or "duplicate" in _msg:
+                            pass
+                        else:
+                            errors.append(f"AUDIT_DECISION_PERSIST_FAILED: {_persist_exc}")
+
                     if args.emit_attestation:
                         with open(args.emit_attestation, "w", encoding="utf-8") as f:
                             json.dump(attestation, f, indent=2)
