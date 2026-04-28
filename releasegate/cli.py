@@ -1258,6 +1258,157 @@ def main() -> int:
                         else:
                             errors.append(f"AUDIT_DECISION_PERSIST_FAILED: {_persist_exc}")
 
+                    # ------------------------------------------------------------------
+                    # Fabric persistence: write a full-chain row into
+                    # cross_system_correlations + change_records so the hosted
+                    # /proof page reflects real PR traffic (traceability_pct,
+                    # full_chain_changes, audit_coverage_pct).  Without this,
+                    # every CI run produces an audit_decision row but the
+                    # fabric-layer metrics keep showing only seeded data.
+                    #
+                    # All inserts use deterministic IDs derived from
+                    # (tenant, repo, PR, commit) so workflow re-runs collapse
+                    # into the same correlation/change pair instead of duplicating.
+                    # ------------------------------------------------------------------
+                    try:
+                        import hashlib as _hashlib
+
+                        _corr_seed = (
+                            f"{tenant_id}:{args.repo}:{pr_number}:{commit_sha or ''}"
+                        ).encode("utf-8")
+                        _correlation_id = "cor_" + _hashlib.sha1(_corr_seed).hexdigest()[:16]
+
+                        _change_seed = f"{tenant_id}:{bundle.decision_id}".encode("utf-8")
+                        _change_id = "chg_" + _hashlib.sha1(_change_seed).hexdigest()[:16]
+
+                        # Identify the gating workflow run as the "deploy"
+                        # touchpoint.  In GitHub Actions this is the run id;
+                        # otherwise fall back to a CI-local synthetic id so
+                        # the row still counts toward full-chain coverage.
+                        _run_id = (os.getenv("GITHUB_RUN_ID") or "").strip()
+                        _run_attempt = (os.getenv("GITHUB_RUN_ATTEMPT") or "").strip()
+                        if _run_id:
+                            _deploy_id = (
+                                f"gha_{_run_id}" + (f"_a{_run_attempt}" if _run_attempt else "")
+                            )
+                        else:
+                            _deploy_id = f"ci_{(commit_sha or 'no-sha')[:12]}"
+
+                        # Prefer parsed Jira keys (independent of Jira API
+                        # availability); fall back to keys that round-tripped
+                        # through Jira property attach.
+                        _jira_key = None
+                        try:
+                            if issue_keys:
+                                _jira_key = issue_keys[0]
+                        except NameError:
+                            _jira_key = None
+                        if not _jira_key and attached_issue_keys:
+                            _jira_key = attached_issue_keys[0]
+
+                        _environment = (
+                            os.getenv("RELEASEGATE_ENVIRONMENT")
+                            or "production"
+                        ).strip() or "production"
+
+                        # Map analyzer enforcement_mode (monitor/enforce) onto
+                        # fabric enforcement_mode (AUDIT/STRICT).
+                        _emode_raw = str(enforcement_mode or "").strip().lower()
+                        _fab_enforcement = "STRICT" if _emode_raw in ("enforce", "strict") else "AUDIT"
+
+                        # Lifecycle state: PASS/WARN/ALLOW → DEPLOYED (CI
+                        # gate passed = the deploy touchpoint succeeded);
+                        # BLOCK/FAIL → BLOCKED.
+                        if _release_status in ("BLOCK", "BLOCKED", "FAIL", "DENIED", "DENY"):
+                            _lifecycle = "BLOCKED"
+                        else:
+                            _lifecycle = "DEPLOYED"
+
+                        _violation_codes_json = None
+                        if _lifecycle == "BLOCKED" and (reason_codes or reasons):
+                            _violation_codes_json = json.dumps(
+                                list(reason_codes or reasons)
+                            )
+
+                        _rg_decision_ids_json = (
+                            json.dumps([bundle.decision_id])
+                            if _lifecycle != "BLOCKED"
+                            else None
+                        )
+
+                        # 1. cross_system_correlations (source of truth for links)
+                        try:
+                            _storage.execute(
+                                """
+                                INSERT INTO cross_system_correlations (
+                                    tenant_id, correlation_id, jira_issue_key,
+                                    pr_repo, pr_sha, deploy_id, incident_id,
+                                    environment, change_ticket_key,
+                                    decision_id, rg_decision_ids,
+                                    created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    tenant_id, _correlation_id, _jira_key,
+                                    args.repo, commit_sha, _deploy_id, None,
+                                    _environment, None,
+                                    bundle.decision_id, _rg_decision_ids_json,
+                                    _now_iso, _now_iso,
+                                ),
+                            )
+                        except Exception as _csc_exc:
+                            _csc_msg = str(_csc_exc).lower()
+                            if "unique" in _csc_msg or "duplicate" in _csc_msg:
+                                # Existing correlation: top up rg_decision_ids
+                                # if missing so audit_coverage_pct still counts
+                                # this deploy.
+                                if _rg_decision_ids_json is not None:
+                                    try:
+                                        _storage.execute(
+                                            """
+                                            UPDATE cross_system_correlations
+                                            SET rg_decision_ids = ?, updated_at = ?
+                                            WHERE tenant_id = ? AND correlation_id = ?
+                                              AND (rg_decision_ids IS NULL OR rg_decision_ids = '')
+                                            """,
+                                            (_rg_decision_ids_json, _now_iso, tenant_id, _correlation_id),
+                                        )
+                                    except Exception:
+                                        pass
+                            else:
+                                raise
+
+                        # 2. change_records (state machine over correlations)
+                        _approved_at = _now_iso if _lifecycle != "BLOCKED" else None
+                        _deployed_at = _now_iso if _lifecycle == "DEPLOYED" else None
+                        try:
+                            _storage.execute(
+                                """
+                                INSERT INTO change_records (
+                                    tenant_id, change_id, lifecycle_state, enforcement_mode,
+                                    correlation_id, violation_codes,
+                                    linked_at, approved_at, deployed_at, incident_at, closed_at,
+                                    created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    tenant_id, _change_id, _lifecycle, _fab_enforcement,
+                                    _correlation_id, _violation_codes_json,
+                                    _now_iso, _approved_at, _deployed_at, None, None,
+                                    _now_iso, _now_iso,
+                                ),
+                            )
+                        except Exception as _cr_exc:
+                            _cr_msg = str(_cr_exc).lower()
+                            if "unique" in _cr_msg or "duplicate" in _cr_msg:
+                                pass
+                            else:
+                                raise
+                    except Exception as _fabric_exc:
+                        _fmsg = str(_fabric_exc).lower()
+                        if "unique" not in _fmsg and "duplicate" not in _fmsg:
+                            errors.append(f"FABRIC_PERSIST_FAILED: {_fabric_exc}")
+
                     if args.emit_attestation:
                         with open(args.emit_attestation, "w", encoding="utf-8") as f:
                             json.dump(attestation, f, indent=2)
