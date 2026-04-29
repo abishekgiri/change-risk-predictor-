@@ -39,6 +39,27 @@ jobs:
           which releasegate || echo "releasegate not in PATH"
           releasegate --help || echo "releasegate failed to run"
 
+      - name: Debug DSN host (no credentials)
+        # One-shot diagnostic: prove which Postgres CI is wired against
+        # without leaking the password.  Remove this step once the DSN
+        # mismatch is resolved.
+        env:
+          RELEASEGATE_POSTGRES_DSN: ${{ secrets.RELEASEGATE_POSTGRES_DSN }}
+        run: |
+          python - <<'PY'
+          import os, urllib.parse as u
+          dsn = (os.environ.get("RELEASEGATE_POSTGRES_DSN") or "").strip()
+          if not dsn:
+              print("RELEASEGATE_POSTGRES_DSN: <empty / not set>")
+          else:
+              p = u.urlparse(dsn)
+              print(f"CI DSN scheme: {p.scheme}")
+              print(f"CI DSN host:   {p.hostname}")
+              print(f"CI DSN port:   {p.port}")
+              print(f"CI DSN db:     {(p.path or '').lstrip('/') or '<unset>'}")
+              print(f"CI DSN user:   {p.username or '<unset>'}")
+          PY
+
       - name: Lint Compiled Policies
         run: |
           releasegate lint-policies \
