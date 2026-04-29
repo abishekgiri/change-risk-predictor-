@@ -5,6 +5,10 @@ on:
     branches:
       - main
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Allow ad-hoc verification runs via `gh workflow run compliance-check.yml`.
+  # Useful when secrets are rotated and we need to re-prove DB persistence
+  # without opening a throwaway PR.
+  workflow_dispatch:
 
 jobs:
   compliance:
