@@ -146,6 +146,41 @@ class TestDecisionIdStableAcrossReruns:
         )
         assert bundle_local.decision_id == bundle_ci_minimal.decision_id
 
+    def test_decision_id_is_stable_when_only_timestamp_differs(self) -> None:
+        """The empirical regression that PR #127 (this commit) fixes.
+
+        On the 2026-04-29 demo on PR #125, three runs produced three
+        different decision_ids even after PR #126 scrubbed
+        workflow_run.run_id from the seed.  Decoding the DSSE bundles
+        showed every seed-relevant field matched between Run 1 and Run
+        3 except `issued_at` — which is fed from `pr.updated_at` at the
+        cli.py call site and bumps any time GitHub touches the PR
+        (label, review, status post, merge).
+
+        That's metadata-about-when, not metadata-about-what.  After the
+        fix, two builds that differ only in `timestamp` MUST produce
+        the same decision_id.
+        """
+        bundle_open = _build(
+            signals={"workflow_run": _workflow_run("100")},
+            timestamp="2026-04-29T19:46:27Z",
+        )
+        bundle_after_merge = _build(
+            signals={"workflow_run": _workflow_run("999")},
+            timestamp="2026-04-29T22:36:45Z",
+        )
+        assert bundle_open.decision_id == bundle_after_merge.decision_id
+
+    def test_bundle_timestamp_still_records_issued_at_for_forensics(self) -> None:
+        """Removing issued_at from the seed must NOT remove it from the
+        bundle — the DSSE attestation needs the exact issuance time so
+        forensic queries ("when was this signed?") still work.
+        """
+        bundle = _build(signals={}, timestamp="2026-04-29T19:46:27Z")
+        # The exact ISO format may be normalised; just assert we kept
+        # the time component, not "1970-..." or empty.
+        assert bundle.timestamp.startswith("2026-04-29T19:46:27")
+
 
 # ── Forensics still preserved ───────────────────────────────────────────────
 class TestForensicMetadataPreserved:
