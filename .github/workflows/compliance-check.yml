@@ -92,6 +92,24 @@ jobs:
             --output compliance_report.json \
             --format json
 
+      - name: Verify analysis produced a report
+        # `Run Policy Analysis` has continue-on-error: true so we can always
+        # reach the Gate step (which decides PASS/BLOCK from compliance_report.json).
+        # That's correct for normal BLOCK verdicts, but it also masks
+        # catastrophic failures: if analyze-pr crashes before writing the
+        # report (e.g. invalid DSN, storage backend init error, missing
+        # dependency), the job currently goes green in monitor mode.
+        # This step fails the job hard whenever the report is missing —
+        # the unmistakable signal that the governance pipeline didn't run,
+        # not just that it ran and said BLOCK.
+        if: always()
+        run: |
+          if [ ! -f compliance_report.json ]; then
+            echo "::error::analyze-pr did not produce compliance_report.json — the governance pipeline failed before writing its output. Check the 'Run Policy Analysis' step log for the actual error (most common: malformed RELEASEGATE_POSTGRES_DSN, missing secret, or storage backend init crash)."
+            exit 1
+          fi
+          echo "compliance_report.json present ($(wc -c < compliance_report.json) bytes)"
+
       - name: Write Compliance Summary
         if: always()
         run: |
