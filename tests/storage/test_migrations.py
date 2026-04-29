@@ -59,6 +59,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260316_040_policy_snapshot_cache" in migration_ids
         assert "20260317_041_saas_tenant_admin_and_roles" in migration_ids
         assert "20260318_042_phase28_governance_moat" in migration_ids
+        assert "20260429_043_change_records_canonical" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
@@ -878,3 +879,125 @@ def test_sqlite_migration_batch_rolls_back_on_failure():
         finally:
             storage_migrations.MIGRATIONS = original
             conn.close()
+
+
+# ── Cold-start regression test for the change_records canonical migration ────
+#
+# Background: prior to migration 20260429_043, `change_records` and
+# `change_state_transitions` were only created by fabric/change_record.py's
+# `_ensure_tables()` — a path that analyze-pr's CLI persistence does NOT take.
+# A fresh DB therefore had analyze-pr crash silently on the fabric INSERT
+# (broad except in cli.py captured "relation does not exist" into errors[]).
+# This test pins down the contract that init_db() now creates everything
+# needed for analyze-pr to succeed end-to-end on a fresh DB.
+
+def test_init_db_creates_change_records_tables_on_cold_start():
+    """A fresh DB must have change_records + change_state_transitions
+    after init_db() — no need to call fabric helpers first.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+
+        # change_records exists with expected schema.
+        cur.execute("PRAGMA table_info(change_records)")
+        cr_info = cur.fetchall()
+        assert cr_info, "change_records table missing after init_db"
+        cr_cols = {row[1] for row in cr_info}
+        cr_pk = [row[1] for row in sorted((r for r in cr_info if r[5] > 0), key=lambda r: r[5])]
+        assert {
+            "tenant_id", "change_id", "lifecycle_state", "enforcement_mode",
+            "correlation_id", "violation_codes",
+            "linked_at", "approved_at", "deployed_at", "incident_at", "closed_at",
+            "created_at", "updated_at",
+        } <= cr_cols
+        assert cr_pk == ["tenant_id", "change_id"]
+
+        # change_state_transitions exists with expected schema.
+        cur.execute("PRAGMA table_info(change_state_transitions)")
+        cst_info = cur.fetchall()
+        assert cst_info, "change_state_transitions table missing after init_db"
+        cst_cols = {row[1] for row in cst_info}
+        assert {
+            "tenant_id", "change_id", "from_state", "to_state",
+            "event", "actor", "violation_codes", "created_at",
+        } <= cst_cols
+
+        # Indexes that proof_metrics.py / dashboard queries rely on.
+        cur.execute("PRAGMA index_list(change_records)")
+        cr_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_cr_tenant_state" in cr_indexes
+        assert "idx_cr_tenant_corr" in cr_indexes
+
+        cur.execute("PRAGMA index_list(change_state_transitions)")
+        cst_indexes = {row[1] for row in cur.fetchall()}
+        assert "idx_cst_change" in cst_indexes
+    finally:
+        conn.close()
+
+
+def test_change_records_migration_is_idempotent():
+    """Running init_db() twice must not break — `IF NOT EXISTS` semantics
+    are how we avoid disturbing the existing Render production tables
+    that were created by `_ensure_tables` before this migration shipped.
+    """
+    init_db()
+    init_db()  # second call must be a no-op, not a DDL collision
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM schema_migrations "
+            "WHERE migration_id = '20260429_043_change_records_canonical'"
+        )
+        # Migration recorded exactly once even after multiple init_db calls.
+        assert cur.fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_analyze_pr_fabric_writes_succeed_after_init_db():
+    """End-to-end: simulate the analyze-pr fabric INSERTs against a fresh
+    DB.  Pre-migration this would have raised; post-migration it must
+    succeed without going through fabric.change_record helpers.
+    """
+    init_db()
+    # Use a per-run change_id so this test is order-independent within the
+    # shared DB_PATH (other tests in this suite leave rows around).
+    import uuid as _uuid
+    change_id = f"chg_coldstart_{_uuid.uuid4().hex[:8]}"
+    correlation_id = f"cor_coldstart_{_uuid.uuid4().hex[:8]}"
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        # Mirrors the INSERT shape at cli.py:1387-1399.
+        cur.execute(
+            """
+            INSERT INTO change_records (
+                tenant_id, change_id, lifecycle_state, enforcement_mode,
+                correlation_id, violation_codes,
+                linked_at, approved_at, deployed_at, incident_at, closed_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "test-tenant", change_id, "DEPLOYED", "AUDIT",
+                correlation_id, None,
+                "2026-04-29T00:00:00+00:00", "2026-04-29T00:00:00+00:00",
+                "2026-04-29T00:00:00+00:00", None, None,
+                "2026-04-29T00:00:00+00:00", "2026-04-29T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+        cur.execute(
+            "SELECT lifecycle_state FROM change_records "
+            "WHERE tenant_id = ? AND change_id = ?",
+            ("test-tenant", change_id),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        assert row[0] == "DEPLOYED"
+    finally:
+        conn.close()

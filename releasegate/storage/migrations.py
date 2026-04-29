@@ -2886,6 +2886,77 @@ def _migration_20260318_042_phase28_governance_moat(cursor) -> None:
         """
     )
 
+
+def _migration_20260429_043_change_records_canonical(cursor) -> None:
+    """Add change_records + change_state_transitions to the canonical schema.
+
+    These tables were previously created lazily by fabric/change_record.py's
+    `_ensure_tables()`, but the analyze-pr CLI persistence path (cli.py:1273)
+    writes via raw `_storage.execute("INSERT INTO change_records ...")`
+    without going through that helper.  On a fresh Postgres / SQLite, the
+    fabric INSERT then failed with "relation does not exist" and was
+    swallowed by the broad try/except in cli.py — leaving /proof
+    traceability stuck at 0% with no operator-visible error.
+
+    Schema mirrors `_ensure_tables` exactly (TEXT timestamps, identical
+    column ordering and PRIMARY KEY) so existing rows on Render and any
+    other DB that was already manually bootstrapped are untouched by
+    `IF NOT EXISTS` semantics.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_records (
+            tenant_id        TEXT NOT NULL,
+            change_id        TEXT NOT NULL,
+            lifecycle_state  TEXT NOT NULL DEFAULT 'CREATED',
+            enforcement_mode TEXT NOT NULL DEFAULT 'STRICT',
+            correlation_id   TEXT,
+            violation_codes  TEXT,
+            linked_at        TEXT,
+            approved_at      TEXT,
+            deployed_at      TEXT,
+            incident_at      TEXT,
+            closed_at        TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, change_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_state_transitions (
+            tenant_id       TEXT NOT NULL,
+            change_id       TEXT NOT NULL,
+            from_state      TEXT NOT NULL,
+            to_state        TEXT NOT NULL,
+            event           TEXT,
+            actor           TEXT,
+            violation_codes TEXT,
+            created_at      TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cr_tenant_state
+        ON change_records(tenant_id, lifecycle_state, updated_at DESC)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cr_tenant_corr
+        ON change_records(tenant_id, correlation_id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cst_change
+        ON change_state_transitions(tenant_id, change_id, created_at DESC)
+        """
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -3096,6 +3167,15 @@ MIGRATIONS: List[Migration] = [
         migration_id="20260318_042_phase28_governance_moat",
         description="Add cross-system correlation records and governance insight/recommendation stores.",
         apply=_migration_20260318_042_phase28_governance_moat,
+    ),
+    Migration(
+        migration_id="20260429_043_change_records_canonical",
+        description=(
+            "Add change_records + change_state_transitions to the canonical "
+            "schema so analyze-pr's fabric persistence works on cold-start "
+            "(closes the silent /proof traceability gap on new tenants)."
+        ),
+        apply=_migration_20260429_043_change_records_canonical,
     ),
 ]
 
