@@ -2731,6 +2731,67 @@ def _init_postgres_schema() -> str:
         ON cross_system_correlations(tenant_id, jira_issue_key, updated_at DESC)
         """
     )
+    # ── change_records + change_state_transitions ──────────────────────────────
+    # Tables are also created on first call by fabric/change_record.py's
+    # _ensure_tables(), but analyze-pr's persistence path (cli.py) writes to
+    # change_records via raw INSERTs without going through that helper, so a
+    # fresh Postgres without these tables would silently fail the fabric
+    # block (caught into errors[]) and leave /proof traceability at 0%.
+    # Adding them to init_db() closes the cold-start onboarding gap.
+    # Schema mirrors _ensure_tables exactly so existing Render rows (TEXT
+    # timestamps, identical column ordering) are never touched by IF NOT EXISTS.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_records (
+            tenant_id        TEXT NOT NULL,
+            change_id        TEXT NOT NULL,
+            lifecycle_state  TEXT NOT NULL DEFAULT 'CREATED',
+            enforcement_mode TEXT NOT NULL DEFAULT 'STRICT',
+            correlation_id   TEXT,
+            violation_codes  TEXT,
+            linked_at        TEXT,
+            approved_at      TEXT,
+            deployed_at      TEXT,
+            incident_at      TEXT,
+            closed_at        TEXT,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, change_id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS change_state_transitions (
+            tenant_id       TEXT NOT NULL,
+            change_id       TEXT NOT NULL,
+            from_state      TEXT NOT NULL,
+            to_state        TEXT NOT NULL,
+            event           TEXT,
+            actor           TEXT,
+            violation_codes TEXT,
+            created_at      TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cr_tenant_state
+        ON change_records(tenant_id, lifecycle_state, updated_at DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cr_tenant_corr
+        ON change_records(tenant_id, correlation_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cst_change
+        ON change_state_transitions(tenant_id, change_id, created_at DESC)
+        """
+    )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tenant_onboarding_config (
