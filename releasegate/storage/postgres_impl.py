@@ -2,11 +2,67 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional, Sequence
+from urllib.parse import urlparse
 
 import os
 import threading
 
 from releasegate.storage.base import StorageBackend
+
+
+# Schemes psycopg2 accepts in URL-form DSNs.  Postgres aliases "postgres://"
+# and "postgresql://"; everything else (including SQLAlchemy-style
+# "postgresql+psycopg2://...") is rejected here so we fail at construction
+# time instead of inside an opaque OperationalError later.
+_VALID_DSN_SCHEMES = frozenset({"postgresql", "postgres"})
+
+
+class InvalidPostgresDSNError(ValueError):
+    """Raised when RELEASEGATE_POSTGRES_DSN can't be parsed as a Postgres URL.
+
+    Subclasses ValueError so existing callers' `except ValueError:` paths
+    keep working; consumers who care about the specific failure mode can
+    catch InvalidPostgresDSNError to differentiate from missing-DSN.
+    """
+
+
+def _validate_dsn_or_raise(dsn: str) -> None:
+    """Hard-fail if the DSN string isn't a parseable Postgres URL.
+
+    The two failure modes we've actually seen in CI:
+      1. Secret pasted without the 'postgresql://' scheme prefix — urlparse
+         dumps the whole string into `path`, leaving scheme='' and host=None.
+      2. Whitespace, surrounding quotes, or trailing newline captured into
+         the secret value.
+
+    Either way, psycopg2.connect() will raise an opaque OperationalError
+    ('could not translate host name "..." to address' or similar) at the
+    first INSERT — by which time the broad try/except in cli.py already
+    swallowed it into errors[].  Failing here surfaces the real cause
+    upfront, with a message that explains how to fix it.
+    """
+    parsed = urlparse(dsn)
+    scheme_ok = parsed.scheme in _VALID_DSN_SCHEMES
+    host_ok = bool(parsed.hostname)
+    if scheme_ok and host_ok:
+        return
+    # Don't echo the DSN itself in the message — even partial leakage of a
+    # password is unacceptable in CI logs.
+    detail_bits = []
+    if not scheme_ok:
+        detail_bits.append(
+            f"scheme={parsed.scheme!r} (expected one of {sorted(_VALID_DSN_SCHEMES)})"
+        )
+    if not host_ok:
+        detail_bits.append("hostname=<unset>")
+    raise InvalidPostgresDSNError(
+        "RELEASEGATE_POSTGRES_DSN is not a valid Postgres URL: "
+        + ", ".join(detail_bits)
+        + ". Expected format: 'postgresql://USER:PASSWORD@HOST:PORT/DB?sslmode=require'. "
+        "Most common cause: the GitHub Actions secret was saved without the "
+        "'postgresql://' scheme prefix. Re-paste the full External Database URL "
+        "from your Postgres provider — do NOT add quotes or trailing newlines."
+    )
 
 try:
     import psycopg2
@@ -25,6 +81,14 @@ class PostgresStorageBackend(StorageBackend):
         )
         if not self._dsn:
             raise ValueError("Postgres DSN missing. Set RELEASEGATE_POSTGRES_DSN or DATABASE_URL.")
+        # Validate DSN structure up-front.  A malformed DSN (most often a
+        # secret pasted without the 'postgresql://' scheme) otherwise sails
+        # through __init__ and only blows up later as an opaque psycopg2
+        # OperationalError — or, worse, gets swallowed by callers' broad
+        # except-clauses, so the workflow looks clean while writes go
+        # nowhere.  Catching it here surfaces the real problem at the point
+        # the backend is configured.
+        _validate_dsn_or_raise(self._dsn)
         if psycopg2 is None:
             raise RuntimeError("psycopg2 is required for PostgresStorageBackend")
         self._local = threading.local()
