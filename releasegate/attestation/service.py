@@ -229,6 +229,14 @@ def build_bundle_from_analysis_result(
     normalized_decision = _status_to_attestation_decision(decision)
     override_flags_raw = signals.get("override_flags") if isinstance(signals, dict) else None
     override_flags = [str(item) for item in (override_flags_raw or []) if str(item).strip()]
+    # `issued_at` is intentionally NOT in the seed.  It comes from
+    # `pr.updated_at` at the call site (cli.py:1126-1130) and bumps any
+    # time GitHub touches the PR — labels, reviews, status posts, merge.
+    # That's metadata-about-when, not metadata-about-what; including it
+    # in the seed would re-introduce the same drift PR #126 fixed for
+    # workflow_run.run_id.  The bundle still records `issued_at` via
+    # `timestamp=issued_at` below, so the DSSE attestation captures the
+    # exact moment of issuance for forensic replay.
     seed = {
         "tenant_id": tenant_id,
         "repo": repo,
@@ -242,7 +250,6 @@ def build_bundle_from_analysis_result(
         # don't drift the decision_id between re-runs of the same PR.  Full
         # signals are still attested via bundle.signals below.
         "signals": _seed_signals(signals),
-        "issued_at": issued_at,
     }
     decision_id = _deterministic_decision_id(seed)
     return DecisionBundle(
