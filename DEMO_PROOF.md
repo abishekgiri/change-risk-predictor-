@@ -23,7 +23,8 @@ Two consecutive runs of PR #125 against `main`, both invoked via `gh workflow ru
 
 | Table | Behaviour confirmed |
 |---|---|
-| `audit_decisions` | Two rows (one per signing event), both pointing at the **same** `decision_id`. The audit log is one-row-per-signing event indexed by a stable decision identity. |
+| `audit_decisions` | Multiple rows possible (one per signing event), all sharing the same `decision_id` — the verdict identity is stable across re-runs. |
+| `audit_attestations` | One **immutable row per CI run** (post-#132). `attestation_id` = `signed_payload_hash`, per-run unique. Multiple rows accumulate for the same `decision_id` — one per signing event — and existing rows are never overwritten. Re-recording the same DSSE artifact verbatim is idempotent (PRIMARY KEY collision swallowed). |
 | `cross_system_correlations` | Single row. `correlation_id` is `cor_<sha1(tenant\|repo\|pr\|sha)>`, stable across runs; the UPDATE-on-collision path tops up `rg_decision_ids`. |
 | `change_records` | Single row. `change_id` is `chg_<sha1(tenant\|decision_id)>`, stable across runs; INSERT collides on the unique constraint and is swallowed. **Row count does not grow on retry.** |
 
@@ -33,7 +34,8 @@ While `decision_id` is deterministic by design, **every CI invocation still prod
 
 | Per-run field | Where it lives | Run 5 example | Run 6 example |
 |---|---|---|---|
-| `signed_payload_hash` | `compliance_report.json` | `sha256:dbcb638368850c…` | `sha256:abe4bed8477890e1…` |
+| `attestation_id` | `compliance_report.json` + `audit_attestations` row PK | `dbcb638368850c…` | `abe4bed8477890e1…` |
+| `signed_payload_hash` | `compliance_report.json` (= `attestation_id` by construction) | `sha256:dbcb638368850c…` | `sha256:abe4bed8477890e1…` |
 | DSSE Ed25519 signature bytes | `releasegate.dsse.json` | `9N6Tvwf739bCeh76+SBA…` | `SgTdHUjt7G+RTWgp4xtr…` |
 | `bundle.timestamp` | DSSE predicate | issuance moment of Run 5 | issuance moment of Run 6 |
 | `bundle.signals.workflow_run.run_id` | DSSE predicate | `25142951730` | `25143100468` |
@@ -42,12 +44,12 @@ While `decision_id` is deterministic by design, **every CI invocation still prod
 | `bundle.signals.workflow_run.ref`, `.sha`, `.actor` | DSSE predicate | per-run env-var values | per-run env-var values |
 | `evidence.signal_hash` | DSSE predicate | `sha256:33435e…` | `sha256:c954bd…` |
 | `evidence.decision_bundle_hash` | DSSE predicate | `sha256:b413d2…` | `sha256:d0f8c2…` |
-| `audit_decisions.created_at` | Render Postgres | timestamp of Run 5 signing | timestamp of Run 6 signing |
+| `audit_attestations.created_at` | Render Postgres | timestamp of Run 5 signing | timestamp of Run 6 signing |
 | `deploy_id` (in `cross_system_correlations`, `change_records`) | Render Postgres | `gha_25142951730_a1` | `gha_25143100468_a1` |
 
-Each DSSE artifact is its own cryptographically signed record of *that specific CI run's signing event*, with the full GitHub-Actions run-of-record envelope intact for compliance replay. The per-run uniqueness lives in `signed_payload_hash` and the DSSE signature itself.
+Each DSSE artifact is its own cryptographically signed record of *that specific CI run's signing event*, with the full GitHub-Actions run-of-record envelope intact for compliance replay. Per-run uniqueness is end-to-end: `attestation_id`, `signed_payload_hash`, the DSSE signature bytes, and the bundle's run-of-record fields all differ per CI invocation; `audit_attestations` accumulates one immutable row per signing event.
 
-The `attestation_id` is the audit-log row identifier and is **stable per logical decision** (one decision = one row in `audit_attestations`, by design — `releasegate/audit/attestations.py:131-167` deduplicates by `(tenant_id, decision_id)`). It is not a per-run identifier; the per-run identifier is `signed_payload_hash`.
+> **Historical note.** The Run 5 / Run 6 values for `attestation_id` shown above are what the post-#132 architecture will produce. Pre-#132 (the merged v2.2.0 era), `record_release_attestation()` short-circuited via a `(tenant_id, decision_id)` lookup and returned the first-stored `attestation_id` on subsequent runs, so re-runs incorrectly collapsed onto a single audit-log row even though the on-disk DSSE artifacts were genuinely per-run. PR #132 dropped the legacy `uq_audit_attestations_tenant_decision` index and removed the early-return path; the PRIMARY KEY `(tenant_id, attestation_id)` now provides per-run uniqueness on its own.
 
 ## What's NOT in the seed (and why)
 
@@ -113,6 +115,18 @@ ORDER BY cr.created_at DESC;
 -- decision_id.
 ```
 
+For per-run audit envelope visibility, query `audit_attestations` directly:
+
+```sql
+SELECT attestation_id, signed_payload_hash, created_at
+FROM audit_attestations
+WHERE tenant_id = 'local' AND decision_id = 'analysis-c7ad8c773924c7bc3975be8e'
+ORDER BY created_at ASC;
+-- One row per CI invocation (post-#132).
+-- attestation_id and signed_payload_hash are equal by construction and
+-- per-run unique. decision_id stays the same across all rows.
+```
+
 ## Architecture references
 
 - **Release**: [v2.2.0 — Deterministic Governance](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.2.0)
@@ -120,6 +134,7 @@ ORDER BY cr.created_at DESC;
 - **Allowlist + contract test**: `releasegate/attestation/service.py` (`_VERDICT_BEARING_SIGNAL_KEYS`, `_seed_signals`) and `tests/attestation/test_decision_id_stability.py`
 - **PR for the allowlist architecture**: [#128](https://github.com/abishekgiri/change-risk-predictor-/pull/128)
 - **Earlier blocklist iterations** (superseded by #128): [#126](https://github.com/abishekgiri/change-risk-predictor-/pull/126), [#127](https://github.com/abishekgiri/change-risk-predictor-/pull/127)
+- **Per-run unique `attestation_id`** — drops the legacy `(tenant_id, decision_id)` UNIQUE index and the SELECT-and-return short-circuit so each CI run lands its own immutable `audit_attestations` row: [#132](https://github.com/abishekgiri/change-risk-predictor-/pull/132) and `tests/audit/test_attestation_per_run_uniqueness.py`
 - **DSN validation safety net**: [#122](https://github.com/abishekgiri/change-risk-predictor-/pull/122)
 - **Cold-start canonical schema fix**: [#123](https://github.com/abishekgiri/change-risk-predictor-/pull/123)
 - **Workflow fail-loud-on-missing-report**: [#124](https://github.com/abishekgiri/change-risk-predictor-/pull/124)
