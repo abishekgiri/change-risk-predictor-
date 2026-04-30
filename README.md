@@ -107,7 +107,7 @@ Because `change_id = sha1(tenant|decision_id)[:16]` is deterministic, **re-runs 
 
 Each CI invocation still produces its own:
 
-- **DSSE-signed attestation** with a unique `attestation_id` and `signed_payload_hash`
+- **DSSE-signed envelope** — its own `signed_payload_hash` and Ed25519 signature bytes (`releasegate.dsse.json`).  The `attestation_id` itself is the audit-log row identifier and stays stable per logical decision: `releasegate/audit/attestations.py` deduplicates by `(tenant_id, decision_id)` so the audit log is one-row-per-decision, indexed by a stable identity.  Per-run uniqueness lives in `signed_payload_hash`, the signature bytes, and the run-of-record bundle fields below.
 - **Per-run `bundle.timestamp`** capturing the exact issuance moment
 - **Run-of-record metadata** (`workflow_run.run_id`, `run_attempt`, `ref`, `sha`, `actor`, `source_ref`) preserved verbatim in `bundle.signals` and the DSSE envelope
 - **Per-run `deploy_id`** in `change_records` and `cross_system_correlations` (`gha_<RUN_ID>_a<ATTEMPT>`)
@@ -121,7 +121,8 @@ ReleaseGate stores, in addition to `decision_id`:
 - `evaluation_key`
 - `input_snapshot`
 - `policy_bundle_hash`
-- `attestation_id` (per-run unique)
+- `attestation_id` (decision-level row identifier in `audit_attestations`; stable per logical decision)
+- `signed_payload_hash` (per-run unique — the cryptographic envelope identifier)
 - `replay_hash`
 
 Together these guarantee replayability, forensic traceability, and **no nondeterministic drift**.
@@ -758,7 +759,7 @@ Includes everything from v2.1.0 plus:
 
 - **Decision-id determinism (allowlist architecture)** — `decision_id` depends only on verdict-bearing inputs (`commit_sha`, `policy_bundle_hash`, `decision`, `reason_codes`, `risk_score`, and the verdict-bearing signal keys `metrics` / `dependency_provenance` / `override_flags`). Run-of-record fields (`workflow_run.*`, `source_ref`, `issued_at`, GitHub event metadata) are excluded by construction.
 - **Storage idempotency** — re-running the same PR collapses cleanly: `change_records` does not grow, `cross_system_correlations` stays at one row per logical change. Verified end-to-end on a public PR (#125).
-- **Per-run cryptographic audit envelopes** — every CI invocation still produces a unique DSSE-signed attestation with full run-of-record metadata for forensic replay.
+- **Per-run cryptographic audit envelopes** — every CI invocation still produces its own DSSE-signed envelope with a per-run `signed_payload_hash`, Ed25519 signature, and full run-of-record metadata (`workflow_run.run_id`, etc.) preserved in the bundle for forensic replay. The `attestation_id` (audit-log row identifier) remains stable per logical decision by design.
 - **Cold-start onboarding** — `change_records` and `change_state_transitions` are now in the canonical `init_db()` schema. A fresh Postgres works out of the box (PR #123).
 - **Fail-loud DSN validation** — `PostgresStorageBackend.__init__` raises `InvalidPostgresDSNError` immediately on a malformed DSN; no more silent fallback (PR #122).
 - **Workflow visibility** — `compliance-check.yml` fails the job if `analyze-pr` doesn't produce a report; no more silent-green failure mode (PR #124).
