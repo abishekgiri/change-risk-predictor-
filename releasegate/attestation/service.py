@@ -115,45 +115,63 @@ def _deterministic_decision_id(seed: Dict[str, Any]) -> str:
     return f"analysis-{digest[:24]}"
 
 
-# Run-of-record fields that uniquely identify a CI invocation but say nothing
-# about the governance verdict.  They MUST NOT influence decision_id, otherwise
-# re-running the same PR yields a "different" decision and breaks idempotent
-# storage (change_id is derived from decision_id).  They remain in the full
-# signals payload that goes into bundle.signals → DSSE attestation, so forensic
-# replay ("which CI run signed this?") is unaffected.
-_VOLATILE_WORKFLOW_RUN_FIELDS = frozenset({"run_id", "run_attempt"})
+# ── Decision-id seed allowlist ───────────────────────────────────────────────
+#
+# Architecture (set by PR #128 after PR #126 + #127 each blocklisted one drift
+# source at a time):  the seed used by `_deterministic_decision_id` only sees
+# verdict-bearing signal keys.  Any key not listed here is treated as
+# run-of-record by default — kept in `bundle.signals` (and the DSSE
+# attestation, and forensic queries) but not hashed into `decision_id`.
+#
+# Why an allowlist, not a blocklist:
+#   - PR #126 scrubbed `workflow_run.run_id` + `run_attempt` — empirical re-run
+#     found `issued_at` was still drifting.
+#   - PR #127 dropped `issued_at` from the seed — empirical re-run found
+#     `signals.workflow_run.ref` + `signals.workflow_run.sha` + `signals.source_ref`
+#     were still drifting.
+#   - Every iteration's blocklist missed a new env-var-derived field.  An
+#     allowlist closes the class of bug: the next contributor who pulls a
+#     `GITHUB_*` env var into signals doesn't need to remember to blocklist it,
+#     because anything not explicitly classified as verdict-bearing is excluded
+#     by default.
+#
+# Adding a new verdict-bearing signal:
+#   1. Add the key here.
+#   2. Mirror it in `_KNOWN_VERDICT_BEARING_SIGNAL_KEYS` in
+#      `tests/attestation/test_decision_id_stability.py`.
+#   3. The contract test `test_seed_signals_allowlist_matches_test_classification`
+#      will fail loudly if (1) and (2) drift apart.
+#
+# Adding a new run-of-record signal:
+#   1. Don't add it here.
+#   2. Add it to `_KNOWN_RUN_OF_RECORD_SIGNAL_KEYS` in the test, alongside any
+#      other env-var-derived fields, so the contract test
+#      `test_realistic_signals_payload_keys_are_classified` keeps the cli.py
+#      surface area enumerated.
+_VERDICT_BEARING_SIGNAL_KEYS: frozenset = frozenset({
+    "metrics",
+    "dependency_provenance",
+    "override_flags",
+})
 
 
 def _seed_signals(signals: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return a copy of `signals` with run-of-record fields scrubbed.
+    """Return only the verdict-bearing subset of `signals` for seed hashing.
 
-    Used only for the seed that hashes into `decision_id`.  Keeps the
-    full `signals` (including `workflow_run.run_id` / `run_attempt`)
-    available for the bundle / attestation / forensic queries.
+    This is an *allowlist*: a key flows into the seed only if it is
+    explicitly in `_VERDICT_BEARING_SIGNAL_KEYS`.  Anything else — including
+    future fields a contributor adds without thinking about determinism —
+    is treated as run-of-record and excluded by default.  The full
+    `signals` (with `workflow_run`, `source_ref`, etc.) still flows into
+    `bundle.signals` → DSSE attestation, so forensic replay queries
+    ("which CI run signed this?") are unaffected.
 
-    Preserves dict ordering and leaves non-workflow_run signals
-    untouched so existing callers (which already canonicalize) get
-    stable output.  Drops `workflow_run` entirely if it would become
-    empty after scrubbing — keeping an empty dict would still hash
-    differently from "no workflow_run at all" (e.g. local dev runs),
-    which would re-introduce environmental drift into the verdict.
+    Returns an empty dict for None or non-dict inputs so callers don't
+    have to defend against None separately.
     """
     if not isinstance(signals, dict):
         return {}
-    out = dict(signals)
-    workflow_run = out.get("workflow_run")
-    if isinstance(workflow_run, dict):
-        scrubbed = {
-            k: v for k, v in workflow_run.items()
-            if k not in _VOLATILE_WORKFLOW_RUN_FIELDS
-        }
-        if scrubbed:
-            out["workflow_run"] = scrubbed
-        else:
-            # Avoid leaving an empty dict that would still hash differently
-            # from missing-key for local-dev (no workflow_run) runs.
-            out.pop("workflow_run", None)
-    return out
+    return {k: signals[k] for k in _VERDICT_BEARING_SIGNAL_KEYS if k in signals}
 
 
 def build_bundle_from_decision(
