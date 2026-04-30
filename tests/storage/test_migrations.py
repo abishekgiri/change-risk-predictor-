@@ -60,6 +60,7 @@ def test_forward_only_migrations_applied_and_tenant_columns_present():
         assert "20260317_041_saas_tenant_admin_and_roles" in migration_ids
         assert "20260318_042_phase28_governance_moat" in migration_ids
         assert "20260429_043_change_records_canonical" in migration_ids
+        assert "20260430_044_attestation_id_per_run_unique" in migration_ids
 
         cur.execute("PRAGMA table_info(audit_decisions)")
         decision_info = cur.fetchall()
