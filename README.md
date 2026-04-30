@@ -6,7 +6,7 @@ ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g.,
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-v2.2.0-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.2.0)
-[![Tests](https://img.shields.io/badge/tests-563%20passing-success.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-608%20passing-success.svg)](#development)
 
 ---
 
