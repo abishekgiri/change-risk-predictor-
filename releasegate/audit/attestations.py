@@ -16,6 +16,14 @@ def _ensure_audit_attestations_table() -> None:
     """
     Backward-compatible bootstrap for branches/environments where migration
     20260213_011 has not been applied yet.
+
+    Per migration 20260430_044, the (tenant_id, decision_id) UNIQUE index
+    is intentionally NOT created here — `attestation_id` (= signed_payload_hash)
+    is per-run unique by definition, and the legacy index forced one row
+    per (tenant, decision_id) which collapsed re-runs of the same
+    deterministic decision_id (#128) onto a single audit row.  The
+    PRIMARY KEY (tenant_id, attestation_id) provides per-run uniqueness
+    on its own.
     """
     storage = get_storage_backend()
     storage.execute(
@@ -36,11 +44,10 @@ def _ensure_audit_attestations_table() -> None:
         )
         """
     )
+    # Defensive drop in case an older version of this bootstrap created the
+    # legacy index before migration 044 ran.  Idempotent.
     storage.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
-        ON audit_attestations(tenant_id, decision_id)
-        """
+        "DROP INDEX IF EXISTS uq_audit_attestations_tenant_decision"
     )
     _ensure_attestation_append_only(storage)
 
@@ -141,36 +148,28 @@ def record_release_attestation(
     pr_number: Optional[int],
     attestation: Dict[str, Any],
 ) -> str:
+    """Record a signed release attestation.
+
+    Per-run uniqueness contract (post-#128 / migration 044):
+      `attestation_id = signed_payload_hash`, which is per-run unique by
+      definition (each CI invocation produces its own DSSE signature over a
+      payload that includes run-of-record fields like workflow_run.run_id).
+      `decision_id` is deterministic across re-runs of the same PR (#128),
+      so the same `decision_id` may legitimately appear in many rows of
+      `audit_attestations` — one per signing event.
+
+    Idempotency contract (unchanged):
+      Calling this function twice with the *same* signed attestation
+      (same `signed_payload_hash`) is a no-op for the second call: the
+      INSERT collides on PRIMARY KEY (tenant_id, attestation_id) and is
+      swallowed by `ON CONFLICT DO NOTHING`.  The transparency log entry
+      is also idempotent (its own UNIQUE index on (tenant_id,
+      attestation_id) at `audit_transparency_log`).
+    """
     init_db()
     _ensure_audit_attestations_table()
     storage = get_storage_backend()
     effective_tenant = resolve_tenant_id(tenant_id)
-
-    existing = storage.fetchone(
-        """
-        SELECT attestation_id
-        FROM audit_attestations
-        WHERE tenant_id = ? AND decision_id = ?
-        LIMIT 1
-        """,
-        (effective_tenant, decision_id),
-    )
-    if existing and existing.get("attestation_id"):
-        existing_id = str(existing["attestation_id"])
-        signature = attestation.get("signature") or {}
-        signed_payload_hash = str(signature.get("signed_payload_hash") or "")
-        normalized_hash = _normalize_signed_payload_hash(signed_payload_hash)
-        payload_hash = f"sha256:{normalized_hash}"
-        if is_anchoring_enabled():
-            record_transparency_for_attestation(
-                tenant_id=effective_tenant,
-                attestation_id=existing_id,
-                fallback_repo=repo,
-                fallback_pr_number=pr_number,
-                payload_hash=payload_hash,
-                attestation=attestation,
-            )
-        return existing_id
 
     signature = attestation.get("signature") or {}
     signed_payload_hash = str(signature.get("signed_payload_hash") or "")

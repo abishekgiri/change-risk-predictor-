@@ -2957,6 +2957,32 @@ def _migration_20260429_043_change_records_canonical(cursor) -> None:
     )
 
 
+def _migration_20260430_044_attestation_id_per_run_unique(cursor) -> None:
+    """Drop the (tenant_id, decision_id) UNIQUE index on audit_attestations.
+
+    Background: `attestation_id` is defined as `signed_payload_hash`
+    (one Ed25519 signature per CI invocation, so unique per run).  But
+    the legacy `uq_audit_attestations_tenant_decision` index forced one
+    row per (tenant, decision_id) — combined with the lookup-and-return
+    branch in `record_release_attestation`, this collapsed every re-run
+    of the same PR onto the first-stored `attestation_id`.
+
+    Post-PR #128 `decision_id` is deterministic across re-runs, so
+    correctly-implemented per-run `attestation_id` requires:
+      - removing the (tenant, decision_id) UNIQUE constraint
+      - the existing PRIMARY KEY (tenant_id, attestation_id) provides
+        per-run uniqueness on its own, since `attestation_id =
+        signed_payload_hash` and signed payloads differ per run
+
+    Existing rows are preserved verbatim — no data migration.  Going
+    forward, `audit_attestations` accumulates one row per signing
+    event, all sharing the same `decision_id` per logical decision.
+    """
+    cursor.execute(
+        "DROP INDEX IF EXISTS uq_audit_attestations_tenant_decision"
+    )
+
+
 MIGRATIONS: List[Migration] = [
     Migration(
         migration_id="20260212_001_tenant_audit_decisions",
@@ -3176,6 +3202,15 @@ MIGRATIONS: List[Migration] = [
             "(closes the silent /proof traceability gap on new tenants)."
         ),
         apply=_migration_20260429_043_change_records_canonical,
+    ),
+    Migration(
+        migration_id="20260430_044_attestation_id_per_run_unique",
+        description=(
+            "Drop the (tenant, decision_id) UNIQUE index on audit_attestations "
+            "so attestation_id (= signed_payload_hash) can be per-run unique "
+            "across re-runs of the same deterministic decision_id."
+        ),
+        apply=_migration_20260430_044_attestation_id_per_run_unique,
     ),
 ]
 

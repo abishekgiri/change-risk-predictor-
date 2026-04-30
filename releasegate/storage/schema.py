@@ -459,11 +459,14 @@ def _init_postgres_schema() -> str:
         )
         """
     )
+    # NOTE: The historical (tenant_id, decision_id) UNIQUE INDEX was dropped
+    # in migration 20260430_044 to allow per-run unique `attestation_id`s
+    # (one row per signing event) while keeping `decision_id` deterministic
+    # across re-runs.  Defensive DROP for fresh clusters that may have an
+    # older bootstrap path, and for environments that ran an older copy of
+    # `_ensure_audit_attestations_table`.  Cheap; idempotent.
     cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_audit_attestations_tenant_decision
-        ON audit_attestations(tenant_id, decision_id)
-        """
+        "DROP INDEX IF EXISTS uq_audit_attestations_tenant_decision"
     )
     # Existing Postgres deployments may have an older attestation table shape.
     # Ensure compromise columns exist before creating indexes that reference them.
