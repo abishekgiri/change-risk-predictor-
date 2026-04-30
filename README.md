@@ -5,7 +5,7 @@
 ReleaseGate enforces risk-aware policies at Jira workflow transition time (e.g., `Ready for Release` → `Done`), blocks non-compliant releases, and produces cryptographically verifiable audit artifacts suitable for compliance programs (SOC2-style controls, change governance, separation of duties).
 
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v2.1.0-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.1.0)
+[![Version](https://img.shields.io/badge/version-v2.2.0-green.svg)](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.2.0)
 [![Tests](https://img.shields.io/badge/tests-563%20passing-success.svg)](#development)
 
 ---
@@ -78,14 +78,53 @@ This function:
 
 #### Deterministic and idempotent
 
-Same input yields the same decision. ReleaseGate stores:
+**Same PR + same commit + same policy + same engine version → same `decision_id`. Every time. Across re-runs, across event types, across the merge boundary.** This is the deterministic-governance milestone shipped in v2.2.0 (PR #128).
 
-- `decision_id`
+The `decision_id` is a `sha256` over **only verdict-bearing inputs**:
+
+| Field | What it is |
+|---|---|
+| `tenant_id`, `repo`, `pr_number`, `commit_sha` | Identity of the change being decided about |
+| `policy_bundle_hash` | The exact policy material that evaluated this change |
+| `decision`, `reason_codes`, `risk_score` | The verdict itself |
+| `signals.metrics`, `signals.dependency_provenance`, `signals.override_flags` | The evidence the verdict is based on |
+
+Anything else — `workflow_run.run_id`, `workflow_run.run_attempt`, `workflow_run.ref`, `workflow_run.sha`, `source_ref`, `issued_at`, GitHub event metadata — is **run-of-record**. It does **not** influence `decision_id`. It still rides in `bundle.signals` → DSSE attestation, so forensic queries ("which CI run signed this verdict?") work, but it cannot drift the verdict hash.
+
+This is enforced by an **allowlist** in `releasegate/attestation/service.py` (`_VERDICT_BEARING_SIGNAL_KEYS`) plus a **contract test** that fails CI if a contributor adds a new `signals_payload` key without explicitly classifying it as either verdict-bearing or run-of-record. The next env-var leak is impossible by construction, not by vigilance.
+
+#### Storage idempotency follows from determinism
+
+Because `change_id = sha1(tenant|decision_id)[:16]` is deterministic, **re-runs do not grow the `change_records` row count**. The same logical change collapses on the unique-constraint handler.
+
+| Table | Behaviour on re-run of the same PR |
+|---|---|
+| `audit_decisions` | Multiple rows possible (one per signed envelope), all sharing the same `decision_id` |
+| `cross_system_correlations` | Single row (`correlation_id` deterministic; UPDATE path tops up `rg_decision_ids`) |
+| `change_records` | Single row (`change_id` deterministic; INSERT collides, swallowed by unique constraint) |
+
+#### Per-run cryptographic audit trail (forensics preserved)
+
+Each CI invocation still produces its own:
+
+- **DSSE-signed attestation** with a unique `attestation_id` and `signed_payload_hash`
+- **Per-run `bundle.timestamp`** capturing the exact issuance moment
+- **Run-of-record metadata** (`workflow_run.run_id`, `run_attempt`, `ref`, `sha`, `actor`, `source_ref`) preserved verbatim in `bundle.signals` and the DSSE envelope
+- **Per-run `deploy_id`** in `change_records` and `cross_system_correlations` (`gha_<RUN_ID>_a<ATTEMPT>`)
+
+> **Tagline:** *Deterministic governance with per-run cryptographic audit trails.*
+
+In other words: the **verdict** is reproducible; every **execution** still gets its own signed envelope. That's exactly what compliance auditors need — a stable judgement plus a per-run forensic chain.
+
+ReleaseGate stores, in addition to `decision_id`:
+
 - `evaluation_key`
 - `input_snapshot`
 - `policy_bundle_hash`
+- `attestation_id` (per-run unique)
+- `replay_hash`
 
-This guarantees replayability, forensic traceability, and no nondeterministic drift.
+Together these guarantee replayability, forensic traceability, and **no nondeterministic drift**.
 
 #### Risk-aware enforcement
 
@@ -713,17 +752,24 @@ terraform init && terraform apply
 
 ## Versioning
 
-**Current release:** `v2.1.0`
+**Current release:** [`v2.2.0`](https://github.com/abishekgiri/change-risk-predictor-/releases/tag/v2.2.0) — *Deterministic Governance*
 
-Includes:
-- Policy control plane (registry, inheritance, lint, simulation, CI gate)
-- Trust & audit fabric (trust score, signed checkpoints, RFC 3161 anchoring, evidence graph, proof-of-history export)
-- Governance operations dashboard
+Includes everything from v2.1.0 plus:
+
+- **Decision-id determinism (allowlist architecture)** — `decision_id` depends only on verdict-bearing inputs (`commit_sha`, `policy_bundle_hash`, `decision`, `reason_codes`, `risk_score`, and the verdict-bearing signal keys `metrics` / `dependency_provenance` / `override_flags`). Run-of-record fields (`workflow_run.*`, `source_ref`, `issued_at`, GitHub event metadata) are excluded by construction.
+- **Storage idempotency** — re-running the same PR collapses cleanly: `change_records` does not grow, `cross_system_correlations` stays at one row per logical change. Verified end-to-end on a public PR (#125).
+- **Per-run cryptographic audit envelopes** — every CI invocation still produces a unique DSSE-signed attestation with full run-of-record metadata for forensic replay.
+- **Cold-start onboarding** — `change_records` and `change_state_transitions` are now in the canonical `init_db()` schema. A fresh Postgres works out of the box (PR #123).
+- **Fail-loud DSN validation** — `PostgresStorageBackend.__init__` raises `InvalidPostgresDSNError` immediately on a malformed DSN; no more silent fallback (PR #122).
+- **Workflow visibility** — `compliance-check.yml` fails the job if `analyze-pr` doesn't produce a report; no more silent-green failure mode (PR #124).
 
 **Previous milestones:**
 
+- `v2.1.0` — Policy control plane (registry, inheritance, lint, simulation, CI gate); trust & audit fabric (trust score, signed checkpoints, RFC 3161 anchoring, evidence graph, proof-of-history export); governance operations dashboard
 - `v2.0.0-policy-control-plane` — Declarative policy engine, staged rollout, SoD enforcement
 - `v1.0.0-governance-core` — Transition enforcement, immutable ledger, proof packs
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 
 ---
 
