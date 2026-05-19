@@ -61,18 +61,6 @@ const COMPONENT_LABELS: Record<string, { label: string; description: string }> =
   },
 };
 
-function scoreColor(score: number): string {
-  if (score >= 80) return "text-emerald-600";
-  if (score >= 50) return "text-amber-600";
-  return "text-rose-600";
-}
-
-function scoreBg(score: number): string {
-  if (score >= 80) return "bg-emerald-500";
-  if (score >= 50) return "bg-amber-500";
-  return "bg-rose-500";
-}
-
 function formatDate(iso: string | null): string {
   if (!iso) return "Never";
   return new Date(iso).toLocaleDateString("en-US", {
@@ -152,44 +140,60 @@ export default async function AuditTrustPage({
         </div>
       </div>
 
-      {/* Trust Score */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex items-center gap-6">
-          <div className="relative h-28 w-28">
-            <svg viewBox="0 0 120 120" className="h-28 w-28 -rotate-90">
-              <circle
-                cx="60" cy="60" r="52"
-                fill="none" stroke="#e2e8f0" strokeWidth="10"
-              />
-              <circle
-                cx="60" cy="60" r="52"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="10"
-                strokeLinecap="round"
-                strokeDasharray={`${(trust.trust_score / 100) * 327} 327`}
-                className={scoreColor(trust.trust_score)}
-              />
-            </svg>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className={`text-2xl font-bold ${scoreColor(trust.trust_score)}`}>
-                {trust.trust_score}
+      {/* Ledger Integrity — binary VERIFIED / FAILED.
+       *
+       * Replaced the previous 0–100 "Trust Score" composite.  Composite
+       * scores invite "what does 73 mean?" questions from auditors and
+       * imply false precision.  Binary integrity (hash chain holds OR it
+       * doesn't) is what an auditor actually wants to see.  The
+       * underlying component checks are still surfaced below for the
+       * operator who needs to know *which* check failed; they no longer
+       * roll up into a number. */}
+      <div
+        className={`rounded-xl border p-6 shadow-sm ${
+          trust.ledger.valid
+            ? "border-emerald-200 bg-emerald-50"
+            : "border-rose-200 bg-rose-50"
+        }`}
+      >
+        <div className="flex items-center gap-4">
+          <span
+            className={`text-3xl ${
+              trust.ledger.valid ? "text-emerald-600" : "text-rose-600"
+            }`}
+            aria-hidden
+          >
+            {trust.ledger.valid ? "✓" : "✕"}
+          </span>
+          <div className="space-y-1">
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-bold text-slate-900">Ledger integrity</h2>
+              <span
+                className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                  trust.ledger.valid
+                    ? "bg-emerald-600 text-white"
+                    : "bg-rose-600 text-white"
+                }`}
+              >
+                {trust.ledger.valid ? "VERIFIED" : "FAILED"}
               </span>
             </div>
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-slate-900">Trust Score</h2>
-            <p className="text-sm text-slate-500">
-              {trust.trust_score >= 80
-                ? "Strong — system integrity is provable"
-                : trust.trust_score >= 50
-                  ? "Moderate — some trust components need attention"
-                  : "Weak — critical trust gaps detected"}
+            <p className="text-sm text-slate-600">
+              {trust.ledger.valid
+                ? `All ${trust.ledger.checked} hash-chain links verified. No tampering detected.`
+                : `${trust.ledger.broken_chains} broken chain(s) detected across ${trust.ledger.checked} link(s). Investigate immediately.`}
             </p>
+            <Link
+              href={scopedHref("/audit/trust-status")}
+              className="inline-block text-xs font-semibold text-slate-700 underline-offset-2 hover:underline"
+            >
+              Open trust-status detail →
+            </Link>
           </div>
         </div>
 
-        {/* Component breakdown */}
+        {/* Component breakdown — kept for operator-level diagnosis,
+            no longer aggregated into a composite score. */}
         <div className="mt-5 grid gap-2">
           {components.map(([key, comp]) => {
             const meta = COMPONENT_LABELS[key] ?? { label: key, description: "" };
@@ -198,8 +202,8 @@ export default async function AuditTrustPage({
                 key={key}
                 className={`flex items-center justify-between rounded-lg border px-4 py-2.5 ${
                   comp.passes
-                    ? "border-emerald-200 bg-emerald-50"
-                    : "border-rose-200 bg-rose-50"
+                    ? "border-emerald-200 bg-white"
+                    : "border-rose-200 bg-white"
                 }`}
               >
                 <div className="flex items-center gap-3">
@@ -211,7 +215,6 @@ export default async function AuditTrustPage({
                     <p className="text-xs text-slate-500">{meta.description}</p>
                   </div>
                 </div>
-                <span className="text-xs font-semibold text-slate-500">{comp.weight} pts</span>
               </div>
             );
           })}

@@ -10951,34 +10951,8 @@ def commercial_update_pilot(
     return JSONResponse(content=pilot)
 
 
-# ---------------------------------------------------------------------------
-# GET /commercial/icp-score
-# ---------------------------------------------------------------------------
-
-@app.get("/commercial/icp-score")
-def commercial_icp_score(
-    tenant_id: Optional[str] = None,
-    team_size: Optional[int] = None,
-    deploys_per_week: Optional[float] = None,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator"],
-        scopes=["policy:read"],
-        rate_profile="read_heavy",
-        allow_internal_service=True,
-    ),
-):
-    """Score a tenant against the Ideal Customer Profile.
-
-    Returns a 0–100 score, STRONG/MEDIUM/WEAK band, per-signal breakdown,
-    and a sales recommendation.
-    """
-    from releasegate.commercial.icp_score import score_tenant
-
-    effective_tenant = _effective_tenant(auth, tenant_id)
-    return JSONResponse(
-        content=score_tenant(
-            tenant_id=effective_tenant,
-            team_size=team_size,
-            deploys_per_week=deploys_per_week,
-        )
-    )
+# GET /commercial/icp-score — REMOVED (Phase 0 kill list).
+# ICP scoring was our internal sales tool, not the customer's product;
+# surfacing it in the dashboard implied a metric the buyer should optimize
+# for, which is the opposite of how the ICP is supposed to be used.
+# Score the prospect yourself in your CRM.  See plans/plan.md.
