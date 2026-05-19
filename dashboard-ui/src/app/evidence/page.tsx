@@ -32,7 +32,7 @@ export default async function EvidencePage({ searchParams }: EvidencePageProps) 
     {
       title: "Evidence pack",
       description:
-        "One-click PDF + JSON bundle for a given window, mapped to named control numbers (SOC 2 CC8.1 / CC7.2 / CC6.1, ISO 27001 A.14.2.2 / A.14.2.3, NIST SSDF PO.3.2 / PW.7.1). Download and hand to an auditor.",
+        "One-click PDF + JSON bundle for a given window, mapped to SOC 2 CC8.1. Download and hand to an auditor.",
       cta: "Export evidence pack",
       href: `/audit/export${qs}`,
     },
