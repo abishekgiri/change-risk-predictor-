@@ -11,29 +11,18 @@ import {
   type DashboardRangePreset,
 } from "@/lib/dashboard-scope";
 
+// Top-level navigation is intentionally limited to five items.
+// Sub-flows live as tabs/buttons inside their parent page (e.g. policy
+// simulate + ci-gate are reachable from /policies; audit-export and
+// the evidence graph are reachable from /evidence; tenant/billing/
+// onboarding live under /settings).  Hidden routes are still
+// reachable by direct URL — they are just not nav-promoted.
 const links = [
-  { href: "/onboarding", label: "Onboarding" },
-  { href: "/tenant", label: "Tenant" },
-  { href: "/billing", label: "Billing" },
-  { href: "/overview", label: "Executive Overview" },
-  { href: "/observability", label: "Observability" },
-  { href: "/customer-success", label: "Executive Impact" },
-  { href: "/integrity", label: "Control Health" },
-  { href: "/overrides", label: "Exceptions" },
-  { href: "/policies", label: "Policies" },
-  { href: "/policies/diff", label: "Policy Changes" },
-  { href: "/policies/simulate", label: "Simulate" },
-  { href: "/policies/ci-gate", label: "CI Gate" },
-  { href: "/audit", label: "Trust & Audit" },
-  { href: "/audit/export", label: "Audit Export" },
-  { href: "/audit/authority", label: "Authority Report" },
+  { href: "/overview", label: "Overview" },
   { href: "/decisions", label: "Decisions" },
-  { href: "/ops", label: "Ops Health" },
-  { href: "/ops/tenant", label: "Tenant Safety" },
-  { href: "/fabric", label: "Fabric" },
-  { href: "/roi", label: "ROI Calculator" },
-  { href: "/proof", label: "Proof of Value" },
-  { href: "/pilots", label: "Pilots" },
+  { href: "/policies", label: "Policies" },
+  { href: "/evidence", label: "Evidence" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function AppNav() {
