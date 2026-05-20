@@ -34,7 +34,7 @@ A longer walkthrough lives in [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Customer-installable GitHub Action
 
-Coming soon: a published GitHub Marketplace Action that drops into any repository's workflow and signs that customer's deploys against their own tenant key — the path from "demo over Zoom" to "live in production."
+The [ReleaseGate Action](https://github.com/abishekgiri/releasegate-action) drops into any GitHub repository's workflow and signs that repository's deploys against your ReleaseGate tenant key. No infrastructure to operate. Tenant provisioning during the design-partner phase is by email — see [pricing](https://releasegate.io/pricing).
 
 ## Dashboard
 
