@@ -38,7 +38,9 @@ Coming soon: a published GitHub Marketplace Action that drops into any repositor
 
 ## Dashboard
 
-![dashboard](docs/img/dashboard.png)
+<!-- TODO: capture dashboard screenshot and link as
+     docs/img/dashboard.png.  See PR #134 review. -->
+<!-- ![dashboard](docs/img/dashboard.png) -->
 
 ## License & support
 
