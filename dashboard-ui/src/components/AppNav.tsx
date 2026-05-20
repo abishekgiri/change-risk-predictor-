@@ -28,7 +28,7 @@ const links = [
 // Public, unauthenticated routes must not show the tenant/date-range
 // chrome — they're linked from cold emails and demo decks, not from
 // inside the product.  Each public page renders its own minimal header.
-const PUBLIC_ROUTES = ["/trust"];
+const PUBLIC_ROUTES = ["/trust", "/pricing"];
 
 export function AppNav() {
   const pathname = usePathname();
