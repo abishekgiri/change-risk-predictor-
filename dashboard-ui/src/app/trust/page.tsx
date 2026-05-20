@@ -185,7 +185,11 @@ export default function TrustPage() {
 
         <hr className="my-10 border-slate-200" />
 
-        <p className="text-sm text-slate-500">Last updated: 2026-05-19.</p>
+        <p className="text-sm text-slate-500">
+          See <Link href="/pricing" className="text-slate-700 underline">our pricing</Link> for tiers and how to start a pilot.
+        </p>
+
+        <p className="mt-4 text-sm text-slate-500">Last updated: 2026-05-19.</p>
       </article>
     </div>
   );
