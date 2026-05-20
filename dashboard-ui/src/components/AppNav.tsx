@@ -25,6 +25,11 @@ const links = [
   { href: "/settings", label: "Settings" },
 ];
 
+// Public, unauthenticated routes must not show the tenant/date-range
+// chrome — they're linked from cold emails and demo decks, not from
+// inside the product.  Each public page renders its own minimal header.
+const PUBLIC_ROUTES = ["/trust"];
+
 export function AppNav() {
   const pathname = usePathname();
   const router = useRouter();
@@ -79,6 +84,13 @@ export function AppNav() {
       router.replace(target);
     });
   };
+
+  // Suppress the authenticated chrome on public, unauthenticated pages
+  // (e.g. /trust).  All hooks above are still called on every render —
+  // we only short-circuit the JSX so the Rules of Hooks are preserved.
+  if (pathname && PUBLIC_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`))) {
+    return null;
+  }
 
   return (
     <nav className="border-b border-slate-200 bg-white">
