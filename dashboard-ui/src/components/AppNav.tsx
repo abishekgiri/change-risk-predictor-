@@ -83,7 +83,7 @@ export function AppNav() {
   return (
     <nav className="border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-6 py-3">
-        <p className="mr-4 text-sm font-semibold text-slate-900">Governance Dashboard</p>
+        <p className="mr-4 text-sm font-semibold text-slate-900">ReleaseGate</p>
         {links.map((link) => {
           const isActive = pathname === link.href;
           return (
