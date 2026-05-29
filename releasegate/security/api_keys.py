@@ -80,7 +80,7 @@ def create_api_key(
         INSERT INTO api_keys (
             tenant_id, key_id, name, key_prefix, key_hash, key_algorithm, key_iterations, key_salt,
             roles_json, scopes_json, created_by, created_at, is_enabled
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE)
         """,
         (
             effective_tenant,
@@ -155,7 +155,7 @@ def _load_key_candidate(raw_key: str) -> Optional[Dict[str, Any]]:
         """
         SELECT *
         FROM api_keys
-        WHERE key_id = ? AND revoked_at IS NULL AND is_enabled = 1
+        WHERE key_id = ? AND revoked_at IS NULL AND is_enabled = TRUE
         LIMIT 1
         """,
         (key_id,),
@@ -234,7 +234,7 @@ def revoke_api_key(*, tenant_id: str, key_id: str) -> bool:
     changed = storage.execute(
         """
         UPDATE api_keys
-        SET revoked_at = COALESCE(revoked_at, ?), is_enabled = 0
+        SET revoked_at = COALESCE(revoked_at, ?), is_enabled = FALSE
         WHERE tenant_id = ? AND key_id = ? AND revoked_at IS NULL
         """,
         (
