@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from releasegate.audit.transparency import record_transparency_for_attestation
 from releasegate.config import is_anchoring_enabled
-from releasegate.storage import get_storage_backend
+from releasegate.storage import get_storage_backend, is_storage_unavailable_error
 from releasegate.storage.base import resolve_tenant_id
 from releasegate.storage.schema import init_db
 
@@ -166,53 +166,67 @@ def record_release_attestation(
       is also idempotent (its own UNIQUE index on (tenant_id,
       attestation_id) at `audit_transparency_log`).
     """
-    init_db()
-    _ensure_audit_attestations_table()
-    storage = get_storage_backend()
-    effective_tenant = resolve_tenant_id(tenant_id)
-
+    # Derive the attestation_id first.  This is a pure function of the
+    # signed payload (attestation_id == normalized signed_payload_hash) and
+    # needs no database.  The customer-side signing path — a CI runner with
+    # no DB configured — must get a valid id even when persistence is
+    # impossible, so the DSSE envelope and the report can reference it.
     signature = attestation.get("signature") or {}
     signed_payload_hash = str(signature.get("signed_payload_hash") or "")
     normalized_hash = _normalize_signed_payload_hash(signed_payload_hash)
     payload_hash = f"sha256:{normalized_hash}"
-    algorithm = str(signature.get("algorithm") or "ed25519")
-    key_id = str((attestation.get("issuer") or {}).get("key_id") or "")
-    schema_version = str(attestation.get("schema_version") or "1.0.0")
-    created_at = datetime.now(timezone.utc).isoformat()
     attestation_id = _attestation_id(signed_payload_hash=signed_payload_hash)
 
-    storage.execute(
-        """
-        INSERT INTO audit_attestations (
-            tenant_id, attestation_id, decision_id, repo, pr_number,
-            schema_version, key_id, algorithm, signed_payload_hash,
-            attestation_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(tenant_id, attestation_id) DO NOTHING
-        """,
-        (
-            effective_tenant,
-            attestation_id,
-            decision_id,
-            repo,
-            pr_number,
-            schema_version,
-            key_id,
-            algorithm,
-            payload_hash,
-            json.dumps(attestation, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
-            created_at,
-        ),
-    )
-    if is_anchoring_enabled():
-        record_transparency_for_attestation(
-            tenant_id=effective_tenant,
-            attestation_id=attestation_id,
-            fallback_repo=repo,
-            fallback_pr_number=pr_number,
-            payload_hash=payload_hash,
-            attestation=attestation,
+    # Persistence is optional.  When no DB backend is reachable (the
+    # stateless customer path) we skip it silently and return the derived
+    # id.  Genuine storage errors are NOT swallowed — they re-raise.  The
+    # dashboard ingest path always has a backend, so it always persists.
+    try:
+        init_db()
+        _ensure_audit_attestations_table()
+        storage = get_storage_backend()
+        effective_tenant = resolve_tenant_id(tenant_id)
+        algorithm = str(signature.get("algorithm") or "ed25519")
+        key_id = str((attestation.get("issuer") or {}).get("key_id") or "")
+        schema_version = str(attestation.get("schema_version") or "1.0.0")
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        storage.execute(
+            """
+            INSERT INTO audit_attestations (
+                tenant_id, attestation_id, decision_id, repo, pr_number,
+                schema_version, key_id, algorithm, signed_payload_hash,
+                attestation_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, attestation_id) DO NOTHING
+            """,
+            (
+                effective_tenant,
+                attestation_id,
+                decision_id,
+                repo,
+                pr_number,
+                schema_version,
+                key_id,
+                algorithm,
+                payload_hash,
+                json.dumps(attestation, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+                created_at,
+            ),
         )
+        if is_anchoring_enabled():
+            record_transparency_for_attestation(
+                tenant_id=effective_tenant,
+                attestation_id=attestation_id,
+                fallback_repo=repo,
+                fallback_pr_number=pr_number,
+                payload_hash=payload_hash,
+                attestation=attestation,
+            )
+    except Exception as exc:
+        if is_storage_unavailable_error(exc):
+            return attestation_id
+        raise
     return attestation_id
 
 

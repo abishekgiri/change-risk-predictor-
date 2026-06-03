@@ -42,6 +42,7 @@ include-package-data = true
     "**/*.md",
     "**/*.dsl",
     "**/schema/*",
+    "**/schemas/*",
     "**/templates/*",
     "**/standards/**/*",
     "**/compiled/**/*",

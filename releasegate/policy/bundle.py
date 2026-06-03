@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.resources as resources
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -14,9 +15,10 @@ SCHEMA_VERSION = "policy_bundle_v1"
 
 @lru_cache(maxsize=1)
 def _load_bundle_schema() -> Dict[str, Any]:
-    repo_root = Path(__file__).resolve().parents[2]
-    schema_path = repo_root / "schemas" / "policy_bundle.schema.json"
-    return json.loads(schema_path.read_text(encoding="utf-8"))
+    # Packaged data dir (releasegate/schemas/) via importlib.resources so
+    # this resolves from an installed wheel, not just a dev checkout.
+    ref = resources.files("releasegate.schemas").joinpath("policy_bundle.schema.json")
+    return json.loads(ref.read_text(encoding="utf-8"))
 
 
 def build_policy_bundle(

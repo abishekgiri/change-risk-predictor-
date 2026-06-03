@@ -1,5 +1,5 @@
+import importlib.resources as resources
 import json
-import os
 from typing import Dict, Any, List
 from releasegate.ai.provider import get_provider
 
@@ -10,11 +10,10 @@ class AIFixSuggester:
     """
     def __init__(self):
         self.provider = get_provider()
-        self.schema_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "schemas", "fix_suggestions_v1.json")
-        )
-        with open(self.schema_path) as f:
-            self.schema = json.load(f)
+        # Packaged data dir (releasegate/schemas/) via importlib.resources
+        # so this resolves from an installed wheel, not just a dev checkout.
+        _ref = resources.files("releasegate.schemas").joinpath("fix_suggestions_v1.json")
+        self.schema = json.loads(_ref.read_text(encoding="utf-8"))
 
         self.unsafe_terms = ["disable security", "skip tests", "bypass", "turn off", "ignore"]
 

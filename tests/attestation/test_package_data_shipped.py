@@ -34,6 +34,14 @@ import pytest
 # AND this test.
 REQUIRED_PACKAGE_RESOURCES = [
     ("releasegate.attestation", "schema/release-attestation.v1.json"),
+    # Relocated from a top-level schemas/ dir into the package
+    # (fix/stateless-dsse-generation) so they ship in the wheel and load
+    # via importlib.resources.  All four were repo-root-relative loads
+    # that broke on `pip install`.
+    ("releasegate.schemas", "compliance_report.schema.json"),
+    ("releasegate.schemas", "policy_bundle.schema.json"),
+    ("releasegate.schemas", "fix_suggestions_v1.json"),
+    ("releasegate.schemas", "ai_explanation_v1.json"),
 ]
 
 
