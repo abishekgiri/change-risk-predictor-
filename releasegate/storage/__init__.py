@@ -31,12 +31,23 @@ def get_artifact_store():
 # (constraint violations, bad SQL, etc.) do NOT match and are re-raised.
 _STORAGE_UNAVAILABLE_SIGNALS = (
     "unable to open database file",       # sqlite: no writable data/ dir
+    "could not open database",            # generic open failure
+    "read-only file system",              # sqlite: workspace not writable
+    "no such table",                       # backend reachable but never
+                                           #   migrated — i.e. no durable
+                                           #   backend in this environment.
+                                           #   The server always runs
+                                           #   init_db()+migrations at boot,
+                                           #   so this only occurs on the
+                                           #   stateless customer path (where
+                                           #   SQLiteBackend.connect() mkdirs
+                                           #   data/ and opens an empty DB
+                                           #   after init_db already failed).
     "could not connect",                  # postgres: server unreachable
     "connection refused",                 # postgres: server unreachable
     "could not translate host name",      # postgres: bad/absent host
     "name or service not known",          # postgres: DNS failure
     "no such host",                        # postgres: DNS failure
-    "could not open database",            # generic open failure
 )
 
 
