@@ -34,7 +34,7 @@ A longer walkthrough lives in [`docs/quickstart.md`](docs/quickstart.md).
 
 ## Customer-installable GitHub Action
 
-The [ReleaseGate Action](https://github.com/abishekgiri/releasegate-action) drops into any GitHub repository's workflow and signs that repository's deploys against your ReleaseGate tenant key. No infrastructure to operate. Tenant provisioning during the design-partner phase is by email — see [pricing](https://releasegate.io/pricing).
+The [ReleaseGate Action](https://github.com/releasegate/releasegate-action) drops into any GitHub repository's workflow and signs that repository's deploys against your ReleaseGate tenant key. No infrastructure to operate. Tenant provisioning during the design-partner phase is by email — see [pricing](https://app.releasegate.io/pricing).
 
 ## Dashboard
 
