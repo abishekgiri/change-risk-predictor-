@@ -1273,8 +1273,11 @@ def main() -> int:
                         )
                     except Exception as _persist_exc:
                         # Collisions on evaluation_key are expected on retries.
+                        # A missing/unreachable DB is the stateless customer
+                        # path (CI runner, no backend) — skip silently there.
+                        from releasegate.storage import is_storage_unavailable_error as _su
                         _msg = str(_persist_exc).lower()
-                        if "unique" in _msg or "duplicate" in _msg:
+                        if "unique" in _msg or "duplicate" in _msg or _su(_persist_exc):
                             pass
                         else:
                             errors.append(f"AUDIT_DECISION_PERSIST_FAILED: {_persist_exc}")
@@ -1426,8 +1429,13 @@ def main() -> int:
                             else:
                                 raise
                     except Exception as _fabric_exc:
+                        from releasegate.storage import is_storage_unavailable_error as _su
                         _fmsg = str(_fabric_exc).lower()
-                        if "unique" not in _fmsg and "duplicate" not in _fmsg:
+                        if (
+                            "unique" not in _fmsg
+                            and "duplicate" not in _fmsg
+                            and not _su(_fabric_exc)
+                        ):
                             errors.append(f"FABRIC_PERSIST_FAILED: {_fabric_exc}")
 
                     if args.emit_attestation:

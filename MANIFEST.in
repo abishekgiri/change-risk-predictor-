@@ -3,6 +3,7 @@ include LICENSE
 include CHANGELOG.md
 recursive-include releasegate *.json *.yaml *.yml *.txt *.md *.dsl
 recursive-include releasegate/attestation/schema *
+recursive-include releasegate/schemas *
 recursive-include releasegate/policy/compiled *
 recursive-include releasegate/policy/defaults *
 recursive-include releasegate/policy/dsl *

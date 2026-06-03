@@ -384,3 +384,31 @@ def build_attestation_from_bundle(bundle: DecisionBundle | Dict[str, Any]) -> Di
     }
 
     return ReleaseAttestation.model_validate(signed).model_dump(mode="json")
+
+
+def sign_release_attestation(
+    bundle: DecisionBundle | Dict[str, Any],
+) -> Dict[str, Any]:
+    """Sign a decision bundle into a DSSE envelope.  Pure, no database.
+
+    This is the stateless customer-install signing path: a CI runner with
+    no DB configured must be able to produce a verifiable DSSE attestation.
+    Composes the same primitives the analyze-pr CLI uses inline
+    (build_attestation_from_bundle -> build_intoto_statement -> wrap_dsse),
+    so the envelope wire format is identical to what the determinism
+    contract (PR #128) locks in.
+
+    Persistence is intentionally NOT part of this function — see
+    record_release_attestation() for the optional, backend-gated DB write.
+    """
+    from releasegate.attestation.intoto import build_intoto_statement
+    from releasegate.attestation.dsse import wrap_dsse
+    from releasegate.attestation.crypto import current_key_id, load_private_key_from_env
+
+    attestation = build_attestation_from_bundle(bundle)
+    statement = build_intoto_statement(attestation)
+    return wrap_dsse(
+        statement,
+        signing_key=load_private_key_from_env(),
+        key_id=current_key_id(),
+    )
