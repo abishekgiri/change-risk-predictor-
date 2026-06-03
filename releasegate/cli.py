@@ -26,6 +26,27 @@ def _parse_age_seconds(value: str) -> int:
     mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
     return n * mult
 
+
+def _missing_requested_artifact(args):
+    """Return (flag_name, path) for the first requested signed artifact
+    that was not written to disk, or None if every requested artifact
+    exists.
+
+    Used by analyze-pr to fail loud when --emit-dsse / --emit-attestation
+    were asked for but the file is absent (e.g. attestation generation
+    failed and was swallowed into errors[]).  Only requested artifacts
+    are checked — if a flag is unset we skip it.
+    """
+    checks = [
+        ("--emit-dsse", getattr(args, "emit_dsse", None)),
+        ("--emit-attestation", getattr(args, "emit_attestation", None)),
+    ]
+    for flag_name, path in checks:
+        if path and not os.path.isfile(path):
+            return (flag_name, path)
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="releasegate")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1530,6 +1551,22 @@ def main() -> int:
                 except Exception as e:
                     print(f"Warning: Failed to create check run: {e}", file=sys.stderr)
 
+            # Silent-green guard: if the caller asked for a signed artifact
+            # and it was not actually written, fail loud instead of exiting
+            # 0.  Otherwise the customer's CI (and the Marketplace Action)
+            # shows a green check while producing no signed attestation —
+            # the 2026-06-03 Tier 3 readiness-audit failure, and the same
+            # class of bug PR #124 fixed for compliance-check.yml.
+            missing_artifact = _missing_requested_artifact(args)
+            if missing_artifact is not None:
+                print(
+                    f"ATTESTATION_GENERATION_FAILED: {missing_artifact[0]} "
+                    f"requested but {missing_artifact[1]} was not written. "
+                    f"Check earlier errors in the run log.",
+                    file=sys.stderr,
+                )
+                return 2
+
             return exit_code_for_report(
                 enforcement_mode,
                 verdict=str(report.get("verdict") or "FAIL"),
@@ -1584,6 +1621,19 @@ def main() -> int:
                     print("Errors:")
                     for err in errors:
                         print(f" - {err}")
+
+            # Silent-green guard (exception path): if analysis failed AND
+            # the caller asked for a signed artifact that was never written,
+            # fail loud rather than letting monitor-mode exit 0.
+            missing_artifact = _missing_requested_artifact(args)
+            if missing_artifact is not None:
+                print(
+                    f"ATTESTATION_GENERATION_FAILED: {missing_artifact[0]} "
+                    f"requested but {missing_artifact[1]} was not written. "
+                    f"Check earlier errors in the run log.",
+                    file=sys.stderr,
+                )
+                return 2
 
             return exit_code_for_report(
                 enforcement_mode,

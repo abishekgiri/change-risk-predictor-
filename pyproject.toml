@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "releasegate"
 version = "2.2.0"
@@ -16,6 +20,32 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "PyYAML>=6.0",
     "GitPython>=3.1.0",
+]
+
+[tool.setuptools]
+# Ship the non-.py data files the engine reads at runtime (attestation
+# schema JSON, compiled/default policy YAMLs, DSL files).  Without this,
+# `pip install git+...` ships only .py files and the customer-facing
+# Action runs green but produces no signed attestation — the 2026-06-03
+# Tier 3 readiness-audit finding.
+include-package-data = true
+
+[tool.setuptools.package-data]
+# include-package-data already picks up git-tracked files; these explicit
+# globs make the contract visible to anyone reading pyproject.toml and
+# resilient to the build backend's file-discovery behaviour.
+"releasegate" = [
+    "**/*.json",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.txt",
+    "**/*.md",
+    "**/*.dsl",
+    "**/schema/*",
+    "**/templates/*",
+    "**/standards/**/*",
+    "**/compiled/**/*",
+    "**/defaults/**/*",
 ]
 
 [tool.setuptools.packages.find]
