@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -94,10 +93,10 @@ export default function LoginPage() {
           </button>
 
           <p className="text-center text-sm text-slate-500">
-            Don&apos;t have an account?{" "}
-            <Link href="/signup" className="font-medium text-slate-900 hover:underline">
-              Create one
-            </Link>
+            Need access?{" "}
+            <a href="mailto:hello@releasegate.io" className="font-medium text-slate-900 hover:underline">
+              Email hello@releasegate.io
+            </a>
           </p>
         </form>
       </div>

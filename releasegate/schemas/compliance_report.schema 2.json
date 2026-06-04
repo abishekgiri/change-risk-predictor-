@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReleaseGate Compliance Report (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "compliance_report_v1"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "WARN", "FAIL"]
+    },
+    "control_result": {
+      "type": "string",
+      "enum": ["PASS", "WARN", "BLOCK", "FAIL"]
+    },
+    "decision": {
+      "type": "string"
+    },
+    "decision_id": {
+      "type": "string"
+    },
+    "attestation_id": {
+      "type": ["string", "null"]
+    },
+    "signed_payload_hash": {
+      "type": ["string", "null"]
+    },
+    "severity": {
+      "type": ["number", "null"]
+    },
+    "severity_level": {
+      "type": ["string", "null"]
+    },
+    "risk_score": {
+      "type": ["number", "null"]
+    },
+    "risk_level": {
+      "type": ["string", "null"]
+    },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "changed_files_count": { "type": ["integer", "null"] },
+        "additions": { "type": ["integer", "null"] },
+        "deletions": { "type": ["integer", "null"] },
+        "total_churn": { "type": ["integer", "null"] }
+      },
+      "required": ["changed_files_count", "additions", "deletions", "total_churn"]
+    },
+    "dependency_provenance": {
+      "type": "object"
+    },
+    "attached_issue_keys": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "policy_hash": {
+      "type": ["string", "null"]
+    },
+    "policy_resolution_hash": {
+      "type": ["string", "null"]
+    },
+    "policy_scope": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "enforcement_mode": {
+      "type": "string",
+      "enum": ["monitor", "enforce"]
+    },
+    "dsse_path": {
+      "type": ["string", "null"]
+    },
+    "dsse_sigstore_bundle_path": {
+      "type": ["string", "null"]
+    },
+    "artifacts_sha256_path": {
+      "type": ["string", "null"]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "type": "string" },
+        "pr_number": { "type": "integer" },
+        "head_sha": { "type": ["string", "null"] },
+        "base_sha": { "type": ["string", "null"] },
+        "tenant_id": { "type": ["string", "null"] }
+      },
+      "required": ["repo", "pr_number", "head_sha", "base_sha", "tenant_id"]
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "schema_version",
+    "verdict",
+    "control_result",
+    "decision",
+    "decision_id",
+    "attestation_id",
+    "signed_payload_hash",
+    "severity",
+    "severity_level",
+    "risk_score",
+    "risk_level",
+    "reasons",
+    "reason_codes",
+    "metrics",
+    "dependency_provenance",
+    "attached_issue_keys",
+    "policy_hash",
+    "policy_resolution_hash",
+    "policy_scope",
+    "enforcement_mode",
+    "dsse_path",
+    "dsse_sigstore_bundle_path",
+    "artifacts_sha256_path",
+    "inputs",
+    "errors"
+  ]
+}
+
