@@ -1,3 +1,5 @@
+<!-- LEGACY — superseded; controls listed here are aspirational and not currently emitted by the engine. The engine emits SOC 2 CC8.1 only today. -->
+
 # Policy Authoring Guide
 
 ## Best Practices

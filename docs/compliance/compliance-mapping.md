@@ -1,3 +1,5 @@
+<!-- TARGET-STATE / ASPIRATIONAL — the control mappings below describe intended coverage, not current behavior. The engine emits SOC 2 CC8.1 (change authorization) evidence only today. Do not represent any other control number to an auditor or customer as currently emitted. -->
+
 # Compliance Control Mapping
 
 This reference maps ReleaseGate capabilities to common governance and compliance frameworks.
