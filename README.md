@@ -12,6 +12,8 @@ Every approved change produces a portable evidence pack — a signed bundle that
 
 ## Five-minute quickstart
 
+Requires Python 3.10 or higher.
+
 ```bash
 # 1. Install
 pip install -r requirements.txt

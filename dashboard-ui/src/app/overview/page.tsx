@@ -83,21 +83,72 @@ export default async function OverviewPage({
   const scope = resolveDashboardScope(resolvedSearchParams);
   const baseQuery = scopeToQuery(scope);
 
-  const overviewResp = await backendFetch<DashboardOverview>("/dashboard/overview", {
-    method: "GET",
-    query: {
-      ...baseQuery,
-      blocked_limit: 25,
-    },
-  });
-  const alertsResp = await backendFetch<DashboardAlerts>("/dashboard/alerts", {
-    method: "GET",
-    query: baseQuery,
-  });
-  const blockedResp = await backendFetch<BlockedPagePayload>("/dashboard/blocked", {
-    method: "GET",
-    query: { ...baseQuery, limit: 25 },
-  });
+  let overviewResp: { data: DashboardOverview; traceId: string | null; status: number };
+  try {
+    overviewResp = await backendFetch<DashboardOverview>("/dashboard/overview", {
+      method: "GET",
+      query: {
+        ...baseQuery,
+        blocked_limit: 25,
+      },
+    });
+  } catch {
+    overviewResp = {
+      data: {
+        trace_id: "",
+        tenant_id: scope.tenantId,
+        integrity_score: 0,
+        integrity_trend: [],
+        drift_index: 0,
+        drift_trend: [],
+        override_rate: 0,
+        override_rate_trend: [],
+        drift: { current: 0, breakdown: null },
+        active_strict_modes: [],
+        recent_blocked: [],
+      },
+      traceId: null,
+      status: 500,
+    };
+  }
+
+  let alertsResp: { data: DashboardAlerts; traceId: string | null; status: number };
+  try {
+    alertsResp = await backendFetch<DashboardAlerts>("/dashboard/alerts", {
+      method: "GET",
+      query: baseQuery,
+    });
+  } catch {
+    alertsResp = {
+      data: {
+        trace_id: "",
+        tenant_id: scope.tenantId,
+        window_days: scope.windowDays,
+        current_override_abuse_index: 0,
+        alerts: [],
+      },
+      traceId: null,
+      status: 500,
+    };
+  }
+
+  let blockedResp: { data: BlockedPagePayload; traceId: string | null; status: number };
+  try {
+    blockedResp = await backendFetch<BlockedPagePayload>("/dashboard/blocked", {
+      method: "GET",
+      query: { ...baseQuery, limit: 25 },
+    });
+  } catch {
+    blockedResp = {
+      data: {
+        trace_id: "",
+        items: [],
+        next_cursor: null,
+      },
+      traceId: null,
+      status: 500,
+    };
+  }
   let recommendationsResp:
     | { data: GovernanceRecommendationsResponse; traceId: string | null; status: number }
     | null = null;
