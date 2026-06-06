@@ -120,9 +120,6 @@ export default async function DecisionPage({
             <Link href={scopedHref("/policies/diff")} className="text-indigo-700 hover:underline">
               Policy changes
             </Link>
-            <Link href={scopedHref("/overrides")} className="text-indigo-700 hover:underline">
-              View exceptions
-            </Link>
             {safeReplay ? (
               <a
                 href={safeReplay}
