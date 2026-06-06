@@ -10736,51 +10736,10 @@ def fabric_github_pr_check(
 # Phase 9 — Commercial Proof endpoints
 # ===========================================================================
 
-# ---------------------------------------------------------------------------
-# POST /commercial/roi-estimate
-# ---------------------------------------------------------------------------
-
-class ROIEstimateRequest(BaseModel):
-    team_size: int
-    deploys_per_week: float
-    incidents_per_month: float
-    audit_hours_per_year: float
-    avg_engineer_hourly_rate: Optional[float] = None
-    avg_incident_cost: Optional[float] = None
-    monthly_license_usd: Optional[float] = None
-
-
-@app.post("/commercial/roi-estimate")
-def commercial_roi_estimate(
-    body: ROIEstimateRequest,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator", "viewer"],
-        scopes=["policy:read"],
-        rate_profile="read_heavy",
-        allow_internal_service=True,
-    ),
-):
-    """Calculate ROI for a prospect or tenant.
-
-    No tenant context required — can be called with anonymous/demo credentials
-    to power the pre-sales ROI calculator.
-    """
-    from releasegate.commercial.roi_calculator import calculate_roi
-
-    kwargs = dict(
-        team_size=body.team_size,
-        deploys_per_week=body.deploys_per_week,
-        incidents_per_month=body.incidents_per_month,
-        audit_hours_per_year=body.audit_hours_per_year,
-    )
-    if body.avg_engineer_hourly_rate is not None:
-        kwargs["avg_engineer_hourly_rate"] = body.avg_engineer_hourly_rate
-    if body.avg_incident_cost is not None:
-        kwargs["avg_incident_cost"] = body.avg_incident_cost
-    if body.monthly_license_usd is not None:
-        kwargs["monthly_license_usd"] = body.monthly_license_usd
-
-    return JSONResponse(content=calculate_roi(**kwargs))
+# POST /commercial/roi-estimate — REMOVED (post-audit cleanup 2026-06-04).
+# Internal pre-sales ROI calculator; its dashboard consumer was deleted in
+# PR #133 and the endpoint was a zombie surface. Backing module
+# roi_calculator.py deleted with it.
 
 
 # ---------------------------------------------------------------------------
@@ -10811,144 +10770,10 @@ def commercial_proof_metrics(
     )
 
 
-# ---------------------------------------------------------------------------
-# GET/POST /commercial/pilots
-# ---------------------------------------------------------------------------
-
-class CreatePilotRequest(BaseModel):
-    company_name: str
-    contact_name: Optional[str] = None
-    contact_email: Optional[str] = None
-    tenant_id: Optional[str] = None
-    icp_band: str = "MEDIUM"
-    status: str = "PROSPECT"
-    pilot_start_date: Optional[str] = None
-    pilot_end_date: Optional[str] = None
-    monthly_value_usd: Optional[float] = None
-    notes: Optional[str] = None
-    before_metrics: Optional[dict] = None
-
-
-@app.post("/commercial/pilots")
-def commercial_create_pilot(
-    body: CreatePilotRequest,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator"],
-        scopes=["enforcement:write"],
-        rate_profile="default",
-        allow_internal_service=True,
-    ),
-):
-    """Register a new design partner or paid pilot."""
-    from releasegate.commercial.pilot_tracker import create_pilot
-
-    try:
-        pilot = create_pilot(
-            company_name=body.company_name,
-            contact_name=body.contact_name,
-            contact_email=body.contact_email,
-            tenant_id=body.tenant_id,
-            icp_band=body.icp_band,
-            status=body.status,
-            pilot_start_date=body.pilot_start_date,
-            pilot_end_date=body.pilot_end_date,
-            monthly_value_usd=body.monthly_value_usd,
-            notes=body.notes,
-            before_metrics=body.before_metrics,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return JSONResponse(status_code=201, content=pilot)
-
-
-@app.get("/commercial/pilots")
-def commercial_list_pilots(
-    status: Optional[str] = None,
-    icp_band: Optional[str] = None,
-    limit: int = 100,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator"],
-        scopes=["policy:read"],
-        rate_profile="read_heavy",
-        allow_internal_service=True,
-    ),
-):
-    """List all pilots with optional status/icp_band filter."""
-    from releasegate.commercial.pilot_tracker import list_pilots, pipeline_summary
-
-    pilots = list_pilots(status=status, icp_band=icp_band, limit=min(limit, 500))
-    summary = pipeline_summary()
-    return JSONResponse(content={"pilots": pilots, "pipeline": summary})
-
-
-# ---------------------------------------------------------------------------
-# GET/PATCH /commercial/pilots/{pilot_id}
-# ---------------------------------------------------------------------------
-
-class UpdatePilotRequest(BaseModel):
-    status: Optional[str] = None
-    notes: Optional[str] = None
-    tenant_id: Optional[str] = None
-    icp_band: Optional[str] = None
-    pilot_start_date: Optional[str] = None
-    pilot_end_date: Optional[str] = None
-    monthly_value_usd: Optional[float] = None
-    before_metrics: Optional[dict] = None
-    after_metrics: Optional[dict] = None
-    contact_name: Optional[str] = None
-    contact_email: Optional[str] = None
-
-
-@app.get("/commercial/pilots/{pilot_id}")
-def commercial_get_pilot(
-    pilot_id: str,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator"],
-        scopes=["policy:read"],
-        rate_profile="read_heavy",
-        allow_internal_service=True,
-    ),
-):
-    from releasegate.commercial.pilot_tracker import get_pilot
-
-    pilot = get_pilot(pilot_id)
-    if not pilot:
-        raise HTTPException(status_code=404, detail=f"Pilot '{pilot_id}' not found")
-    return JSONResponse(content=pilot)
-
-
-@app.patch("/commercial/pilots/{pilot_id}")
-def commercial_update_pilot(
-    pilot_id: str,
-    body: UpdatePilotRequest,
-    auth: AuthContext = require_access(
-        roles=["admin", "operator"],
-        scopes=["enforcement:write"],
-        rate_profile="default",
-        allow_internal_service=True,
-    ),
-):
-    """Update pilot status, metrics snapshots, or any mutable field."""
-    from releasegate.commercial.pilot_tracker import update_pilot
-
-    try:
-        pilot = update_pilot(
-            pilot_id,
-            status=body.status,
-            notes=body.notes,
-            tenant_id=body.tenant_id,
-            icp_band=body.icp_band,
-            pilot_start_date=body.pilot_start_date,
-            pilot_end_date=body.pilot_end_date,
-            monthly_value_usd=body.monthly_value_usd,
-            before_metrics=body.before_metrics,
-            after_metrics=body.after_metrics,
-            contact_name=body.contact_name,
-            contact_email=body.contact_email,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    return JSONResponse(content=pilot)
+# GET/POST/PATCH /commercial/pilots — REMOVED (post-audit cleanup 2026-06-04).
+# Internal design-partner/pilot tracker; its dashboard consumer was deleted in
+# PR #133 and the endpoints were a zombie surface. Backing module
+# pilot_tracker.py deleted with it. Track pilots in your CRM, not the product.
 
 
 # GET /commercial/icp-score — REMOVED (Phase 0 kill list).
